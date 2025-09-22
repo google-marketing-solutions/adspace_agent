@@ -1,0 +1,9 @@
+*.egg-info
+.pytest_cache
+.pytype
+.ruff_cache
+.venv
+google-ads.yaml
+DEVELOPMENT.md
+.env
+dist

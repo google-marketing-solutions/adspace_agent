@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Toolset for an AI to ping specific Genai endpoints in Google Cloud."""
+"""A set of tools for the AdSpace Agent to interact with Google Cloud GenAI."""
 
 import os
 from typing import override
@@ -25,67 +25,67 @@ from google.adk.tools.base_toolset import BaseToolset
 
 @FunctionTool
 def get_info_about_youtube_video(
-    external_video_id: str, prompt: str
-) -> dict[str, str]:
-  """Passed video url to Gemini to answer the prompt.
+    youtube_video_id: str, prompt: str
+) -> dict[str, str | None]:
+    """Gets info about a YouTube video based on a prompt.
 
-  This function is used to give an AI the ability to answer
-  questions about a video, be it visual, audio or both.
+    This function gives the ability to prompt a YouTube video and ask questions
+    about the video's visual, audio, and more. It also provides answers to the
+    prompt.
 
-  Args:
-    external_video_id:  External video id, found at the end of a YouTube url.
-    prompt: The prompt used to summarize the video.
+    Args:
+      youtube_video_id: The external YouTube video ID, found at the end of a
+        YouTube URL in the `v` parameter. For example, in the URL
+        `https://www.youtube.com/watch?v=abc123`, the `youtube_video_id` would
+        be `abc123`.
+      prompt: The prompt used to ask the YouTube video questions about itself.
 
-  Returns:
-    Dictioanry with a status.  If the call failed, the error will be
-    returned in the error_details field.  If the call succeeded, the
-    response to the prompt will be returned in the response field.
-  """
+    Returns:
+      Dictionary with a status. If the call failed, the error will be returned
+      in the error_details field. If the call succeeded, the response to the
+      prompt will be returned in the response field.
+    """
+    try:
+        youtube_video_url = "https://www.youtube.com/watch?v="
 
-  try:
+        genai_client = genai.Client(
+            vertexai=True,
+            project=os.environ["GOOGLE_CLOUD_PROJECT"],
+            location=os.environ["GOOGLE_CLOUD_LOCATION"],
+        )
 
-    video_url = "https://www.youtube.com/watch?v="
+        contents = genai.types.Content(
+            parts=[
+                genai.types.Part(
+                    file_data=genai.types.FileData(
+                        file_uri=f"{youtube_video_url}{youtube_video_id}",
+                        mime_type="video/mp4",
+                    )
+                ),
+                genai.types.Part(text=prompt),
+            ],
+            role="user",
+        )
 
-    genai_client = genai.Client(
-        vertexai=True,
-        project=os.environ["GOOGLE_CLOUD_PROJECT"],
-        location=os.environ["GOOGLE_CLOUD_LOCATION"],
-    )
+        response = genai_client.models.generate_content(
+            model="gemini-2.5-pro", contents=[contents]
+        )
 
-    contents = genai.types.Content(
-        parts=[
-            genai.types.Part(
-                file_data=genai.types.FileData(
-                    file_uri=f"{video_url}{external_video_id}",
-                    mime_type="video/mp4",
-                )
-            ),
-            genai.types.Part(text=prompt),
-        ],
-        role="user",
-    )
+        return {"status": "SUCCESS", "response": response.text}
 
-    response = genai_client.models.generate_content(
-        model=os.environ["GEMINI_MODEL"], contents=[contents]
-    )
-
-    return {"status": "SUCCESS", "response": response.text}
-
-  except Exception as e:
-
-    return {
-        "status": "ERROR",
-        "error_details": str(e),
-    }
+    except Exception as ex:  # pylint: disable=broad-exception-caught
+        return {
+            "status": "ERROR",
+            "error_details": str(ex),
+        }
 
 
-class GoogleGenaiToolset(BaseToolset):
-  """A custom toolset for calling Google Genai APIs."""
+class GoogleGenAIToolset(BaseToolset):
+    """A custom toolset for calling Google GenAI APIs."""
 
-  @override
-  async def get_tools(
-      self,
-      readonly_context: ReadonlyContext | None = None,
-  ) -> list[BaseTool]:
-
-    return [get_info_about_youtube_video]
+    @override
+    async def get_tools(  # pytype: disable=override-error
+        self,
+        readonly_context: ReadonlyContext | None = None,  # pylint: disable=unused-argument
+    ) -> list[BaseTool]:
+        return [get_info_about_youtube_video]

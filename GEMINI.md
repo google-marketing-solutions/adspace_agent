@@ -22,12 +22,16 @@
 - Install Python: `mise install`
 - Install the dependencies: `uv venv` and then `uv sync --all-extras`
 - Run the pre-commit hooks: `uv run pre-commit run --all-files`
+
+## Testing
+
 - Run the tests: `uv run pytest`
 
 ## Formatting and Linting
 
-- Use `ruff` for formatting. Run: `uv run ruff format --all-files`
-- Use `ruff` for linting. Run: `uv run ruff check --all-files`
+- Use `ruff` for formatting: `uv run ruff format`
+- Use `ruff` for linting: `uv run ruff check`
+- Use `basedpyright` for type checking: `uv run basedpyright`
 
 ## Testing Instructions
 

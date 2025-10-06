@@ -177,7 +177,7 @@ def account_hierarchy(
             "status": "SUCCESS",
             "data": result,
         }
-    except Exception as ex:  # pylint: disable=broad-exception-caught  # pylint: disable=broad-exception-caught
+    except Exception as ex:  # pylint: disable=broad-exception-caught
         return {
             "status": "ERROR",
             "error_details": str(ex),

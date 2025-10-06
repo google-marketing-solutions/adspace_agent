@@ -21,6 +21,7 @@ from google.adk.tools.google_api_tool import GoogleApiToolset
 from google.adk.tools.google_api_tool import YoutubeToolset
 
 from adspace_agent.tools.google_ads import GoogleAdsToolset
+from adspace_agent.tools.google_genai import GoogleGenAIToolset
 from adspace_agent.tools.utilities import UtilitiesToolset
 
 bid_manager_toolset = GoogleApiToolset(
@@ -145,6 +146,7 @@ root_agent = Agent(
         search_ads_360_toolset,
         storage_toolset,
         youtube_toolset,
+        GoogleGenAIToolset(),
         GoogleAdsToolset(),
         UtilitiesToolset(),
     ],

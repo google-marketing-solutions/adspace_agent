@@ -18,4 +18,4 @@ WORKDIR /app
 COPY . ./
 RUN uv sync --locked
 EXPOSE 8000
-ENTRYPOINT ["uv", "run", "adk", "web", "--port", "8000", "--host", "0.0.0.0"]
+ENTRYPOINT ["uv", "run", "adk", "web", "--port", "8000", "--host", "0.0.0.0", "--no-reload"]

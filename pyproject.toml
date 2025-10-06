@@ -52,7 +52,8 @@ authors = [
 dependencies = [
   "fastapi",
   "google-adk",
-  "google-ads"
+  "google-ads==28.0.0",
+  "google-genai>=1.40.0"
 ]
 
 [tool.commitizen]

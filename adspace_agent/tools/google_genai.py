@@ -14,13 +14,17 @@
 """A set of tools for the AdSpace Agent to interact with Google Cloud GenAI."""
 
 import os
+import time
 from typing import override
 
 from google import genai
+from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.tools import BaseTool
 from google.adk.tools import FunctionTool
 from google.adk.tools.base_toolset import BaseToolset
+import google.genai.types as types
+from google.genai.types import Part
 
 
 @FunctionTool
@@ -72,7 +76,94 @@ def get_info_about_youtube_video(
         )
 
         return {"status": "SUCCESS", "response": response.text}
+    except Exception as ex:  # pylint: disable=broad-exception-caught
+        return {
+            "status": "ERROR",
+            "error_details": str(ex),
+        }
 
+
+@FunctionTool
+async def generate_video(
+    prompt: str,
+    filename: str,
+    tool_context: CallbackContext,
+) -> dict[str, str | Part]:
+    """Generates a video from a prompt using Google GenAI' Veo 3 model.
+
+    Args:
+        prompt (str): The prompt to use for creating the video.
+        filename (str): The filename to use for the generated video.
+        tool_context (CallbackContext): The callback context.
+
+    Returns:
+        dict[str, str | Part]: A dictionary containing the status of the
+            operation and the response.
+    """
+    try:
+        client = genai.Client(
+            vertexai=True,
+            project=os.environ["GOOGLE_CLOUD_PROJECT"],
+            location=os.environ["GOOGLE_CLOUD_LOCATION"],
+        )
+
+        operation = client.models.generate_videos(
+            model="veo-3.0-generate-001",
+            prompt=prompt,
+        )
+
+        while not operation.done:
+            print("Waiting for video generation to complete...")
+            time.sleep(10)
+            operation = client.operations.get(operation)
+
+        if not operation.response:
+            return {
+                "status": "ERROR",
+                "error_details": "Video generation failed: No response.",
+            }
+
+        if not operation.response.generated_videos:
+            return {
+                "status": "ERROR",
+                "error_details": (
+                    "Video generation failed: No videos generated."
+                ),
+            }
+
+        generated_video = operation.response.generated_videos[0]
+        if not generated_video.video:
+            return {
+                "status": "ERROR",
+                "error_details": (
+                    "Video generation failed: Missing video data."
+                ),
+            }
+
+        video_bytes = generated_video.video.video_bytes
+        mime_type = generated_video.video.mime_type
+
+        if not video_bytes or not mime_type:
+            return {
+                "status": "ERROR",
+                "error_details": (
+                    "Video generation failed: Empty video content."
+                ),
+            }
+
+        video_artifact = types.Part(
+            inline_data=types.Blob(mime_type=mime_type, data=video_bytes)
+        )
+
+        version = await tool_context.save_artifact(
+            filename=filename,
+            artifact=video_artifact,
+        )
+
+        return {
+            "status": "SUCCESS",
+            "message": f"Generated video: '{filename}' (version: {version}).",
+        }
     except Exception as ex:  # pylint: disable=broad-exception-caught
         return {
             "status": "ERROR",
@@ -88,4 +179,4 @@ class GoogleGenAIToolset(BaseToolset):
         self,
         readonly_context: ReadonlyContext | None = None,  # pylint: disable=unused-argument
     ) -> list[BaseTool]:
-        return [get_info_about_youtube_video]
+        return [get_info_about_youtube_video, generate_video]

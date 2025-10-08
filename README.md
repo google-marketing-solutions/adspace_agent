@@ -41,6 +41,22 @@ Run the ADK webserver locally:
 uv run adk web
 ```
 
+### GoogleApiToolkit
+The APIs and Versions that can be used with this class can be found running
+the below:
+
+```
+from googleapiclient import discovery
+
+service = discovery.build('discovery', 'v1')
+
+request = service.apis().list()
+response = request.execute()
+
+for api in response.get('items', []):
+  print(api.get('name'), api.get('version'))
+```
+
 ## Contributing
 
 Want to contribute? [Learn more](CONTRIBUTING.md)

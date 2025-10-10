@@ -42,8 +42,9 @@ uv run adk web
 ```
 
 ### GoogleApiToolkit
-The APIs and Versions that can be used with this class can be found running
-the below:
+
+The APIs and Versions that can be used with this class can be found running the
+below:
 
 ```
 from googleapiclient import discovery

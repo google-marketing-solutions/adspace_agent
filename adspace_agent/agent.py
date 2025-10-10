@@ -70,6 +70,27 @@ drive_toolset = GoogleApiToolset(
     ],
 )
 
+merchant_center_inventories_toolset = GoogleApiToolset(
+    client_id=os.environ["CLIENT_ID"],
+    client_secret=os.environ["CLIENT_SECRET"],
+    api_name="merchantapi",
+    api_version="inventories_v1",
+)
+
+merchant_center_products_toolset = GoogleApiToolset(
+    client_id=os.environ["CLIENT_ID"],
+    client_secret=os.environ["CLIENT_SECRET"],
+    api_name="merchantapi",
+    api_version="products_v1",
+)
+
+merchant_center_reports_toolset = GoogleApiToolset(
+    client_id=os.environ["CLIENT_ID"],
+    client_secret=os.environ["CLIENT_SECRET"],
+    api_name="merchantapi",
+    api_version="reports_v1",
+)
+
 search_ads_360_toolset = GoogleApiToolset(
     client_id=os.environ["CLIENT_ID"],
     client_secret=os.environ["CLIENT_SECRET"],
@@ -125,27 +146,6 @@ youtube_toolset = YoutubeToolset(
     ],
 )
 
-merchant_center_inventories_toolset = GoogleApiToolset(
-    client_id=os.environ["CLIENT_ID"],
-    client_secret=os.environ["CLIENT_SECRET"],
-    api_name="merchantapi",
-    api_version="inventories_v1",
-)
-
-merchant_center_reports_toolset = GoogleApiToolset(
-    client_id=os.environ["CLIENT_ID"],
-    client_secret=os.environ["CLIENT_SECRET"],
-    api_name="merchantapi",
-    api_version="reports_v1",
-)
-
-merchant_center_products_toolset = GoogleApiToolset(
-    client_id=os.environ["CLIENT_ID"],
-    client_secret=os.environ["CLIENT_SECRET"],
-    api_name="merchantapi",
-    api_version="products_v1",
-)
-
 root_agent = Agent(
     name="adspace_agent",
     model="gemini-2.5-pro",
@@ -164,14 +164,14 @@ root_agent = Agent(
         campaign_manager_360_toolset,
         display_video_360_toolset,
         drive_toolset,
+        merchant_center_inventories_toolset,
+        merchant_center_products_toolset,
+        merchant_center_reports_toolset,
         search_ads_360_toolset,
         storage_toolset,
         youtube_toolset,
-        merchant_center_inventories_toolset,
-        merchant_center_reports_toolset,
-        merchant_center_products_toolset,
-        GoogleGenAIToolset(),
         GoogleAdsToolset(),
+        GoogleGenAIToolset(),
         UtilitiesToolset(),
     ],
 )

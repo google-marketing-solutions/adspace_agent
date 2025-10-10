@@ -171,6 +171,83 @@ async def generate_video(
         }
 
 
+@FunctionTool
+async def generate_image(
+    prompt: str,
+    filename: str,
+    tool_context: CallbackContext,
+) -> dict[str, str | Part]:
+    """Generates an image from a prompt using Google GenAI's Imagen 3 model.
+
+    Args:
+        prompt (str): The prompt to use for creating the image.
+        filename (str): The filename to use for the generated image.
+        tool_context (CallbackContext): The callback context.
+
+    Returns:
+        dict[str, str | Part]: A dictionary containing the status of the
+            operation and the response.
+    """
+    try:
+        client = genai.Client(
+            vertexai=True,
+            project=os.environ["GOOGLE_CLOUD_PROJECT"],
+            location=os.environ["GOOGLE_CLOUD_LOCATION"],
+        )
+
+        response = client.models.generate_images(
+            model="imagen-3.0-generate-001",
+            prompt=prompt,
+        )
+
+        if not response.generated_images:
+            return {
+                "status": "ERROR",
+                "error_details": (
+                    "Image generation failed: No images generated."
+                ),
+            }
+
+        generated_image = response.generated_images[0]
+        if not generated_image.image:
+            return {
+                "status": "ERROR",
+                "error_details": (
+                    "Image generation failed: Missing image data."
+                ),
+            }
+
+        image_bytes = generated_image.image.image_bytes
+        mime_type = generated_image.image.mime_type
+
+        if not image_bytes or not mime_type:
+            return {
+                "status": "ERROR",
+                "error_details": (
+                    "Image generation failed: Empty image content."
+                ),
+            }
+
+        image_artifact = types.Part(
+            inline_data=types.Blob(mime_type=mime_type, data=image_bytes)
+        )
+
+        version = await tool_context.save_artifact(
+            filename=filename,
+            artifact=image_artifact,
+        )
+
+        return {
+            "status": "SUCCESS",
+            "message": f"Generated image: '{filename}' (version: {version}).",
+        }
+    except Exception as ex:  # pylint: disable=broad-exception-caught
+        return {
+            "status": "ERROR",
+            "error_details": str(ex),
+        }
+
+
 class GoogleGenAIToolset(BaseToolset):
     """A custom toolset for calling Google GenAI APIs."""
 
@@ -179,4 +256,4 @@ class GoogleGenAIToolset(BaseToolset):
         self,
         readonly_context: ReadonlyContext | None = None,  # pylint: disable=unused-argument
     ) -> list[BaseTool]:
-        return [get_info_about_youtube_video, generate_video]
+        return [get_info_about_youtube_video, generate_video, generate_image]

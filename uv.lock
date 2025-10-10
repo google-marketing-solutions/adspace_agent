@@ -18,7 +18,7 @@ wheels = [
 
 [[package]]
 name = "adspace-agent"
-version = "0.0.0"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },

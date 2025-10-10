@@ -41,7 +41,7 @@ dev = [
 [project]
 name = "adspace_agent"
 description = "AdSpace Agent is designed to provide a standardized way to integrate an LLM with Google Ads, YouTube, Google Cloud, and Google Search to form a more comprehensive campaign and marketing plan for agencies."
-version = "0.0.0"
+version = "0.9.0"
 requires-python = ">=3.12"
 readme = "README.md"
 license-files = ["LICENSE"]

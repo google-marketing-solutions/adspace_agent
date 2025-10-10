@@ -262,6 +262,157 @@ async def test_google_genai_toolset():
     """Tests that the GoogleGenAIToolset returns the correct tools."""
     toolset = google_genai.GoogleGenAIToolset()
     tools = await toolset.get_tools()
-    assert len(tools) == 2
+    assert len(tools) == 3
     assert tools[0] is google_genai.get_info_about_youtube_video
     assert tools[1] is google_genai.generate_video
+    assert tools[2] is google_genai.generate_image
+
+
+@pytest.mark.asyncio
+@mock.patch.dict(
+    "os.environ",
+    {
+        "GOOGLE_CLOUD_PROJECT": "test-project",
+        "GOOGLE_CLOUD_LOCATION": "test-location",
+    },
+)
+@mock.patch("google.genai.Client")
+async def test_generate_image_success(mock_genai_client: mock.Mock):
+    """Tests that generate_image returns a success status."""
+    mock_response = mock.Mock()
+    mock_response.generated_images = [mock.Mock()]
+    mock_response.generated_images[0].image.image_bytes = b"test_image"
+    mock_response.generated_images[0].image.mime_type = "image/png"
+    mock_genai_client.return_value.models.generate_images.return_value = (
+        mock_response
+    )
+
+    mock_tool_context = mock.AsyncMock()
+    mock_tool_context.save_artifact.return_value = "v1"
+
+    result = await google_genai.generate_image.func(
+        "test_prompt", "test_filename", mock_tool_context
+    )
+
+    assert result["status"] == "SUCCESS"
+    assert (
+        result["message"] == "Generated image: 'test_filename' (version: v1)."
+    )
+
+
+@pytest.mark.asyncio
+@mock.patch.dict(
+    "os.environ",
+    {
+        "GOOGLE_CLOUD_PROJECT": "test-project",
+        "GOOGLE_CLOUD_LOCATION": "test-location",
+    },
+)
+@mock.patch("google.genai.Client")
+async def test_generate_image_no_generated_images(mock_genai_client: mock.Mock):
+    """Tests that generate_image handles no generated images."""
+    mock_response = mock.Mock()
+    mock_response.generated_images = []
+    mock_genai_client.return_value.models.generate_images.return_value = (
+        mock_response
+    )
+
+    mock_tool_context = mock.AsyncMock()
+
+    result = await google_genai.generate_image.func(
+        "test_prompt", "test_filename", mock_tool_context
+    )
+
+    assert result["status"] == "ERROR"
+    assert (
+        result["error_details"]
+        == "Image generation failed: No images generated."
+    )
+
+
+@pytest.mark.asyncio
+@mock.patch.dict(
+    "os.environ",
+    {
+        "GOOGLE_CLOUD_PROJECT": "test-project",
+        "GOOGLE_CLOUD_LOCATION": "test-location",
+    },
+)
+@mock.patch("google.genai.Client")
+async def test_generate_image_missing_image_data(mock_genai_client: mock.Mock):
+    """Tests that generate_image handles missing image data."""
+    mock_response = mock.Mock()
+    mock_response.generated_images = [mock.Mock()]
+    mock_response.generated_images[0].image = None
+    mock_genai_client.return_value.models.generate_images.return_value = (
+        mock_response
+    )
+
+    mock_tool_context = mock.AsyncMock()
+
+    result = await google_genai.generate_image.func(
+        "test_prompt", "test_filename", mock_tool_context
+    )
+
+    assert result["status"] == "ERROR"
+    assert (
+        result["error_details"]
+        == "Image generation failed: Missing image data."
+    )
+
+
+@pytest.mark.asyncio
+@mock.patch.dict(
+    "os.environ",
+    {
+        "GOOGLE_CLOUD_PROJECT": "test-project",
+        "GOOGLE_CLOUD_LOCATION": "test-location",
+    },
+)
+@mock.patch("google.genai.Client")
+async def test_generate_image_empty_image_content(mock_genai_client: mock.Mock):
+    """Tests that generate_image handles empty image content."""
+    mock_response = mock.Mock()
+    mock_response.generated_images = [mock.Mock()]
+    mock_response.generated_images[0].image.image_bytes = None
+    mock_response.generated_images[0].image.mime_type = None
+    mock_genai_client.return_value.models.generate_images.return_value = (
+        mock_response
+    )
+
+    mock_tool_context = mock.AsyncMock()
+
+    result = await google_genai.generate_image.func(
+        "test_prompt", "test_filename", mock_tool_context
+    )
+
+    assert result["status"] == "ERROR"
+    assert (
+        result["error_details"]
+        == "Image generation failed: Empty image content."
+    )
+
+
+@pytest.mark.asyncio
+@mock.patch.dict(
+    "os.environ",
+    {
+        "GOOGLE_CLOUD_PROJECT": "test-project",
+        "GOOGLE_CLOUD_LOCATION": "test-location",
+    },
+)
+@mock.patch("google.genai.Client")
+async def test_generate_image_exception(mock_genai_client: mock.Mock):
+    """Tests that generate_image handles exceptions."""
+    mock_genai_client.return_value.models.generate_images.side_effect = (
+        Exception("Test error")
+    )
+
+    mock_tool_context = mock.AsyncMock()
+
+    result = await google_genai.generate_image.func(
+        "test_prompt", "test_filename", mock_tool_context
+    )
+
+    assert result["status"] == "ERROR"
+    assert result["error_details"] == "Test error"

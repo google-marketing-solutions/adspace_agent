@@ -20,6 +20,7 @@ from google.adk.tools.google_api_tool import BigQueryToolset
 from google.adk.tools.google_api_tool import GoogleApiToolset
 from google.adk.tools.google_api_tool import YoutubeToolset
 
+from adspace_agent.tools.data_analysis import DataAnalysisToolset
 from adspace_agent.tools.google_ads import GoogleAdsToolset
 from adspace_agent.tools.google_genai import GoogleGenAIToolset
 from adspace_agent.tools.utilities import UtilitiesToolset
@@ -170,6 +171,29 @@ root_agent = Agent(
         search_ads_360_toolset,
         storage_toolset,
         youtube_toolset,
+        # MCPToolset(
+        #     connection_params=StdioConnectionParams(
+        #         server_params=StdioServerParameters(
+        #             command="uvx",
+        #             args=[
+        #                 "git+https://github.com/googleads/google-ads-mcp.git",
+        #             ],
+        #             env={
+        #                 "GOOGLE_APPLICATION_CREDENTIALS": os.environ[
+        #                     "GOOGLE_APPLICATION_CREDENTIALS"
+        #                 ],
+        #                 "GOOGLE_PROJECT_ID": os.environ["GOOGLE_PROJECT_ID"],
+        #                 "GOOGLE_ADS_DEVELOPER_TOKEN": os.environ[
+        #                     "GOOGLE_ADS_DEVELOPER_TOKEN"
+        #                 ],
+        #                 "GOOGLE_ADS_LOGIN_CUSTOMER_ID": os.environ[
+        #                     "GOOGLE_ADS_LOGIN_CUSTOMER_ID"
+        #                 ],
+        #             },
+        #         )
+        #     )
+        # ),
+        DataAnalysisToolset(),
         GoogleAdsToolset(),
         GoogleGenAIToolset(),
         UtilitiesToolset(),

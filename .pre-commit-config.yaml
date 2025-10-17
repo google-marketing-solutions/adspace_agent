@@ -18,10 +18,11 @@ repos:
     rev: v25.07.18.000003
     hooks:
       - id: pylint-ruff-sync
+        args: ["--disable-pylint-cleaner"]
 
   # uv
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.9.1
+    rev: 0.9.3
     hooks:
       - id: uv-lock
 
@@ -63,7 +64,7 @@ repos:
 
   # Python
   - repo: https://github.com/pylint-dev/pylint
-    rev: v3.3.9
+    rev: v4.0.1
     hooks:
       - id: pylint
   - repo: https://github.com/google/pytype
@@ -71,11 +72,11 @@ repos:
     hooks:
       - id: pytype
   - repo: https://github.com/DetachHead/basedpyright-pre-commit-mirror
-    rev: 1.31.6
+    rev: 1.31.7
     hooks:
       - id: basedpyright
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.0
+    rev: v0.14.1
     hooks:
       - id: ruff-check
         args:
@@ -94,13 +95,13 @@ repos:
 
   # Markdown
   - repo: https://github.com/executablebooks/mdformat
-    rev: 0.7.22
+    rev: 1.0.0
     hooks:
       - id: mdformat
         additional_dependencies:
-          - mdformat-config
-          - mdformat-footnote
-          - mdformat-frontmatter
+          # - mdformat-config
+          # - mdformat-footnote
+          # - mdformat-frontmatter
           - mdformat-gfm
           - mdformat-gfm-alerts
           - mdformat-ruff

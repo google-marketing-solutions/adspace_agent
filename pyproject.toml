@@ -35,7 +35,8 @@ dev = [
   "pytype",
   "pyright",
   "ruff",
-  "sqlfluff"
+  "sqlfluff",
+  "ty>=0.0.1a22"
 ]
 
 [project]
@@ -53,7 +54,8 @@ dependencies = [
   "fastapi",
   "google-adk",
   "google-ads==28.0.0",
-  "google-genai>=1.40.0"
+  "google-genai",
+  "langchain-experimental"
 ]
 
 [tool.commitizen]

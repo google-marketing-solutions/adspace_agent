@@ -11,51 +11,37 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tools for the AdSpace Agent to interact with the REPL."""
+"""Tools for the AdSpace Agent to interact with data analysis libraries."""
 
-import warnings
+from typing import override
 
+from google.adk.agents.readonly_context import ReadonlyContext
+from google.adk.tools import BaseTool
+from google.adk.tools.base_toolset import BaseToolset
 from google.adk.tools.langchain_tool import LangchainTool
 from langchain_experimental.tools.python.tool import PythonAstREPLTool
 
+# pyright: reportPrivateUsage=false
 
-class ExperimentalDataAnalysisToolkit(LangchainTool):
+python_ast_repl_tool = LangchainTool(
+    name="python_repl_ast",
+    description=(
+        "A Python shell. Use this to execute python commands. Input should be "
+        "a valid python command. When using this tool, sometimes output is "
+        "abbreviated - make sure it does not look abbreviated before using it "
+        "in your answer."
+    ),
+    tool=PythonAstREPLTool(),
+)
+python_ast_repl_tool._require_confirmation = True  # pylint: disable=protected-access
 
-  """Uses a REPL agent to create code to analyze data.
 
-  Example:
+class DataAnalysisToolset(BaseToolset):
+    """A custom toolset that groups all our data analysis functions."""
 
-    experimental_data_analysis_toolkit = ExperimentalDataAnalysisToolkit()
-
-    agent = Agent(
-      name="agent_name",
-      model="gemini-x.x-x",
-      description="Agent to analyze data.",
-      instruction=(
-        "You are to only analyze data.  After you perform an analysis. "
-        "After you do any analysis, you should show the code you wrote and "
-        "the logic and reasoning for why you analyzed the data that way."
-      ),
-      tools=[
-        experimental_data_analysis_toolkit
-      ]
-    )
-  """
-
-  def __init__(self):
-
-    warnings.warn((
-        "This agent is experimental and may not work as expected. "
-        "The toolkit uses a REPL agent to write code, specifically "
-        "Python code that can analyze data.  The agent may write incorrect "
-        "code or not perform the appropriate statistical operations to analyze "
-        "the data.  Use at your own risk."
-    ))
-
-    tool = PythonAstREPLTool()
-
-    super().__init__(
-        tool=tool,
-        name="experimental_data_analysis_tool",
-        description="Uses data science python stack to analyze data.",
-    )
+    @override
+    async def get_tools(  # pytype: disable=override-error
+        self,
+        readonly_context: ReadonlyContext | None = None,  # pylint: disable=unused-argument
+    ) -> list[BaseTool]:
+        return [python_ast_repl_tool]

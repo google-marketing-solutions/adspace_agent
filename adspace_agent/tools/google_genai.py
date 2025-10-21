@@ -14,7 +14,6 @@
 """A set of tools for the AdSpace Agent to interact with Google Cloud GenAI."""
 
 import os
-import time
 from typing import override
 
 from google import genai
@@ -28,7 +27,7 @@ from google.genai.types import Part
 
 
 @FunctionTool
-def get_info_about_youtube_video(
+async def get_info_about_youtube_video(
     youtube_video_id: str, prompt: str
 ) -> dict[str, str | None]:
     """Gets info about a YouTube video based on a prompt.
@@ -71,7 +70,7 @@ def get_info_about_youtube_video(
             role="user",
         )
 
-        response = genai_client.models.generate_content(
+        response = await genai_client.aio.models.generate_content(
             model="gemini-2.5-pro", contents=[contents]
         )
 
@@ -107,15 +106,10 @@ async def generate_video(
             location=os.environ["GOOGLE_CLOUD_LOCATION"],
         )
 
-        operation = client.models.generate_videos(
+        operation = await client.aio.models.generate_videos(
             model="veo-3.0-generate-001",
             prompt=prompt,
         )
-
-        while not operation.done:
-            print("Waiting for video generation to complete...")
-            time.sleep(10)
-            operation = client.operations.get(operation)
 
         if not operation.response:
             return {
@@ -195,7 +189,7 @@ async def generate_image(
             location=os.environ["GOOGLE_CLOUD_LOCATION"],
         )
 
-        response = client.models.generate_images(
+        response = await client.aio.models.generate_images(
             model="imagen-3.0-generate-001",
             prompt=prompt,
         )

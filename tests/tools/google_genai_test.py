@@ -22,6 +22,7 @@ from adspace_agent.tools import google_genai
 # pyright: reportAny=false
 
 
+@pytest.mark.asyncio
 @mock.patch.dict(
     "os.environ",
     {
@@ -30,22 +31,26 @@ from adspace_agent.tools import google_genai
     },
 )
 @mock.patch("google.genai.Client")
-def test_get_info_about_youtube_video_success(mock_genai_client: mock.Mock):
+async def test_get_info_about_youtube_video_success(
+    mock_genai_client: mock.Mock,
+):
     """Tests that get_info_about_youtube_video returns a success status."""
     mock_response = mock.Mock()
     mock_response.text = "Test response"
-    mock_genai_client.return_value.models.generate_content.return_value = (
-        mock_response
+    mock_genai_client.return_value.aio.models.generate_content = mock.AsyncMock(
+        return_value=mock_response
     )
 
-    result = google_genai.get_info_about_youtube_video.func(
+    result = await google_genai.get_info_about_youtube_video.func(
         "test_video_id", "test_prompt"
     )
 
+    assert "error_details" not in result
     assert result["status"] == "SUCCESS"
     assert result["response"] == "Test response"
 
 
+@pytest.mark.asyncio
 @mock.patch.dict(
     "os.environ",
     {
@@ -54,13 +59,13 @@ def test_get_info_about_youtube_video_success(mock_genai_client: mock.Mock):
     },
 )
 @mock.patch("google.genai.Client")
-def test_get_info_about_youtube_video_error(mock_genai_client: mock.Mock):
+async def test_get_info_about_youtube_video_error(mock_genai_client: mock.Mock):
     """Tests that get_info_about_youtube_video returns an error status."""
-    mock_genai_client.return_value.models.generate_content.side_effect = (
-        Exception("Test error")
+    mock_genai_client.return_value.aio.models.generate_content = mock.AsyncMock(
+        side_effect=Exception("Test error")
     )
 
-    result = google_genai.get_info_about_youtube_video.func(
+    result = await google_genai.get_info_about_youtube_video.func(
         "test_video_id", "test_prompt"
     )
 
@@ -86,10 +91,9 @@ async def test_generate_video_success(mock_genai_client: mock.Mock):
         0
     ].video.video_bytes = b"test_video"
     mock_operation.response.generated_videos[0].video.mime_type = "video/mp4"
-    mock_genai_client.return_value.models.generate_videos.return_value = (
-        mock_operation
+    mock_genai_client.return_value.aio.models.generate_videos = mock.AsyncMock(
+        return_value=mock_operation
     )
-    mock_genai_client.return_value.operations.get.return_value = mock_operation
 
     mock_tool_context = mock.AsyncMock()
     mock_tool_context.save_artifact.return_value = "v1"
@@ -98,6 +102,7 @@ async def test_generate_video_success(mock_genai_client: mock.Mock):
         "test_prompt", "test_filename", mock_tool_context
     )
 
+    assert "error_details" not in result
     assert result["status"] == "SUCCESS"
     assert (
         result["message"] == "Generated video: 'test_filename' (version: v1)."
@@ -118,10 +123,9 @@ async def test_generate_video_no_response(mock_genai_client: mock.Mock):
     mock_operation = mock.Mock()
     mock_operation.done = True
     mock_operation.response = None
-    mock_genai_client.return_value.models.generate_videos.return_value = (
-        mock_operation
+    mock_genai_client.return_value.aio.models.generate_videos = mock.AsyncMock(
+        return_value=mock_operation
     )
-    mock_genai_client.return_value.operations.get.return_value = mock_operation
 
     mock_tool_context = mock.AsyncMock()
 
@@ -147,10 +151,9 @@ async def test_generate_video_no_generated_videos(mock_genai_client: mock.Mock):
     mock_operation = mock.Mock()
     mock_operation.done = True
     mock_operation.response.generated_videos = []
-    mock_genai_client.return_value.models.generate_videos.return_value = (
-        mock_operation
+    mock_genai_client.return_value.aio.models.generate_videos = mock.AsyncMock(
+        return_value=mock_operation
     )
-    mock_genai_client.return_value.operations.get.return_value = mock_operation
 
     mock_tool_context = mock.AsyncMock()
 
@@ -180,10 +183,9 @@ async def test_generate_video_missing_video_data(mock_genai_client: mock.Mock):
     mock_operation.done = True
     mock_operation.response.generated_videos = [mock.Mock()]
     mock_operation.response.generated_videos[0].video = None
-    mock_genai_client.return_value.models.generate_videos.return_value = (
-        mock_operation
+    mock_genai_client.return_value.aio.models.generate_videos = mock.AsyncMock(
+        return_value=mock_operation
     )
-    mock_genai_client.return_value.operations.get.return_value = mock_operation
 
     mock_tool_context = mock.AsyncMock()
 
@@ -214,10 +216,9 @@ async def test_generate_video_empty_video_content(mock_genai_client: mock.Mock):
     mock_operation.response.generated_videos = [mock.Mock()]
     mock_operation.response.generated_videos[0].video.video_bytes = None
     mock_operation.response.generated_videos[0].video.mime_type = None
-    mock_genai_client.return_value.models.generate_videos.return_value = (
-        mock_operation
+    mock_genai_client.return_value.aio.models.generate_videos = mock.AsyncMock(
+        return_value=mock_operation
     )
-    mock_genai_client.return_value.operations.get.return_value = mock_operation
 
     mock_tool_context = mock.AsyncMock()
 
@@ -243,8 +244,8 @@ async def test_generate_video_empty_video_content(mock_genai_client: mock.Mock):
 @mock.patch("google.genai.Client")
 async def test_generate_video_exception(mock_genai_client: mock.Mock):
     """Tests that generate_video handles exceptions."""
-    mock_genai_client.return_value.models.generate_videos.side_effect = (
-        Exception("Test error")
+    mock_genai_client.return_value.aio.models.generate_videos = mock.AsyncMock(
+        side_effect=Exception("Test error")
     )
 
     mock_tool_context = mock.AsyncMock()
@@ -283,8 +284,8 @@ async def test_generate_image_success(mock_genai_client: mock.Mock):
     mock_response.generated_images = [mock.Mock()]
     mock_response.generated_images[0].image.image_bytes = b"test_image"
     mock_response.generated_images[0].image.mime_type = "image/png"
-    mock_genai_client.return_value.models.generate_images.return_value = (
-        mock_response
+    mock_genai_client.return_value.aio.models.generate_images = mock.AsyncMock(
+        return_value=mock_response
     )
 
     mock_tool_context = mock.AsyncMock()
@@ -294,6 +295,7 @@ async def test_generate_image_success(mock_genai_client: mock.Mock):
         "test_prompt", "test_filename", mock_tool_context
     )
 
+    assert "error_details" not in result
     assert result["status"] == "SUCCESS"
     assert (
         result["message"] == "Generated image: 'test_filename' (version: v1)."
@@ -313,8 +315,8 @@ async def test_generate_image_no_generated_images(mock_genai_client: mock.Mock):
     """Tests that generate_image handles no generated images."""
     mock_response = mock.Mock()
     mock_response.generated_images = []
-    mock_genai_client.return_value.models.generate_images.return_value = (
-        mock_response
+    mock_genai_client.return_value.aio.models.generate_images = mock.AsyncMock(
+        return_value=mock_response
     )
 
     mock_tool_context = mock.AsyncMock()
@@ -344,8 +346,8 @@ async def test_generate_image_missing_image_data(mock_genai_client: mock.Mock):
     mock_response = mock.Mock()
     mock_response.generated_images = [mock.Mock()]
     mock_response.generated_images[0].image = None
-    mock_genai_client.return_value.models.generate_images.return_value = (
-        mock_response
+    mock_genai_client.return_value.aio.models.generate_images = mock.AsyncMock(
+        return_value=mock_response
     )
 
     mock_tool_context = mock.AsyncMock()
@@ -376,8 +378,8 @@ async def test_generate_image_empty_image_content(mock_genai_client: mock.Mock):
     mock_response.generated_images = [mock.Mock()]
     mock_response.generated_images[0].image.image_bytes = None
     mock_response.generated_images[0].image.mime_type = None
-    mock_genai_client.return_value.models.generate_images.return_value = (
-        mock_response
+    mock_genai_client.return_value.aio.models.generate_images = mock.AsyncMock(
+        return_value=mock_response
     )
 
     mock_tool_context = mock.AsyncMock()
@@ -404,8 +406,8 @@ async def test_generate_image_empty_image_content(mock_genai_client: mock.Mock):
 @mock.patch("google.genai.Client")
 async def test_generate_image_exception(mock_genai_client: mock.Mock):
     """Tests that generate_image handles exceptions."""
-    mock_genai_client.return_value.models.generate_images.side_effect = (
-        Exception("Test error")
+    mock_genai_client.return_value.aio.models.generate_images = mock.AsyncMock(
+        side_effect=Exception("Test error")
     )
 
     mock_tool_context = mock.AsyncMock()

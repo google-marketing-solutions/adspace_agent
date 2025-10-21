@@ -35,6 +35,7 @@ def test_list_accounts_success(mock_google_ads_client: mock.Mock):
 
     response = google_ads.list_accounts.func()
 
+    assert "error_details" not in response
     assert response["status"] == "SUCCESS"
 
 
@@ -60,6 +61,7 @@ def test_search_stream_success(mock_google_ads_client: mock.Mock):
         query="query",
     )
 
+    assert "error_details" not in response
     assert response["status"] == "SUCCESS"
 
 
@@ -73,7 +75,7 @@ def test_search_stream_error(mock_google_ads_client: mock.Mock):
         query="query",
     )
 
-    assert response["status"], "ERROR"
+    assert response["status"] == "ERROR"
 
 
 @mock.patch("adspace_agent.tools.google_ads.client")
@@ -94,6 +96,7 @@ def test_account_hierarchy_success(mock_google_ads_client: mock.Mock):
 
     response = google_ads.account_hierarchy.func()
 
+    assert "error_details" not in response
     assert response["status"] == "SUCCESS"
 
 
@@ -112,7 +115,9 @@ async def test_google_ads_toolset():
     """Tests that the GoogleAdsToolset returns the correct tools."""
     toolset = google_ads.GoogleAdsToolset()
     tools = await toolset.get_tools()
+
     assert len(tools) == 3
+
     assert tools[0] is google_ads.list_accounts
     assert tools[1] is google_ads.search_stream
     assert tools[2] is google_ads.account_hierarchy

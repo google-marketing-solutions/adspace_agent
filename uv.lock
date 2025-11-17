@@ -17,6 +17,7 @@ dependencies = [
     { name = "google-ads" },
     { name = "google-genai" },
     { name = "langchain-experimental" },
+    { name = "python-dotenv" },
 ]
 
 [package.dev-dependencies]
@@ -49,6 +50,7 @@ requires-dist = [
     { name = "google-ads", specifier = "==28.0.0" },
     { name = "google-genai" },
     { name = "langchain-experimental" },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata.requires-dev]
@@ -71,7 +73,7 @@ dev = [
     { name = "pytype" },
     { name = "ruff" },
     { name = "sqlfluff" },
-    { name = "ty", specifier = ">=0.0.1a22" },
+    { name = "ty", specifier = ">=0.0.1a26" },
 ]
 
 [[package]]

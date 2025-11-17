@@ -36,7 +36,7 @@ dev = [
   "pyright",
   "ruff",
   "sqlfluff",
-  "ty>=0.0.1a22"
+  "ty>=0.0.1a26"
 ]
 
 [project]
@@ -55,7 +55,8 @@ dependencies = [
   "google-adk",
   "google-ads==28.0.0",
   "google-genai",
-  "langchain-experimental"
+  "langchain-experimental",
+  "python-dotenv"
 ]
 
 [tool.commitizen]
@@ -197,12 +198,6 @@ reportMissingTypeStubs = false
 reportUnknownMemberType = false
 reportUnknownVariableType = false
 reportDeprecated = false
-
-[tool.pytest.ini_options]
-filterwarnings = [
-  "ignore:This version of google-ads-python.*:Warning",
-  'ignore:\[EXPERIMENTAL\].*:UserWarning'
-]
 
 [tool.ruff]
 fix = true

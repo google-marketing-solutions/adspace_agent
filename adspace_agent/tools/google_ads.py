@@ -16,6 +16,7 @@
 from collections.abc import Iterable, MutableSequence
 from typing import cast, Optional, override, TypedDict
 
+from dotenv import load_dotenv
 from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.tools import BaseTool
 from google.adk.tools import FunctionTool
@@ -43,7 +44,9 @@ from google.ads.googleads.v21.services.types.google_ads_service import (
     SearchGoogleAdsStreamResponse,
 )
 
-client = GoogleAdsClient.load_from_storage("./google-ads.yaml")
+_ = load_dotenv()
+
+client = GoogleAdsClient.load_from_env()
 
 
 class CustomerNode(TypedDict):

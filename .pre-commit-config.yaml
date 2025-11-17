@@ -22,7 +22,7 @@ repos:
 
   # uv
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.9.4
+    rev: 0.9.9
     hooks:
       - id: uv-lock
 
@@ -64,7 +64,7 @@ repos:
 
   # Python
   - repo: https://github.com/pylint-dev/pylint
-    rev: v4.0.2
+    rev: v4.0.3
     hooks:
       - id: pylint
   - repo: https://github.com/google/pytype
@@ -72,11 +72,11 @@ repos:
     hooks:
       - id: pytype
   - repo: https://github.com/DetachHead/basedpyright-pre-commit-mirror
-    rev: 1.31.7
+    rev: 1.33.0
     hooks:
       - id: basedpyright
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.1
+    rev: v0.14.5
     hooks:
       - id: ruff-check
         args:
@@ -109,13 +109,13 @@ repos:
 
   # Conventional Commits
   - repo: https://github.com/commitizen-tools/commitizen
-    rev: v4.9.1
+    rev: v4.10.0
     hooks:
       - id: commitizen
 
   # SQL
   - repo: https://github.com/sqlfluff/sqlfluff
-    rev: 3.5.0
+    rev: 4.0.0a2
     hooks:
       - id: sqlfluff-lint
         additional_dependencies:

@@ -157,7 +157,7 @@ root_agent = Agent(
     ),
     instruction=(
         "You are a helpful agent who can answer user questions about ads, "
-        + "creatives, and campaigns."
+        + "creatives, data science, performance, analytics, and campaigns."
     ),
     tools=[
         bid_manager_toolset,

@@ -7,3 +7,5 @@ google-ads.yaml
 DEVELOPMENT.md
 .env
 dist
+.DS_Store
+__pycache__/

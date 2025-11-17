@@ -48,5 +48,5 @@ def test_agent_instruction():
     """Test that the agent's instruction is correct."""
     assert root_agent.instruction == (
         "You are a helpful agent who can answer user questions about ads, "
-        + "creatives, and campaigns."
+        + "creatives, data science, performance, analytics, and campaigns."
     )

@@ -22,7 +22,7 @@ variables required for the project:
 
 ```shell
 # ADK
-export GOOGLE_CLOUD_LOCATION=us-central1
+export GOOGLE_CLOUD_LOCATION=global
 export GOOGLE_CLOUD_PROJECT=
 export GOOGLE_GENAI_USE_VERTEXAI=TRUE
 
@@ -30,8 +30,8 @@ export GOOGLE_GENAI_USE_VERTEXAI=TRUE
 export CLIENT_ID=
 export CLIENT_SECRET=
 
-# adspace_agent/tools/google_ads.py
-# For more information, see:
+# Required for: `adspace_agent/tools/google_ads.py`
+# Reference:
 # https://developers.google.com/google-ads/api/docs/client-libs/python/configuration#env-config-fields
 # https://github.com/googleads/google-ads-python/blob/HEAD/google-ads.yaml
 # https://developers.google.com/google-ads/api/docs/api-policy/developer-token
@@ -106,6 +106,34 @@ to set up the environment variables.
 gcloud run deploy adspace-agent \
   --source . \
   --memory 4Gi
+```
+
+You will need the following APIs enabled:
+
+```shell
+gcloud services enable \
+  aiplatform.googleapis.com \
+  bigquery.googleapis.com \
+  cloudbuild.googleapis.com \
+  dfareporting.googleapis.com \
+  displayvideo.googleapis.com \
+  doubleclickbidmanager.googleapis.com \
+  drive.googleapis.com \
+  googleads.googleapis.com \
+  run.googleapis.com \
+  merchantapi.googleapis.com \
+  searchads360.googleapis.com \
+  storage.googleapis.com \
+  youtube.googleapis.com
+```
+
+And, your Google Cloud user will need the necessary permissions to deploy the
+application:
+
+```
+roles/run.admin
+roles/run.developer
+roles/run.viewer
 ```
 
 ## Contributing

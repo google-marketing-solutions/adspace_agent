@@ -71,7 +71,7 @@ async def get_info_about_youtube_video(
         )
 
         response = await genai_client.aio.models.generate_content(
-            model="gemini-2.5-pro", contents=[contents]
+            model="gemini-3-pro-preview", contents=[contents]
         )
 
         return {"status": "SUCCESS", "response": response.text}

@@ -46,10 +46,15 @@ export GOOGLE_ADS_USE_PROTO_PLUS="True"
 When deploying, you can set those environment variables in the Google Cloud user
 interface.
 
-For Google Ads integration, you will need to create a refresh token:
+For Google Ads integration, you will need to create a refresh token. You can
+generate a refresh token by running:
 
-Create an Oauth client to set up the consent screen. Ensure that you have added
-`http://localhost` as a redirect URI. Now, visit:
+```shell
+./generate_refresh_token.sh
+```
+
+Or, do it manually. First, create an Oauth client to set up the consent screen.
+Ensure that you have added `http://localhost` as a redirect URI. Now, visit:
 
 ```text
 https://accounts.google.com/o/oauth2/auth?client_id=<YOUR_CLIENT_ID>&redirect_uri=http://localhost&scope=https://www.googleapis.com/auth/adwords&response_type=code&access_type=offline
@@ -71,13 +76,21 @@ curl --request POST \
 Use `curl` to grab the refresh token. Copy and paste the `refresh_token` from
 the response to your new `.env` file. You're now all set!
 
-### Webserver UI
+### Running Locally
+
+Install the dependencies with `uv` including all development dependencies:
+
+```shell
+uv sync --all-extras
+```
 
 Run the ADK webserver locally:
 
 ```shell
 uv run adk web
 ```
+
+Follow the URL to open the web interface.
 
 ### GoogleApiToolkit
 
@@ -108,7 +121,7 @@ gcloud run deploy adspace-agent \
   --memory 4Gi
 ```
 
-You will need the following APIs enabled:
+You will also need the following APIs enabled:
 
 ```shell
 gcloud services enable \
@@ -125,15 +138,6 @@ gcloud services enable \
   searchads360.googleapis.com \
   storage.googleapis.com \
   youtube.googleapis.com
-```
-
-And, your Google Cloud user will need the necessary permissions to deploy the
-application:
-
-```
-roles/run.admin
-roles/run.developer
-roles/run.viewer
 ```
 
 ## Contributing

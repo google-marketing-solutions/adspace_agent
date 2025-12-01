@@ -287,7 +287,7 @@ youtube_toolset = YoutubeToolset(
 
 root_agent = Agent(
     name="adspace_agent",
-    model="gemini-3-pro-preview",
+    model="gemini-2.5-flash",
     description=(
         "AdSpace Agent is designed to provide a standardized way to integrate "
         + "an LLM with Google Ads, YouTube, and Google Cloud to form a more "

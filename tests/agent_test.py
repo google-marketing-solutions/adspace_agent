@@ -32,7 +32,7 @@ def test_agent_name():
 
 def test_agent_model():
     """Test that the agent's model is correct."""
-    assert root_agent.model == "gemini-3-pro-preview"
+    assert root_agent.model == "gemini-2.5-flash"
 
 
 def test_agent_description():

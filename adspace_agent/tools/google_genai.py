@@ -107,7 +107,7 @@ async def generate_video(
         )
 
         operation = await client.aio.models.generate_videos(
-            model="veo-3.0-generate-001",
+            model="veo-3.1-generate-001",
             prompt=prompt,
         )
 
@@ -190,7 +190,7 @@ async def generate_image(
         )
 
         response = await client.aio.models.generate_images(
-            model="imagen-3.0-generate-001",
+            model="imagen-4.0-generate-001",
             prompt=prompt,
         )
 

@@ -16,6 +16,9 @@
 import os
 
 from google.adk.agents import Agent
+from google.adk.artifacts import InMemoryArtifactService
+from google.adk.memory import InMemoryMemoryService
+from google.adk.sessions import InMemorySessionService
 from google.adk.tools.google_api_tool import BigQueryToolset
 from google.adk.tools.google_api_tool import GoogleApiToolset
 from google.adk.tools.google_api_tool import YoutubeToolset
@@ -24,6 +27,13 @@ from adspace_agent.tools.data_analysis import DataAnalysisToolset
 from adspace_agent.tools.google_ads import GoogleAdsToolset
 from adspace_agent.tools.google_genai import GoogleGenAIToolset
 from adspace_agent.tools.utilities import UtilitiesToolset
+
+APP_NAME = "adspace_agent"
+MODEL = "gemini-2.5-flash"
+
+session_service = InMemorySessionService()
+memory_service = InMemoryMemoryService()
+artifact_service = InMemoryArtifactService()
 
 bid_manager_toolset = GoogleApiToolset(
     client_id=os.environ["CLIENT_ID"],
@@ -286,8 +296,8 @@ youtube_toolset = YoutubeToolset(
 )
 
 root_agent = Agent(
-    name="adspace_agent",
-    model="gemini-2.5-flash",
+    name=APP_NAME,
+    model=MODEL,
     description=(
         "AdSpace Agent is designed to provide a standardized way to integrate "
         + "an LLM with Google Ads, YouTube, and Google Cloud to form a more "

@@ -46,6 +46,8 @@ export GOOGLE_ADS_USE_PROTO_PLUS="True"
 When deploying, you can set those environment variables in the Google Cloud user
 interface.
 
+#### Refresh Token for Google Ads
+
 For Google Ads integration, you will need to create a refresh token. You can
 generate a refresh token by running:
 

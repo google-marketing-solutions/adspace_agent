@@ -25,6 +25,8 @@ from google.adk.tools.base_toolset import BaseToolset
 import google.genai.types as types
 from google.genai.types import Part
 
+MODEL = "gemini-3-pro-preview"
+
 
 @FunctionTool
 async def get_info_about_youtube_video(
@@ -71,7 +73,7 @@ async def get_info_about_youtube_video(
         )
 
         response = await genai_client.aio.models.generate_content(
-            model="gemini-3-pro-preview", contents=[contents]
+            model=MODEL, contents=[contents]
         )
 
         return {"status": "SUCCESS", "response": response.text}

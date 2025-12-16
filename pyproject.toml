@@ -13,7 +13,7 @@
 # limitations under the License.
 
 [build-system]
-requires = ["uv_build>=0.9.17,<0.10.0"]
+requires = ["uv_build>=0.9.18,<0.10.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
@@ -28,7 +28,7 @@ dev = [
   "mdformat-gfm-alerts",
   "mdformat-ruff",
   "mdformat-shfmt",
-  "pre-commit",
+  "prek",
   "pylint",
   "pytest",
   "pytest-asyncio",
@@ -36,7 +36,7 @@ dev = [
   "pyright",
   "ruff",
   "sqlfluff",
-  "ty>=0.0.1a26"
+  "ty>=0.0.2"
 ]
 
 [project]
@@ -317,11 +317,11 @@ convention = "google"
 package = true
 required-version = ">=0.8.11"
 
-[[tool.uv.index]]
-url = "https://pypi.org/simple"
-default = true
-
 [tool.uv.build-backend]
 module-root = ""
 module-name = "adspace_agent"
 source-exclude = ["assets"]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true

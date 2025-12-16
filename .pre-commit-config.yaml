@@ -22,7 +22,7 @@ repos:
 
   # uv
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.9.17
+    rev: 0.9.18
     hooks:
       - id: uv-lock
 
@@ -72,11 +72,11 @@ repos:
     hooks:
       - id: pytype
   - repo: https://github.com/DetachHead/basedpyright-pre-commit-mirror
-    rev: 1.36.0
+    rev: 1.36.1
     hooks:
       - id: basedpyright
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.8
+    rev: v0.14.9
     hooks:
       - id: ruff-check
         args:
@@ -84,10 +84,17 @@ repos:
       - id: ruff-format
   - repo: local
     hooks:
+      - id: ty-check
+        name: ty check
+        entry: uv run ty check
+        language: python
+        pass_filenames: false
+  - repo: local
+    hooks:
       - id: python-testing
-        name: Running Python tests
+        name: pytest
         entry: uv run pytest
-        language: system
+        language: python
         pass_filenames: false
         always_run: true
         types:
@@ -109,7 +116,7 @@ repos:
 
   # Conventional Commits
   - repo: https://github.com/commitizen-tools/commitizen
-    rev: v4.10.0
+    rev: v4.10.1
     hooks:
       - id: commitizen
 

@@ -13,8 +13,10 @@
 # limitations under the License.
 """A set of tools for the AdSpace Agent to interact with Google Cloud GenAI."""
 
+import asyncio
 import os
 from typing import override
+import uuid
 
 from google import genai
 from google.adk.agents.callback_context import CallbackContext
@@ -22,10 +24,11 @@ from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
 from google.adk.tools.function_tool import FunctionTool
+from google.adk.tools.long_running_tool import LongRunningFunctionTool
 import google.genai.types as types
 from google.genai.types import Part
 
-MODEL = "gemini-3-pro-preview"
+MODEL = "gemini-3-flash-preview"
 
 
 @FunctionTool
@@ -84,17 +87,15 @@ async def get_info_about_youtube_video(
         }
 
 
-@FunctionTool
+@LongRunningFunctionTool
 async def generate_video(
     prompt: str,
-    filename: str,
     tool_context: CallbackContext,
 ) -> dict[str, str | Part]:
     """Generates a video from a prompt using Google GenAI' Veo 3 model.
 
     Args:
         prompt (str): The prompt to use for creating the video.
-        filename (str): The filename to use for the generated video.
         tool_context (CallbackContext): The callback context.
 
     Returns:
@@ -108,13 +109,17 @@ async def generate_video(
             location=os.environ["GOOGLE_CLOUD_LOCATION"],
         )
 
-        operation = await client.aio.models.generate_videos(
+        operation = client.models.generate_videos(
             model="veo-3.1-fast-generate-preview",
             source=types.GenerateVideosSource(
                 prompt=prompt,
             ),
             config=types.GenerateVideosConfig(number_of_videos=1),
         )
+
+        while not operation.done:
+            await asyncio.sleep(5)
+            operation = client.operations.get(operation)
 
         if not operation.response:
             return {
@@ -150,18 +155,20 @@ async def generate_video(
                 ),
             }
 
-        video_artifact = types.Part(
+        artifact = types.Part(
             inline_data=types.Blob(mime_type=mime_type, data=video_bytes)
         )
 
-        version = await tool_context.save_artifact(
+        filename = f"generated_video_{uuid.uuid4().hex}.mp4"
+
+        _ = await tool_context.save_artifact(
             filename=filename,
-            artifact=video_artifact,
+            artifact=artifact,
         )
 
         return {
             "status": "SUCCESS",
-            "message": f"Generated video: '{filename}' (version: {version}).",
+            "message": "Generated video.",
         }
     except Exception as ex:  # pylint: disable=broad-exception-caught
         return {
@@ -170,17 +177,15 @@ async def generate_video(
         }
 
 
-@FunctionTool
+@LongRunningFunctionTool
 async def generate_image(
     prompt: str,
-    filename: str,
     tool_context: CallbackContext,
 ) -> dict[str, str | Part]:
     """Generates an image from a prompt using Google GenAI's Imagen 3 model.
 
     Args:
         prompt (str): The prompt to use for creating the image.
-        filename (str): The filename to use for the generated image.
         tool_context (CallbackContext): The callback context.
 
     Returns:
@@ -228,18 +233,20 @@ async def generate_image(
                 ),
             }
 
-        image_artifact = types.Part(
+        artifact = types.Part(
             inline_data=types.Blob(mime_type=mime_type, data=image_bytes)
         )
 
-        version = await tool_context.save_artifact(
+        filename = f"generated_image_{uuid.uuid4().hex}.png"
+
+        _ = await tool_context.save_artifact(
             filename=filename,
-            artifact=image_artifact,
+            artifact=artifact,
         )
 
         return {
             "status": "SUCCESS",
-            "message": f"Generated image: '{filename}' (version: {version}).",
+            "message": "Generated image.",
         }
     except Exception as ex:  # pylint: disable=broad-exception-caught
         return {

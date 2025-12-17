@@ -30,7 +30,7 @@ from adspace_agent.tools.google_genai import GoogleGenAIToolset
 from adspace_agent.tools.utilities import UtilitiesToolset
 
 APP_NAME = "adspace_agent"
-MODEL = "gemini-3-pro-preview"
+MODEL = "gemini-3-flash-preview"
 
 session_service = InMemorySessionService()
 memory_service = InMemoryMemoryService()

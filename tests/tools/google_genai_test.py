@@ -91,7 +91,7 @@ async def test_generate_video_success(mock_genai_client: mock.Mock):
         0
     ].video.video_bytes = b"test_video"
     mock_operation.response.generated_videos[0].video.mime_type = "video/mp4"
-    mock_genai_client.return_value.aio.models.generate_videos = mock.AsyncMock(
+    mock_genai_client.return_value.models.generate_videos = mock.Mock(
         return_value=mock_operation
     )
 
@@ -99,14 +99,12 @@ async def test_generate_video_success(mock_genai_client: mock.Mock):
     mock_tool_context.save_artifact.return_value = "v1"
 
     result = await google_genai.generate_video.func(
-        "test_prompt", "test_filename", mock_tool_context
+        "test_prompt", mock_tool_context
     )
 
     assert "error_details" not in result
     assert result["status"] == "SUCCESS"
-    assert (
-        result["message"] == "Generated video: 'test_filename' (version: v1)."
-    )
+    assert result["message"] == "Generated video."
 
 
 @pytest.mark.asyncio
@@ -123,14 +121,14 @@ async def test_generate_video_no_response(mock_genai_client: mock.Mock):
     mock_operation = mock.Mock()
     mock_operation.done = True
     mock_operation.response = None
-    mock_genai_client.return_value.aio.models.generate_videos = mock.AsyncMock(
+    mock_genai_client.return_value.models.generate_videos = mock.Mock(
         return_value=mock_operation
     )
 
     mock_tool_context = mock.AsyncMock()
 
     result = await google_genai.generate_video.func(
-        "test_prompt", "test_filename", mock_tool_context
+        "test_prompt", mock_tool_context
     )
 
     assert result["status"] == "ERROR"
@@ -151,14 +149,14 @@ async def test_generate_video_no_generated_videos(mock_genai_client: mock.Mock):
     mock_operation = mock.Mock()
     mock_operation.done = True
     mock_operation.response.generated_videos = []
-    mock_genai_client.return_value.aio.models.generate_videos = mock.AsyncMock(
+    mock_genai_client.return_value.models.generate_videos = mock.Mock(
         return_value=mock_operation
     )
 
     mock_tool_context = mock.AsyncMock()
 
     result = await google_genai.generate_video.func(
-        "test_prompt", "test_filename", mock_tool_context
+        "test_prompt", mock_tool_context
     )
 
     assert result["status"] == "ERROR"
@@ -183,14 +181,14 @@ async def test_generate_video_missing_video_data(mock_genai_client: mock.Mock):
     mock_operation.done = True
     mock_operation.response.generated_videos = [mock.Mock()]
     mock_operation.response.generated_videos[0].video = None
-    mock_genai_client.return_value.aio.models.generate_videos = mock.AsyncMock(
+    mock_genai_client.return_value.models.generate_videos = mock.Mock(
         return_value=mock_operation
     )
 
     mock_tool_context = mock.AsyncMock()
 
     result = await google_genai.generate_video.func(
-        "test_prompt", "test_filename", mock_tool_context
+        "test_prompt", mock_tool_context
     )
 
     assert result["status"] == "ERROR"
@@ -216,14 +214,14 @@ async def test_generate_video_empty_video_content(mock_genai_client: mock.Mock):
     mock_operation.response.generated_videos = [mock.Mock()]
     mock_operation.response.generated_videos[0].video.video_bytes = None
     mock_operation.response.generated_videos[0].video.mime_type = None
-    mock_genai_client.return_value.aio.models.generate_videos = mock.AsyncMock(
+    mock_genai_client.return_value.models.generate_videos = mock.Mock(
         return_value=mock_operation
     )
 
     mock_tool_context = mock.AsyncMock()
 
     result = await google_genai.generate_video.func(
-        "test_prompt", "test_filename", mock_tool_context
+        "test_prompt", mock_tool_context
     )
 
     assert result["status"] == "ERROR"
@@ -244,14 +242,14 @@ async def test_generate_video_empty_video_content(mock_genai_client: mock.Mock):
 @mock.patch("google.genai.Client")
 async def test_generate_video_exception(mock_genai_client: mock.Mock):
     """Tests that generate_video handles exceptions."""
-    mock_genai_client.return_value.aio.models.generate_videos = mock.AsyncMock(
+    mock_genai_client.return_value.models.generate_videos = mock.Mock(
         side_effect=Exception("Test error")
     )
 
     mock_tool_context = mock.AsyncMock()
 
     result = await google_genai.generate_video.func(
-        "test_prompt", "test_filename", mock_tool_context
+        "test_prompt", mock_tool_context
     )
 
     assert result["status"] == "ERROR"
@@ -292,14 +290,12 @@ async def test_generate_image_success(mock_genai_client: mock.Mock):
     mock_tool_context.save_artifact.return_value = "v1"
 
     result = await google_genai.generate_image.func(
-        "test_prompt", "test_filename", mock_tool_context
+        "test_prompt", mock_tool_context
     )
 
     assert "error_details" not in result
     assert result["status"] == "SUCCESS"
-    assert (
-        result["message"] == "Generated image: 'test_filename' (version: v1)."
-    )
+    assert result["message"] == "Generated image."
 
 
 @pytest.mark.asyncio
@@ -322,7 +318,7 @@ async def test_generate_image_no_generated_images(mock_genai_client: mock.Mock):
     mock_tool_context = mock.AsyncMock()
 
     result = await google_genai.generate_image.func(
-        "test_prompt", "test_filename", mock_tool_context
+        "test_prompt", mock_tool_context
     )
 
     assert result["status"] == "ERROR"
@@ -353,7 +349,7 @@ async def test_generate_image_missing_image_data(mock_genai_client: mock.Mock):
     mock_tool_context = mock.AsyncMock()
 
     result = await google_genai.generate_image.func(
-        "test_prompt", "test_filename", mock_tool_context
+        "test_prompt", mock_tool_context
     )
 
     assert result["status"] == "ERROR"
@@ -385,7 +381,7 @@ async def test_generate_image_empty_image_content(mock_genai_client: mock.Mock):
     mock_tool_context = mock.AsyncMock()
 
     result = await google_genai.generate_image.func(
-        "test_prompt", "test_filename", mock_tool_context
+        "test_prompt", mock_tool_context
     )
 
     assert result["status"] == "ERROR"
@@ -413,7 +409,7 @@ async def test_generate_image_exception(mock_genai_client: mock.Mock):
     mock_tool_context = mock.AsyncMock()
 
     result = await google_genai.generate_image.func(
-        "test_prompt", "test_filename", mock_tool_context
+        "test_prompt", mock_tool_context
     )
 
     assert result["status"] == "ERROR"

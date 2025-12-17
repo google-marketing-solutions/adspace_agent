@@ -2,7 +2,7 @@
 
 ## General Instructions
 
-- When generating new Python code, please follow the existing coding style.
+- When generating new Python code, follow the existing coding style.
 
 ## Coding Style
 
@@ -15,29 +15,21 @@
 ## Regarding Dependencies
 
 - Avoid introducing new external dependencies unless absolutely necessary.
-- If a new dependency is required, please state the reason.
+- If a new dependency is required, state the reason.
 
 ## Setup Commands
 
 - Install Python: `mise install`
 - Install the dependencies: `uv venv` and then `uv sync --all-extras`
-- Run the pre-commit hooks: `uv run pre-commit run --all-files`
+- Run prek for the pre-commit hooks: `uv run prek run --all-files`
 
 ## Testing
 
 - Run the tests: `uv run pytest`
+- Run a coverage report: `uv run coverage report`
 
-## Formatting and Linting
+## Type Checking, Formatting, and Linting
 
+- Use `ty` for type checking: `uv run ty check`
 - Use `ruff` for formatting: `uv run ruff format`
 - Use `ruff` for linting: `uv run ruff check`
-- Use `basedpyright` for type checking: `uv run basedpyright`
-
-## Testing Instructions
-
-- Run tests: `uv run pytest`
-- Find the CI plan in the `.github/workflows/` folder.
-- Any commit should pass all the tests, linting, and formatting checks by way of
-  the `pre-commit` hooks before you merge.
-- Fix any test or type errors until the whole suite is green.
-- Add or update tests for the code you change, even if nobody asked.

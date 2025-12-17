@@ -19,6 +19,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
   "commitizen",
+  "coverage",
   "dbt-bigquery",
   "mdformat",
   "mdformat-config",

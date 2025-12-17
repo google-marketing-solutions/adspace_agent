@@ -91,14 +91,22 @@ repos:
         pass_filenames: false
   - repo: local
     hooks:
+      - id: python-coverage
+        name: coverage report
+        entry: uv run coverage report
+        args:
+          - --fail-under=80
+        language: python
+        pass_filenames: false
+        always_run: true
+  - repo: local
+    hooks:
       - id: python-testing
         name: pytest
         entry: uv run pytest
         language: python
         pass_filenames: false
         always_run: true
-        types:
-          - python
 
   # Markdown
   - repo: https://github.com/executablebooks/mdformat

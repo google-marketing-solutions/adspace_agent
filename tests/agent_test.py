@@ -15,6 +15,8 @@
 
 from unittest.mock import patch
 
+from google.adk.models.google_llm import Gemini
+
 with patch.dict(
     "os.environ",
     {
@@ -32,7 +34,7 @@ def test_agent_name():
 
 def test_agent_model():
     """Test that the agent's model is correct."""
-    assert root_agent.model == "gemini-2.5-flash"
+    assert root_agent.model == Gemini(model="gemini-3-pro-preview")
 
 
 def test_agent_description():

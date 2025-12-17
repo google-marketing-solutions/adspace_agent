@@ -18,9 +18,9 @@ from typing import cast, Optional, override, TypedDict
 
 from dotenv import load_dotenv
 from google.adk.agents.readonly_context import ReadonlyContext
-from google.adk.tools import BaseTool
-from google.adk.tools import FunctionTool
+from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
+from google.adk.tools.function_tool import FunctionTool
 from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.v21.resources.types.customer_client import (
     CustomerClient,

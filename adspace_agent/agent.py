@@ -18,6 +18,7 @@ import os
 from google.adk.agents import Agent
 from google.adk.artifacts import InMemoryArtifactService
 from google.adk.memory import InMemoryMemoryService
+from google.adk.models.google_llm import Gemini
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools.google_api_tool import BigQueryToolset
 from google.adk.tools.google_api_tool import GoogleApiToolset
@@ -29,7 +30,7 @@ from adspace_agent.tools.google_genai import GoogleGenAIToolset
 from adspace_agent.tools.utilities import UtilitiesToolset
 
 APP_NAME = "adspace_agent"
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3-pro-preview"
 
 session_service = InMemorySessionService()
 memory_service = InMemoryMemoryService()
@@ -297,7 +298,9 @@ youtube_toolset = YoutubeToolset(
 
 root_agent = Agent(
     name=APP_NAME,
-    model=MODEL,
+    model=Gemini(
+        model=MODEL,
+    ),
     description=(
         "AdSpace Agent is designed to provide a standardized way to integrate "
         + "an LLM with Google Ads, YouTube, and Google Cloud to form a more "

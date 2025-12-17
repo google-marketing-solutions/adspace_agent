@@ -52,7 +52,7 @@ authors = [
 ]
 dependencies = [
   "fastapi",
-  "google-adk",
+  "google-adk==1.21.0",
   "google-ads",
   "google-genai",
   "langchain-experimental",

@@ -19,9 +19,9 @@ from typing import override
 from google import genai
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.readonly_context import ReadonlyContext
-from google.adk.tools import BaseTool
-from google.adk.tools import FunctionTool
+from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
+from google.adk.tools.function_tool import FunctionTool
 import google.genai.types as types
 from google.genai.types import Part
 
@@ -109,8 +109,11 @@ async def generate_video(
         )
 
         operation = await client.aio.models.generate_videos(
-            model="veo-3.1-generate-001",
-            prompt=prompt,
+            model="veo-3.1-fast-generate-preview",
+            source=types.GenerateVideosSource(
+                prompt=prompt,
+            ),
+            config=types.GenerateVideosConfig(number_of_videos=1),
         )
 
         if not operation.response:
@@ -194,6 +197,7 @@ async def generate_image(
         response = await client.aio.models.generate_images(
             model="imagen-4.0-generate-001",
             prompt=prompt,
+            config=types.GenerateImagesConfig(number_of_images=1),
         )
 
         if not response.generated_images:

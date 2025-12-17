@@ -16,7 +16,7 @@
 from typing import override
 
 from google.adk.agents.readonly_context import ReadonlyContext
-from google.adk.tools import BaseTool
+from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
 
 

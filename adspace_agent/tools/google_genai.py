@@ -18,6 +18,7 @@ import os
 from typing import override
 import uuid
 
+from dotenv import load_dotenv
 from google import genai
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.readonly_context import ReadonlyContext
@@ -28,7 +29,15 @@ from google.adk.tools.long_running_tool import LongRunningFunctionTool
 import google.genai.types as types
 from google.genai.types import Part
 
+_ = load_dotenv()
+
 MODEL = "gemini-3-flash-preview"
+
+genai_client = genai.Client(
+    vertexai=os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "False").upper() == "TRUE",
+    project=os.environ["GOOGLE_CLOUD_PROJECT"],
+    location=os.environ["GOOGLE_CLOUD_LOCATION"],
+)
 
 
 @FunctionTool
@@ -55,12 +64,6 @@ async def get_info_about_youtube_video(
     """
     try:
         youtube_video_url = "https://www.youtube.com/watch?v="
-
-        genai_client = genai.Client(
-            vertexai=True,
-            project=os.environ["GOOGLE_CLOUD_PROJECT"],
-            location=os.environ["GOOGLE_CLOUD_LOCATION"],
-        )
 
         contents = genai.types.Content(
             parts=[
@@ -103,13 +106,7 @@ async def generate_video(
             operation and the response.
     """
     try:
-        client = genai.Client(
-            vertexai=True,
-            project=os.environ["GOOGLE_CLOUD_PROJECT"],
-            location=os.environ["GOOGLE_CLOUD_LOCATION"],
-        )
-
-        operation = client.models.generate_videos(
+        operation = genai_client.models.generate_videos(
             model="veo-3.1-fast-generate-preview",
             source=types.GenerateVideosSource(
                 prompt=prompt,
@@ -119,7 +116,7 @@ async def generate_video(
 
         while not operation.done:
             await asyncio.sleep(5)
-            operation = client.operations.get(operation)
+            operation = genai_client.operations.get(operation)
 
         if not operation.response:
             return {
@@ -193,13 +190,7 @@ async def generate_image(
             operation and the response.
     """
     try:
-        client = genai.Client(
-            vertexai=True,
-            project=os.environ["GOOGLE_CLOUD_PROJECT"],
-            location=os.environ["GOOGLE_CLOUD_LOCATION"],
-        )
-
-        response = await client.aio.models.generate_images(
+        response = await genai_client.aio.models.generate_images(
             model="imagen-4.0-generate-001",
             prompt=prompt,
             config=types.GenerateImagesConfig(number_of_images=1),

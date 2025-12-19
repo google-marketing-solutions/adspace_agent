@@ -13,7 +13,7 @@ comprehensive campaign and marketing plan for agencies.
 [![Conventional Commits](https://img.shields.io/badge/conventional%20commits-1.0.0-fe5196.svg?logo=conventionalcommits)](https://conventionalcommits.org)
 [![prek](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/j178/prek/master/docs/assets/badge-v0.json)](https://github.com/j178/prek)
 
-## Setup
+## Getting Started
 
 ### Environment Variables
 
@@ -78,7 +78,7 @@ curl --request POST \
 Use `curl` to grab the refresh token. Copy and paste the `refresh_token` from
 the response to your new `.env` file. You're now all set!
 
-### Running Locally
+### Development
 
 Install the dependencies with `uv` including all development dependencies:
 

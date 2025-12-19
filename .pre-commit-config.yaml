@@ -67,10 +67,6 @@ repos:
     rev: v4.0.4
     hooks:
       - id: pylint
-  - repo: https://github.com/google/pytype
-    rev: 2024.10.11
-    hooks:
-      - id: pytype
   - repo: https://github.com/DetachHead/basedpyright-pre-commit-mirror
     rev: 1.36.1
     hooks:
@@ -86,24 +82,14 @@ repos:
     hooks:
       - id: ty-check
         name: ty check
-        entry: uv run ty check
+        entry: uv run --active ty check
         language: python
         pass_filenames: false
-  - repo: local
-    hooks:
-      - id: python-coverage
-        name: coverage report
-        entry: uv run coverage report
-        args:
-          - --fail-under=80
-        language: python
-        pass_filenames: false
-        always_run: true
   - repo: local
     hooks:
       - id: python-testing
         name: pytest
-        entry: uv run pytest
+        entry: uv run --active pytest --cov --cov-fail-under=80
         language: python
         pass_filenames: false
         always_run: true

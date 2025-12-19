@@ -21,12 +21,11 @@
 
 - Install Python: `mise install`
 - Install the dependencies: `uv venv` and then `uv sync --all-extras`
-- Run prek for the pre-commit hooks: `uv run prek run --all-files`
+- Run for the pre-commit hooks: `uv run prek run --all-files`
 
 ## Testing
 
-- Run the tests: `uv run pytest`
-- Run a coverage report: `uv run coverage report`
+- Run the tests: `uv run pytest --cov --cov-fail-under=80`
 
 ## Type Checking, Formatting, and Linting
 

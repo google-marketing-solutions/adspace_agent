@@ -31,10 +31,10 @@ dev = [
   "mdformat-shfmt",
   "prek",
   "pylint",
+  "pyright",
   "pytest",
   "pytest-asyncio",
-  "pytype",
-  "pyright",
+  "pytest-cov",
   "ruff",
   "sqlfluff",
   "ty>=0.0.2"

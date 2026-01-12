@@ -13,9 +13,11 @@
 # limitations under the License.
 """A set of tools for the AdSpace Agent to interact with Google Cloud GenAI."""
 
+# pyright: reportDeprecated=false
+
 import asyncio
 import os
-from typing import override
+from typing import Optional, override, Union
 import uuid
 
 from dotenv import load_dotenv
@@ -43,7 +45,7 @@ genai_client = genai.Client(
 @FunctionTool
 async def get_info_about_youtube_video(
     youtube_video_id: str, prompt: str
-) -> dict[str, str | None]:
+) -> dict[str, Optional[str]]:
     """Gets info about a YouTube video based on a prompt.
 
     This function gives the ability to prompt a YouTube video and ask questions
@@ -78,7 +80,7 @@ async def get_info_about_youtube_video(
             role="user",
         )
 
-        response = await genai_client.aio.models.generate_content(
+        response = await genai_client.aio.models.generate_content(  # pyright: ignore[reportUnknownMemberType] # pylint: disable=line-too-long
             model=MODEL, contents=[contents]
         )
 
@@ -94,7 +96,7 @@ async def get_info_about_youtube_video(
 async def generate_video(
     prompt: str,
     tool_context: CallbackContext,
-) -> dict[str, str | Part]:
+) -> dict[str, Union[str, Part]]:
     """Generates a video from a prompt using Google GenAI' Veo 3 model.
 
     Args:
@@ -102,7 +104,7 @@ async def generate_video(
         tool_context (CallbackContext): The callback context.
 
     Returns:
-        dict[str, str | Part]: A dictionary containing the status of the
+        dict[str, Union[str, Part]]: A dictionary containing the status of the
             operation and the response.
     """
     try:
@@ -178,7 +180,7 @@ async def generate_video(
 async def generate_image(
     prompt: str,
     tool_context: CallbackContext,
-) -> dict[str, str | Part]:
+) -> dict[str, Union[str, Part]]:
     """Generates an image from a prompt using Google GenAI's Imagen 3 model.
 
     Args:
@@ -186,7 +188,7 @@ async def generate_image(
         tool_context (CallbackContext): The callback context.
 
     Returns:
-        dict[str, str | Part]: A dictionary containing the status of the
+        dict[str, Union[str, Part]]: A dictionary containing the status of the
             operation and the response.
     """
     try:

@@ -13,8 +13,10 @@
 # limitations under the License.
 """A set of tools for the AdSpace Agent to interact with Google Ads."""
 
+# pyright: reportDeprecated=false
+
 from collections.abc import Iterable, MutableSequence
-from typing import cast, Optional, override, TypedDict
+from typing import cast, Optional, override, TypedDict, Union
 
 from dotenv import load_dotenv
 from google.adk.agents.readonly_context import ReadonlyContext
@@ -63,7 +65,7 @@ class CustomerNode(TypedDict):
 @FunctionTool
 def account_hierarchy(
     login_customer_id: Optional[str] = None,
-) -> dict[str, list[CustomerNode] | str]:
+) -> dict[str, Union[list[CustomerNode], str]]:
     """Builds a hierarchy of accounts under the given manager account.
 
     Args:
@@ -80,10 +82,12 @@ def account_hierarchy(
             client.login_customer_id = None
 
         googleads_service: GoogleAdsServiceClient = cast(
-            GoogleAdsServiceClient, client.get_service("GoogleAdsService")
+            GoogleAdsServiceClient,
+            client.get_service("GoogleAdsService"),  # pyright: ignore[reportUnknownMemberType] # pylint: disable=line-too-long
         )
         customer_service: CustomerServiceClient = cast(
-            CustomerServiceClient, client.get_service("CustomerService")
+            CustomerServiceClient,
+            client.get_service("CustomerService"),  # pyright: ignore[reportUnknownMemberType] # pylint: disable=line-too-long
         )
 
         seed_customer_ids: list[str] = []
@@ -108,7 +112,7 @@ def account_hierarchy(
             seed_customer_ids = [login_customer_id]
         else:
             customer_resource_names: MutableSequence[str] = (
-                customer_service.list_accessible_customers().resource_names
+                customer_service.list_accessible_customers().resource_names  # pyright: ignore[reportUnknownMemberType] # pylint: disable=line-too-long
             )
 
             for customer_resource_name in customer_resource_names:
@@ -128,7 +132,7 @@ def account_hierarchy(
 
             while unprocessed_customer_ids:
                 customer_id: int = unprocessed_customer_ids.pop(0)
-                response: SearchPager = googleads_service.search(
+                response: SearchPager = googleads_service.search(  # pyright: ignore[reportUnknownMemberType] # pylint: disable=line-too-long
                     customer_id=str(customer_id), query=query
                 )
 
@@ -223,7 +227,7 @@ def _build_hierarchy_dict(
 
 
 @FunctionTool
-def list_accounts() -> dict[str, ListAccessibleCustomersResponse | str]:
+def list_accounts() -> dict[str, Union[ListAccessibleCustomersResponse, str]]:
     """Lists all accessible Google Ads accounts for the authenticated user.
 
     Returns:
@@ -233,14 +237,15 @@ def list_accounts() -> dict[str, ListAccessibleCustomersResponse | str]:
         client.login_customer_id = None
 
         customer_service: CustomerServiceClient = cast(
-            CustomerServiceClient, client.get_service("CustomerService")
+            CustomerServiceClient,
+            client.get_service("CustomerService"),  # pyright: ignore[reportUnknownMemberType] # pylint: disable=line-too-long
         )
         accessible_customers: ListAccessibleCustomersResponse = (
-            customer_service.list_accessible_customers()
+            customer_service.list_accessible_customers()  # pyright: ignore[reportUnknownMemberType] # pylint: disable=line-too-long
         )
         return {
             "status": "SUCCESS",
-            "data": type(accessible_customers).to_json(accessible_customers),
+            "data": type(accessible_customers).to_json(accessible_customers),  # pyright: ignore[reportUnknownMemberType] # pylint: disable=line-too-long
         }
     except Exception as ex:  # pylint: disable=broad-exception-caught
         return {
@@ -254,7 +259,7 @@ def search_stream(
     customer_id: str,
     query: str,
     login_customer_id: Optional[str] = None,
-) -> dict[str, list[str] | str]:
+) -> dict[str, Union[list[str], str]]:
     """Streams Google Ads data from a GAQL query.
 
     Args:
@@ -273,9 +278,10 @@ def search_stream(
             client.login_customer_id = None
 
         service: GoogleAdsServiceClient = cast(
-            GoogleAdsServiceClient, client.get_service("GoogleAdsService")
+            GoogleAdsServiceClient,
+            client.get_service("GoogleAdsService"),  # pyright: ignore[reportUnknownMemberType] # pylint: disable=line-too-long
         )
-        stream: Iterable[SearchGoogleAdsStreamResponse] = service.search_stream(
+        stream: Iterable[SearchGoogleAdsStreamResponse] = service.search_stream(  # pyright: ignore[reportUnknownMemberType] # pylint: disable=line-too-long
             customer_id=customer_id,
             query=query,
         )
@@ -283,7 +289,7 @@ def search_stream(
         for batch in stream:
             rows = batch.results
             for row in rows:
-                results.append(type(row).to_json(row))
+                results.append(type(row).to_json(row))  # pyright: ignore[reportUnknownMemberType] # pylint: disable=line-too-long
         return {
             "status": "SUCCESS",
             "data": results,

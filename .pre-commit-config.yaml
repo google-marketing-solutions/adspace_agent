@@ -22,7 +22,7 @@ repos:
 
   # uv
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.9.18
+    rev: 0.9.24
     hooks:
       - id: uv-lock
 
@@ -68,11 +68,11 @@ repos:
     hooks:
       - id: pylint
   - repo: https://github.com/DetachHead/basedpyright-pre-commit-mirror
-    rev: 1.36.1
+    rev: 1.37.1
     hooks:
       - id: basedpyright
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.9
+    rev: v0.14.11
     hooks:
       - id: ruff-check
         args:
@@ -110,7 +110,7 @@ repos:
 
   # Conventional Commits
   - repo: https://github.com/commitizen-tools/commitizen
-    rev: v4.10.1
+    rev: v4.11.2
     hooks:
       - id: commitizen
 

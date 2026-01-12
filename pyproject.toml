@@ -18,6 +18,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+  "basedpyright",
   "commitizen",
   "coverage",
   "dbt-bigquery",
@@ -53,12 +54,19 @@ authors = [
 ]
 dependencies = [
   "fastapi",
-  "google-adk==1.21.0",
+  "google-adk",
   "google-ads",
   "google-genai",
   "langchain-experimental",
   "python-dotenv"
 ]
+
+[tool.basedpyright]
+include = ["adspace_agent", "tests"]
+venvPath = "."
+venv = ".venv"
+extraPaths = ["adspace_agent"]
+reportMissingTypeStubs = false
 
 [tool.commitizen]
 name = "cz_conventional_commits"
@@ -191,14 +199,6 @@ enable = [
   "W4905", # https://pylint.readthedocs.io/en/stable/user_guide/messages/warning/deprecated-decorator.html
   "W4906" # https://pylint.readthedocs.io/en/stable/user_guide/messages/warning/deprecated-attribute.html
 ]
-
-[tool.pyright]
-venvPath = "."
-venv = ".venv"
-reportMissingTypeStubs = false
-reportUnknownMemberType = false
-reportUnknownVariableType = false
-reportDeprecated = false
 
 [tool.ruff]
 fix = true

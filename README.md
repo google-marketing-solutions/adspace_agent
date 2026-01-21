@@ -120,7 +120,8 @@ to set up the environment variables.
 ```shell
 gcloud run deploy adspace-agent \
   --source . \
-  --memory 4Gi
+  --memory 4Gi \
+  --port 8000
 ```
 
 You will also need the following APIs enabled:

@@ -279,14 +279,14 @@ wheels = [
 
 [[package]]
 name = "authlib"
-version = "1.6.6"
+version = "1.6.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bb/9b/b1661026ff24bc641b76b78c5222d614776b0c085bcfdac9bd15a1cb4b35/authlib-1.6.6.tar.gz", hash = "sha256:45770e8e056d0f283451d9996fbb59b70d45722b45d854d58f32878d0a40c38e", size = 164894, upload-time = "2025-12-12T08:01:41.464Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/af/98/00d3dd826d46959ad8e32af2dbb2398868fd9fd0683c26e56d0789bd0e68/authlib-1.6.9.tar.gz", hash = "sha256:d8f2421e7e5980cc1ddb4e32d3f5fa659cfaf60d8eaf3281ebed192e4ab74f04", size = 165134, upload-time = "2026-03-02T07:44:01.998Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/54/51/321e821856452f7386c4e9df866f196720b1ad0c5ea1623ea7399969ae3b/authlib-1.6.6-py2.py3-none-any.whl", hash = "sha256:7d9e9bc535c13974313a87f53e8430eb6ea3d1cf6ae4f6efcd793f2e949143fd", size = 244005, upload-time = "2025-12-12T08:01:40.209Z" },
+    { url = "https://files.pythonhosted.org/packages/53/23/b65f568ed0c22f1efacb744d2db1a33c8068f384b8c9b482b52ebdbc3ef6/authlib-1.6.9-py2.py3-none-any.whl", hash = "sha256:f08b4c14e08f0861dc18a32357b33fbcfd2ea86cfe3fe149484b4d764c4a0ac3", size = 244197, upload-time = "2026-03-02T07:44:00.307Z" },
 ]
 
 [[package]]
@@ -1197,6 +1197,7 @@ dependencies = [
     { name = "proto-plus" },
     { name = "protobuf" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/65/38/89317773c64b5a7e9b56b9aecb2e39ac02d8d6d09fb5b276710c6892e690/google_cloud_appengine_logging-1.8.0.tar.gz", hash = "sha256:84b705a69e4109fc2f68dfe36ce3df6a34d5c3d989eee6d0ac1b024dda0ba6f5", size = 18071, upload-time = "2026-01-15T13:14:40.024Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a2/66/4a9be8afb1d0bf49472478cec20fefe4f4cb3a6e67be2231f097041e7339/google_cloud_appengine_logging-1.8.0-py3-none-any.whl", hash = "sha256:a4ce9ce94a9fd8c89ed07fa0b06fcf9ea3642f9532a1be1a8c7b5f82c0a70ec6", size = 18380, upload-time = "2026-01-09T14:52:58.154Z" },
 ]

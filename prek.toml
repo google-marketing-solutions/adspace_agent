@@ -1,0 +1,115 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Configuration file for `prek`, a git hook framework written in Rust.
+# See https://prek.j178.dev for more information.
+#:schema https://www.schemastore.org/prek.json
+
+[[repos]]
+repo = "https://github.com/astral-sh/uv-pre-commit"
+rev = "0.11.1"
+hooks = [{ id = "uv-lock" }]
+
+[[repos]]
+repo = "https://github.com/google/pre-commit-tool-hooks"
+rev = "v1.2.5"
+hooks = [
+  {
+    id = "check-copyright",
+    args = [
+      "--custom_format",
+      '\.py$',
+      "",
+      "# ",
+      "",
+      "--custom_format",
+      '\.css$',
+      "/*",
+      " * ",
+      " */",
+      "--skip_pattern",
+      '.*\.md|LICENSE|.*\.toml|\.gitignore|\.git|uv\.lock|\.python-version|.*\.json|.*\.example|.*\.env'
+    ]
+  },
+  { id = "check-google-doc-style" },
+  { id = "check-links" }
+]
+
+[[repos]]
+repo = "https://github.com/pre-commit/pre-commit-hooks"
+rev = "v6.0.0"
+hooks = [
+  { id = "check-executables-have-shebangs" },
+  { id = "check-json" },
+  { id = "check-merge-conflict" },
+  { id = "check-toml" },
+  { id = "check-yaml" },
+  { id = "debug-statements" },
+  { id = "end-of-file-fixer" },
+  { id = "mixed-line-ending" },
+  { id = "trailing-whitespace" }
+]
+
+[[repos]]
+repo = "https://github.com/astral-sh/ruff-pre-commit"
+rev = "v0.15.7"
+hooks = [{ id = "ruff-check", args = ["--fix"] }, { id = "ruff-format" }]
+
+[[repos]]
+repo = "https://github.com/tombi-toml/tombi-pre-commit"
+rev = "v0.9.9"
+hooks = [{ id = "tombi-format" }, { id = "tombi-lint" }]
+
+[[repos]]
+repo = "https://github.com/executablebooks/mdformat"
+rev = "1.0.0"
+hooks = [
+  {
+    id = "mdformat",
+    additional_dependencies = [
+      "mdformat-config",
+      "mdformat-footnote",
+      "mdformat-frontmatter",
+      "mdformat-gfm",
+      "mdformat-gfm-alerts",
+      "mdformat-pyproject",
+      "mdformat-ruff",
+      "mdformat-shfmt"
+    ]
+  }
+]
+
+[[repos]]
+repo = "https://github.com/commitizen-tools/commitizen"
+rev = "v4.13.9"
+hooks = [{ id = "commitizen" }]
+
+[[repos]]
+repo = "local"
+hooks = [
+  {
+    id = "ty-check",
+    name = "ty check",
+    entry = "uv run ty check",
+    language = "python",
+    pass_filenames = false
+  },
+  {
+    id = "pytest",
+    name = "pytest",
+    entry = "uv run pytest --cov --cov-fail-under=80",
+    language = "python",
+    pass_filenames = false
+  }
+]

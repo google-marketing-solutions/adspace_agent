@@ -17,7 +17,7 @@
 
 import asyncio
 import os
-from typing import Optional, override, Union
+from typing import override
 import uuid
 
 from dotenv import load_dotenv
@@ -28,12 +28,12 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.long_running_tool import LongRunningFunctionTool
-import google.genai.types as types
+from google.genai import types
 from google.genai.types import Part
 
 _ = load_dotenv()
 
-MODEL = "gemini-3-flash-preview"
+MODEL = "gemini-3.1-pro-preview"
 
 genai_client = genai.Client(
     vertexai=os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "False").upper() == "TRUE",
@@ -45,7 +45,7 @@ genai_client = genai.Client(
 @FunctionTool
 async def get_info_about_youtube_video(
     youtube_video_id: str, prompt: str
-) -> dict[str, Optional[str]]:
+) -> dict[str, str | None]:
     """Gets info about a YouTube video based on a prompt.
 
     This function gives the ability to prompt a YouTube video and ask questions
@@ -83,20 +83,20 @@ async def get_info_about_youtube_video(
         response = await genai_client.aio.models.generate_content(  # pyright: ignore[reportUnknownMemberType] # pylint: disable=line-too-long
             model=MODEL, contents=[contents]
         )
-
-        return {"status": "SUCCESS", "response": response.text}
-    except Exception as ex:  # pylint: disable=broad-exception-caught
+    except Exception as ex:  # noqa: BLE001 # pylint: disable=broad-exception-caught
         return {
             "status": "ERROR",
             "error_details": str(ex),
         }
+    else:
+        return {"status": "SUCCESS", "response": response.text}
 
 
 @LongRunningFunctionTool
 async def generate_video(
     prompt: str,
     tool_context: CallbackContext,
-) -> dict[str, Union[str, Part]]:
+) -> dict[str, str | Part]:
     """Generates a video from a prompt using Google GenAI' Veo 3 model.
 
     Args:
@@ -109,7 +109,7 @@ async def generate_video(
     """
     try:
         operation = genai_client.models.generate_videos(
-            model="veo-3.1-fast-generate-preview",
+            model="veo-3.1-generate-preview",
             source=types.GenerateVideosSource(
                 prompt=prompt,
             ),
@@ -164,15 +164,15 @@ async def generate_video(
             filename=filename,
             artifact=artifact,
         )
-
-        return {
-            "status": "SUCCESS",
-            "message": "Generated video.",
-        }
-    except Exception as ex:  # pylint: disable=broad-exception-caught
+    except Exception as ex:  # noqa: BLE001 # pylint: disable=broad-exception-caught
         return {
             "status": "ERROR",
             "error_details": str(ex),
+        }
+    else:
+        return {
+            "status": "SUCCESS",
+            "message": "Generated video.",
         }
 
 
@@ -180,7 +180,7 @@ async def generate_video(
 async def generate_image(
     prompt: str,
     tool_context: CallbackContext,
-) -> dict[str, Union[str, Part]]:
+) -> dict[str, str | Part]:
     """Generates an image from a prompt using Google GenAI's Imagen 3 model.
 
     Args:
@@ -236,15 +236,15 @@ async def generate_image(
             filename=filename,
             artifact=artifact,
         )
-
-        return {
-            "status": "SUCCESS",
-            "message": "Generated image.",
-        }
-    except Exception as ex:  # pylint: disable=broad-exception-caught
+    except Exception as ex:  # noqa: BLE001 # pylint: disable=broad-exception-caught
         return {
             "status": "ERROR",
             "error_details": str(ex),
+        }
+    else:
+        return {
+            "status": "SUCCESS",
+            "message": "Generated image.",
         }
 
 

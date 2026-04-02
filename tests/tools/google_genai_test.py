@@ -121,7 +121,7 @@ async def test_generate_video_success(mock_genai_client: mock.Mock):
     # Verify call arguments
     mock_genai_client.models.generate_videos.assert_called_once()
     _, kwargs = mock_genai_client.models.generate_videos.call_args
-    assert kwargs["model"] == "veo-3.1-fast-generate-preview"
+    assert kwargs["model"] == "veo-3.1-generate-preview"
     assert kwargs["source"].prompt == "test_prompt"
 
     mock_tool_context.save_artifact.assert_called_once()
@@ -588,7 +588,8 @@ async def test_google_genai_toolset():
     """Tests that the GoogleGenAIToolset returns the correct tools."""
     toolset = google_genai.GoogleGenAIToolset()
     tools = await toolset.get_tools()
-    assert len(tools) == 3
+    expected_tool_count = 3
+    assert len(tools) == expected_tool_count
     assert tools[0] is google_genai.get_info_about_youtube_video
     assert tools[1] is google_genai.generate_video
     assert tools[2] is google_genai.generate_image

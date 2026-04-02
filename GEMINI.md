@@ -2,11 +2,14 @@
 
 ## General Instructions
 
-- When generating new Python code, follow the existing coding style.
+- When generating new Python code, follow the existing coding style, write
+  tests, ensure code coverage is near 100%, and fix any issues after running
+  `uv run prek run --all-files`.
 
 ## Coding Style
 
 - Use 4 spaces for indentation.
+- All functions should have a docstring.
 - Follow the
   [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html)
 - Use types and be as explicit as possible.

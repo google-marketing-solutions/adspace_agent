@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,12 +24,38 @@ authors = [
   { name = "Brian Craft", email = "bcraft@google.com" }
 ]
 dependencies = [
+  "altair",
+  "bigframes",
+  "calplot",
+  "cvxpy",
+  "db-dtypes",
   "fastapi",
   "google-adk",
-  "google-ads",
+  "google-ads-adk",
   "google-genai",
+  "holidays",
   "langchain-experimental",
-  "python-dotenv"
+  "matplotlib",
+  "numpy",
+  "openpyxl",
+  "pandas",
+  "patchworklib",
+  "pillow",
+  "plotly",
+  "polars",
+  "prophet",
+  "pyarrow",
+  "pydantic",
+  "python-dateutil",
+  "python-dotenv",
+  "requests",
+  "scikit-learn",
+  "scipy",
+  "seaborn",
+  "statsmodels",
+  "tqdm",
+  "validators",
+  "wordcloud",
 ]
 
 [project.scripts]
@@ -147,3 +173,6 @@ default = true
 module-root = ""
 module-name = "adspace_agent"
 source-exclude = ["assets"]
+
+[tool.uv.sources]
+google-ads-adk = { git = "https://github.com/google-marketing-solutions/google_ads_adk" }

@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -60,7 +60,7 @@ _mock_google_auth.start()  # pyright: ignore[reportUnusedCallResult]
 # Mock discovery resource for GoogleApiToOpenApiConverter
 
 
-def pytest_unconfigure(config: pytest.Config):  # noqa: ARG001 # pyright: ignore[reportUnusedParameter] # pylint: disable=unused-argument
+def pytest_unconfigure(config: pytest.Config):  # pragma: no cover # noqa: ARG001 # pyright: ignore[reportUnusedParameter] # pylint: disable=unused-argument
     """Clean up mocks after tests are done."""
     _mock_google_auth.stop()
     _mock_genai_client.stop()

@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 
 import os
 
+from dotenv import load_dotenv
 from google.adk.agents import Agent
 from google.adk.artifacts import InMemoryArtifactService
 from google.adk.memory import InMemoryMemoryService
@@ -23,40 +24,81 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.tools.google_api_tool import BigQueryToolset
 from google.adk.tools.google_api_tool import GoogleApiToolset
 from google.adk.tools.google_api_tool import YoutubeToolset
+from google_ads_adk.toolset import GoogleAdsToolset
 
 from adspace_agent.tools.data_analysis import DataAnalysisToolset
-from adspace_agent.tools.google_ads.toolset import GoogleAdsToolset
 from adspace_agent.tools.google_genai import GoogleGenAIToolset
 
+_ = load_dotenv()
+
 APP_NAME = "adspace_agent"
-MODEL = "gemini-3.1-pro-preview"
+MODEL: str = os.environ.get("MODEL", "gemini-3.1-flash-lite-preview")
+CLIENT_ID: str = os.environ["CLIENT_ID"]
+CLIENT_SECRET: str = os.environ["CLIENT_SECRET"]
+GOOGLE_ADS_DEVELOPER_TOKEN: str = os.environ["GOOGLE_ADS_DEVELOPER_TOKEN"]
+GOOGLE_ADS_LOGIN_CUSTOMER_ID: str | None = os.environ.get(
+    "GOOGLE_ADS_LOGIN_CUSTOMER_ID"
+)
+
+_google_ads_tool_filter_env = os.environ.get("GOOGLE_ADS_TOOL_FILTER")
+GOOGLE_ADS_TOOL_FILTER: list[str] = (
+    [t.strip() for t in _google_ads_tool_filter_env.split(",") if t.strip()]
+    if _google_ads_tool_filter_env
+    else [
+        "googleads_customers_google_ads_search",
+        "googleads_google_ads_fields_search",
+    ]
+)
+
+ALL_GOOGLE_TOOLSETS = [
+    "bid_manager",
+    "bigquery",
+    "campaign_manager_360",
+    "display_video_360",
+    "drive",
+    "merchant_center_inventories",
+    "merchant_center_products",
+    "merchant_center_reports",
+    "search_ads_360",
+    "storage",
+    "youtube",
+    "google_ads",
+    "google_genai",
+]
+
+_enabled_toolsets_env = os.environ.get("ENABLED_TOOLSETS")
+ENABLED_TOOLSETS: list[str] = (
+    [t.strip() for t in _enabled_toolsets_env.split(",") if t.strip()]
+    if _enabled_toolsets_env is not None
+    else ALL_GOOGLE_TOOLSETS
+)
 
 session_service = InMemorySessionService()
 memory_service = InMemoryMemoryService()
 artifact_service = InMemoryArtifactService()
 
 bid_manager_toolset = GoogleApiToolset(
-    client_id=os.environ["CLIENT_ID"],
-    client_secret=os.environ["CLIENT_SECRET"],
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET,
     api_name="doubleclickbidmanager",
     api_version="v2",
 )
 
 bigquery_toolset = BigQueryToolset(
-    client_id=os.environ["CLIENT_ID"],
-    client_secret=os.environ["CLIENT_SECRET"],
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET,
 )
 
 campaign_manager_360_toolset = GoogleApiToolset(
-    client_id=os.environ["CLIENT_ID"],
-    client_secret=os.environ["CLIENT_SECRET"],
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET,
     api_name="dfareporting",
     api_version="v5",
 )
 
 display_video_360_toolset = GoogleApiToolset(
-    client_id=os.environ["CLIENT_ID"],
-    client_secret=os.environ["CLIENT_SECRET"],
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET,
     api_name="displayvideo",
     api_version="v4",
     tool_filter=[
@@ -180,8 +222,8 @@ display_video_360_toolset = GoogleApiToolset(
 )
 
 drive_toolset = GoogleApiToolset(
-    client_id=os.environ["CLIENT_ID"],
-    client_secret=os.environ["CLIENT_SECRET"],
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET,
     api_name="drive",
     api_version="v3",
     tool_filter=[
@@ -198,36 +240,36 @@ drive_toolset = GoogleApiToolset(
 )
 
 merchant_center_inventories_toolset = GoogleApiToolset(
-    client_id=os.environ["CLIENT_ID"],
-    client_secret=os.environ["CLIENT_SECRET"],
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET,
     api_name="merchantapi",
     api_version="inventories_v1",
 )
 
 merchant_center_products_toolset = GoogleApiToolset(
-    client_id=os.environ["CLIENT_ID"],
-    client_secret=os.environ["CLIENT_SECRET"],
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET,
     api_name="merchantapi",
     api_version="products_v1",
 )
 
 merchant_center_reports_toolset = GoogleApiToolset(
-    client_id=os.environ["CLIENT_ID"],
-    client_secret=os.environ["CLIENT_SECRET"],
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET,
     api_name="merchantapi",
     api_version="reports_v1",
 )
 
 search_ads_360_toolset = GoogleApiToolset(
-    client_id=os.environ["CLIENT_ID"],
-    client_secret=os.environ["CLIENT_SECRET"],
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET,
     api_name="searchads360",
     api_version="v0",
 )
 
 storage_toolset = GoogleApiToolset(
-    client_id=os.environ["CLIENT_ID"],
-    client_secret=os.environ["CLIENT_SECRET"],
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET,
     api_name="storage",
     api_version="v1",
     tool_filter=[
@@ -242,8 +284,8 @@ storage_toolset = GoogleApiToolset(
 )
 
 youtube_toolset = YoutubeToolset(
-    client_id=os.environ["CLIENT_ID"],
-    client_secret=os.environ["CLIENT_SECRET"],
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET,
     tool_filter=[
         "youtube_activities_list",
         "youtube_captions_list",
@@ -264,6 +306,39 @@ youtube_toolset = YoutubeToolset(
     ],
 )
 
+google_ads_toolset = GoogleAdsToolset(
+    developer_token=GOOGLE_ADS_DEVELOPER_TOKEN,
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET,
+    login_customer_id=GOOGLE_ADS_LOGIN_CUSTOMER_ID,
+    tool_filter=GOOGLE_ADS_TOOL_FILTER,
+)
+
+google_genai_toolset = GoogleGenAIToolset()
+
+_tools = []
+_toolset_map = {
+    "bid_manager": bid_manager_toolset,
+    "bigquery": bigquery_toolset,
+    "campaign_manager_360": campaign_manager_360_toolset,
+    "display_video_360": display_video_360_toolset,
+    "drive": drive_toolset,
+    "merchant_center_inventories": merchant_center_inventories_toolset,
+    "merchant_center_products": merchant_center_products_toolset,
+    "merchant_center_reports": merchant_center_reports_toolset,
+    "search_ads_360": search_ads_360_toolset,
+    "storage": storage_toolset,
+    "youtube": youtube_toolset,
+    "google_ads": google_ads_toolset,
+    "google_genai": google_genai_toolset,
+}
+
+for _key, _toolset in _toolset_map.items():
+    if _key in ENABLED_TOOLSETS:
+        _tools.append(_toolset)
+
+_tools.append(DataAnalysisToolset())
+
 root_agent = Agent(
     name=APP_NAME,
     model=Gemini(
@@ -278,29 +353,5 @@ root_agent = Agent(
         "You are a helpful agent who can answer user questions about ads, "
         "creatives, data science, performance, analytics, and campaigns."
     ),
-    tools=[
-        bid_manager_toolset,
-        bigquery_toolset,
-        campaign_manager_360_toolset,
-        display_video_360_toolset,
-        drive_toolset,
-        merchant_center_inventories_toolset,
-        merchant_center_products_toolset,
-        merchant_center_reports_toolset,
-        search_ads_360_toolset,
-        storage_toolset,
-        youtube_toolset,
-        DataAnalysisToolset(),
-        GoogleAdsToolset(
-            developer_token=os.environ["GOOGLE_ADS_DEVELOPER_TOKEN"],
-            client_id=os.environ["CLIENT_ID"],
-            client_secret=os.environ["CLIENT_SECRET"],
-            login_customer_id=os.environ.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID"),
-            tool_filter=[
-                "googleads_customers_google_ads_search",
-                "googleads_google_ads_fields_search",
-            ],
-        ),
-        GoogleGenAIToolset(),
-    ],
+    tools=_tools,
 )

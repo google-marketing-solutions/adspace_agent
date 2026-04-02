@@ -14,6 +14,7 @@
 
 """Tests for list_tools.py."""
 
+import subprocess  # noqa: S404
 import sys
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -127,3 +128,15 @@ def test_main_invalid_subcommand() -> None:
         pytest.raises(SystemExit),
     ):
         main()
+
+
+def test_main_as_script() -> None:
+    """Test running list_tools.py as a script."""
+    result = subprocess.run(
+        [sys.executable, "-m", "adspace_agent.utils.list_tools", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "List tools for various Google APIs." in result.stdout

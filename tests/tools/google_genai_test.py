@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -121,7 +121,7 @@ async def test_generate_video_success(mock_genai_client: mock.Mock):
     # Verify call arguments
     mock_genai_client.models.generate_videos.assert_called_once()
     _, kwargs = mock_genai_client.models.generate_videos.call_args
-    assert kwargs["model"] == "veo-3.1-generate-preview"
+    assert kwargs["model"] == "veo-3.1-lite-generate-preview"
     assert kwargs["source"].prompt == "test_prompt"
 
     mock_tool_context.save_artifact.assert_called_once()
@@ -419,7 +419,7 @@ async def test_generate_image_success(mock_genai_client: mock.Mock):
     # Verify call arguments
     mock_genai_client.aio.models.generate_images.assert_called_once()
     _, kwargs = mock_genai_client.aio.models.generate_images.call_args
-    assert kwargs["model"] == "imagen-4.0-generate-001"
+    assert kwargs["model"] == "imagen-4.0-fast-generate-001"
     assert kwargs["prompt"] == "test_prompt"
 
     mock_tool_context.save_artifact.assert_called_once()

@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,9 +16,9 @@
 from typing import override
 
 from google.adk.agents.readonly_context import ReadonlyContext
+from google.adk.integrations.langchain import LangchainTool
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
-from google.adk.tools.langchain_tool import LangchainTool
 from langchain_experimental.tools.python.tool import PythonAstREPLTool
 
 # pyright: reportPrivateUsage=false
@@ -33,7 +33,6 @@ python_ast_repl_tool = LangchainTool(
     ),
     tool=PythonAstREPLTool(),
 )
-python_ast_repl_tool._require_confirmation = True  # noqa: SLF001 # pylint: disable=protected-access
 
 
 class DataAnalysisToolset(BaseToolset):

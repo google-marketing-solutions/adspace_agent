@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,6 @@ import os
 from typing import override
 import uuid
 
-from dotenv import load_dotenv
 from google import genai
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.readonly_context import ReadonlyContext
@@ -31,9 +30,11 @@ from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.genai import types
 from google.genai.types import Part
 
-_ = load_dotenv()
-
-MODEL = "gemini-3.1-pro-preview"
+MODEL: str = os.environ.get("MODEL", "gemini-3.1-flash-lite-preview")
+VEO_MODEL: str = os.environ.get("VEO_MODEL", "veo-3.1-lite-generate-preview")
+IMAGEN_MODEL: str = os.environ.get(
+    "IMAGEN_MODEL", "imagen-4.0-fast-generate-001"
+)
 
 genai_client = genai.Client(
     vertexai=os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "False").upper() == "TRUE",
@@ -109,7 +110,7 @@ async def generate_video(
     """
     try:
         operation = genai_client.models.generate_videos(
-            model="veo-3.1-generate-preview",
+            model=VEO_MODEL,
             source=types.GenerateVideosSource(
                 prompt=prompt,
             ),
@@ -193,7 +194,7 @@ async def generate_image(
     """
     try:
         response = await genai_client.aio.models.generate_images(
-            model="imagen-4.0-generate-001",
+            model=IMAGEN_MODEL,
             prompt=prompt,
             config=types.GenerateImagesConfig(number_of_images=1),
         )

@@ -18,7 +18,7 @@
 
 [[repos]]
 repo = "https://github.com/astral-sh/uv-pre-commit"
-rev = "0.11.1"
+rev = "0.11.7"
 hooks = [{ id = "uv-lock" }]
 
 [[repos]]
@@ -63,12 +63,12 @@ hooks = [
 
 [[repos]]
 repo = "https://github.com/astral-sh/ruff-pre-commit"
-rev = "v0.15.7"
+rev = "v0.15.11"
 hooks = [{ id = "ruff-check", args = ["--fix"] }, { id = "ruff-format" }]
 
 [[repos]]
 repo = "https://github.com/tombi-toml/tombi-pre-commit"
-rev = "v0.9.9"
+rev = "v0.9.22"
 hooks = [{ id = "tombi-format" }, { id = "tombi-lint" }]
 
 [[repos]]
@@ -92,7 +92,7 @@ hooks = [
 
 [[repos]]
 repo = "https://github.com/commitizen-tools/commitizen"
-rev = "v4.13.9"
+rev = "v4.13.10"
 hooks = [{ id = "commitizen" }]
 
 [[repos]]

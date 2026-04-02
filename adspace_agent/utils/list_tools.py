@@ -21,11 +21,8 @@ from typing import Any
 
 from google.adk.tools.google_api_tool import GoogleApiToolset
 from google.adk.tools.google_api_tool import YoutubeToolset
-
-from adspace_agent.tools.google_ads.discovery_converter import (
-    DiscoveryConverter,
-)
-from adspace_agent.tools.google_ads.toolset import GOOGLE_ADS_API_VERSION
+from google_ads_adk.discovery_converter import DiscoveryConverter
+from google_ads_adk.toolset import GOOGLE_ADS_API_VERSION
 
 
 def list_tools(tools: list[Any]) -> None:
@@ -109,5 +106,5 @@ def main() -> None:
         list_tools(tools)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

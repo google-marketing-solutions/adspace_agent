@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ def test_agent_name():
 
 def test_agent_model():
     """Test that the agent's model is correct."""
-    assert root_agent.model == Gemini(model="gemini-3.1-pro-preview")
+    assert root_agent.model == Gemini(model="gemini-3.1-flash-lite-preview")
 
 
 def test_agent_description():

@@ -31,17 +31,31 @@ export CLIENT_ID=
 export CLIENT_SECRET=
 
 # Google Ads
-# Required for: `adspace_agent/tools/google_ads.py`
 # Reference:
 # https://developers.google.com/google-ads/api/docs/client-libs/python/configuration#env-config-fields
 # https://github.com/googleads/google-ads-python/blob/HEAD/google-ads.yaml
 # https://developers.google.com/google-ads/api/docs/api-policy/developer-token
 export GOOGLE_ADS_DEVELOPER_TOKEN=
 export GOOGLE_ADS_LOGIN_CUSTOMER_ID=
+
+# Optional: Override the default Gemini model
+# export MODEL=gemini-3.1-flash-lite-preview
+
+# Optional: Filter tools for GoogleAdsToolset (comma-separated)
+# export GOOGLE_ADS_TOOL_FILTER=googleads_customers_google_ads_search,googleads_google_ads_fields_search
+
+# Optional: Enable specific toolsets (comma-separated)
+# export ENABLED_TOOLSETS=bid_manager,bigquery,campaign_manager_360,display_video_360,drive,merchant_center_inventories,merchant_center_products,merchant_center_reports,search_ads_360,storage,youtube,google_ads,google_genai
+
+# Optional: Override the default Veo model
+# export VEO_MODEL=veo-3.1-lite-generate-preview
+
+# Optional: Override the default Imagen model
+# export IMAGEN_MODEL=imagen-4.0-fast-generate-001
 ```
 
-When deploying, you can set those environment variables in the Google Cloud user
-interface.
+See: `.env.sample` for more details. When deploying, you can set those
+environment variables in the Google Cloud user interface.
 
 ### Development
 

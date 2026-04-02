@@ -16,27 +16,9 @@
 import os
 from unittest import mock
 
-from google.ads.googleads.v21.services.services.google_ads_service import (
-    GoogleAdsServiceClient,
-)
 import pytest
 
-
 # Mock classes to prevent actual initialization and refresh
-class MockGoogleAdsClient:
-    """A dummy client for test collection."""
-
-    login_customer_id: str | None
-
-    def __init__(self, *args: object, **kwargs: object):  # pylint: disable=line-too-long,unused-argument
-        self.login_customer_id = None
-
-    @classmethod
-    def load_from_env(cls):
-        return cls()
-
-    def get_service(self, name: str, version: str | None = None):  # pyright: ignore[reportUnusedParameter] # pylint: disable=line-too-long,unused-argument
-        return mock.Mock(spec=GoogleAdsServiceClient)
 
 
 class MockGenAIClient:
@@ -46,7 +28,8 @@ class MockGenAIClient:
     models: mock.Mock
     operations: mock.Mock
 
-    def __init__(self, *args: object, **kwargs: object):  # pylint: disable=unused-argument
+    def __init__(self, *args: object, **kwargs: object):  # noqa: ARG002 # pylint: disable=unused-argument
+        """Initializes the mock client."""
         self.aio = mock.Mock()
         self.models = mock.Mock()
         self.operations = mock.Mock()
@@ -58,24 +41,13 @@ DUMMY_ENV = {
     "GOOGLE_CLOUD_PROJECT": "dummy-project",
     "GOOGLE_CLOUD_LOCATION": "dummy-location",
     "GOOGLE_ADS_DEVELOPER_TOKEN": "dummy-token",
-    "GOOGLE_ADS_REFRESH_TOKEN": "dummy-refresh-token",
-    "GOOGLE_ADS_CLIENT_ID": "dummy-client-id",
-    "GOOGLE_ADS_CLIENT_SECRET": "dummy-client-secret",
-    "GOOGLE_ADS_USE_PROTO_PLUS": "TRUE",
-    # Disable automated refresh during tests
-    "GOOGLE_ADS_CREDENTIALS_REFRESH_OFFSET": "3600",
     "CLIENT_ID": "dummy-client-id",
     "CLIENT_SECRET": "dummy-client-secret",
-    "GOOGLE_API_KEY": "dummy-api-key",
 }
 
 _mock_env = mock.patch.dict(os.environ, DUMMY_ENV)
 _mock_env.start()  # pyright: ignore[reportAny]
 
-_mock_client = mock.patch(
-    "google.ads.googleads.client.GoogleAdsClient", MockGoogleAdsClient
-)
-_mock_client.start()  # pyright: ignore[reportUnusedCallResult]
 
 _mock_genai_client = mock.patch("google.genai.Client", MockGenAIClient)
 _mock_genai_client.start()  # pyright: ignore[reportUnusedCallResult]
@@ -86,35 +58,10 @@ _mock_google_auth = mock.patch(
 _mock_google_auth.start()  # pyright: ignore[reportUnusedCallResult]
 
 # Mock discovery resource for GoogleApiToOpenApiConverter
-_mock_discovery_resource = mock.Mock()
-_mock_discovery_resource._rootDesc = {  # pylint: disable=protected-access
-    "title": "Mock API",
-    "description": "Mock Description",
-    "version": "v1",
-    "rootUrl": "https://example.com/",
-    "servicePath": "api/v1",
-    "resources": {},
-    "auth": {
-        "oauth2": {
-            "scopes": {
-                "https://www.googleapis.com/auth/cloud-platform": {
-                    "description": "Mock scope"
-                }
-            }
-        }
-    },
-    "schemas": {},
-}
-_mock_discovery_build = mock.patch(
-    "googleapiclient.discovery.build", return_value=_mock_discovery_resource
-)
-_mock_discovery_build.start()  # pyright: ignore[reportUnusedCallResult]
 
 
-def pytest_unconfigure(config: pytest.Config):  # pyright: ignore[reportUnusedParameter] # pylint: disable=unused-argument
+def pytest_unconfigure(config: pytest.Config):  # noqa: ARG001 # pyright: ignore[reportUnusedParameter] # pylint: disable=unused-argument
     """Clean up mocks after tests are done."""
-    _mock_discovery_build.stop()
     _mock_google_auth.stop()
     _mock_genai_client.stop()
-    _mock_client.stop()
     _mock_env.stop()  # pyright: ignore[reportAny]

@@ -34,15 +34,15 @@ def test_agent_name():
 
 def test_agent_model():
     """Test that the agent's model is correct."""
-    assert root_agent.model == Gemini(model="gemini-3-flash-preview")
+    assert root_agent.model == Gemini(model="gemini-3.1-pro-preview")
 
 
 def test_agent_description():
     """Test that the agent's description is correct."""
     assert root_agent.description == (
         "AdSpace Agent is designed to provide a standardized way to integrate "
-        + "an LLM with Google Ads, YouTube, and Google Cloud to form a more "
-        + "comprehensive campaign and marketing plan for agencies."
+        "an LLM with Google Ads, YouTube, and Google Cloud to form a more "
+        "comprehensive campaign and marketing plan for agencies."
     )
 
 
@@ -50,5 +50,5 @@ def test_agent_instruction():
     """Test that the agent's instruction is correct."""
     assert root_agent.instruction == (
         "You are a helpful agent who can answer user questions about ads, "
-        + "creatives, data science, performance, analytics, and campaigns."
+        "creatives, data science, performance, analytics, and campaigns."
     )

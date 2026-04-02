@@ -23,8 +23,9 @@ from adspace_agent.tools import data_analysis
 def test_python_repl_tool():
     """Tests that the python_ast_repl_tool can execute code."""
     tool = data_analysis.python_ast_repl_tool
-    result = cast(int, tool.func("1 + 1"))
-    assert result == 2
+    result = cast("int", tool.func("1 + 1"))
+    expected_result = 2
+    assert result == expected_result
 
 
 @pytest.mark.asyncio

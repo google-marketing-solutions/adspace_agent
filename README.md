@@ -30,53 +30,18 @@ export GOOGLE_GENAI_USE_VERTEXAI=TRUE
 export CLIENT_ID=
 export CLIENT_SECRET=
 
+# Google Ads
 # Required for: `adspace_agent/tools/google_ads.py`
 # Reference:
 # https://developers.google.com/google-ads/api/docs/client-libs/python/configuration#env-config-fields
 # https://github.com/googleads/google-ads-python/blob/HEAD/google-ads.yaml
 # https://developers.google.com/google-ads/api/docs/api-policy/developer-token
-export GOOGLE_ADS_CLIENT_ID=
-export GOOGLE_ADS_CLIENT_SECRET=
 export GOOGLE_ADS_DEVELOPER_TOKEN=
 export GOOGLE_ADS_LOGIN_CUSTOMER_ID=
-export GOOGLE_ADS_REFRESH_TOKEN=
-export GOOGLE_ADS_USE_PROTO_PLUS="True"
 ```
 
 When deploying, you can set those environment variables in the Google Cloud user
 interface.
-
-#### Refresh Token for Google Ads
-
-For Google Ads integration, you will need to create a refresh token. You can
-generate a refresh token by running:
-
-```shell
-./generate_refresh_token.sh
-```
-
-Or, do it manually. First, create an Oauth client to set up the consent screen.
-Ensure that you have added `http://localhost` as a redirect URI. Now, visit:
-
-```text
-https://accounts.google.com/o/oauth2/auth?client_id=<YOUR_CLIENT_ID>&redirect_uri=http://localhost&scope=https://www.googleapis.com/auth/adwords&response_type=code&access_type=offline
-```
-
-Copy the code from the URL parameter in the blank redirected page and paste it
-as the `code` parameter here:
-
-```shell
-curl --request POST \
-  --data "code=<YOUR_AUTHORIZATION_CODE>" \
-  --data "client_id=<YOUR_CLIENT_ID>" \
-  --data "client_secret=<YOUR_CLIENT_SECRET>" \
-  --data "redirect_uri=http://localhost" \
-  --data "grant_type=authorization_code" \
-  https://oauth2.googleapis.com/token
-```
-
-Use `curl` to grab the refresh token. Copy and paste the `refresh_token` from
-the response to your new `.env` file. You're now all set!
 
 ### Development
 
@@ -94,21 +59,34 @@ uv run adk web
 
 Follow the URL to open the web interface.
 
-### GoogleApiToolkit
+## Exploring Available Tools
 
-The APIs and Versions that can be used with this class can be found running the
-below:
+You can list all available tools for supported APIs using the `list-tools`
+utility command. This is useful for discovering what operations the agent can
+perform.
 
+### Google Ads Tools
+
+```shell
+uv run list-tools google_ads
 ```
-from googleapiclient import discovery
 
-service = discovery.build('discovery', 'v1')
+### YouTube Tools
 
-request = service.apis().list()
-response = request.execute()
+```shell
+uv run list-tools youtube
+```
 
-for api in response.get('items', []):
-  print(api.get('name'), api.get('version'))
+### Other Google API Tools
+
+```shell
+uv run list-tools google --api <api_name> --version <version>
+```
+
+Example for Google Drive:
+
+```shell
+uv run list-tools google --api drive --version v3
 ```
 
 ## Deployment

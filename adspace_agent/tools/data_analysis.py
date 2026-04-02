@@ -33,7 +33,7 @@ python_ast_repl_tool = LangchainTool(
     ),
     tool=PythonAstREPLTool(),
 )
-python_ast_repl_tool._require_confirmation = True  # pylint: disable=protected-access
+python_ast_repl_tool._require_confirmation = True  # noqa: SLF001 # pylint: disable=protected-access
 
 
 class DataAnalysisToolset(BaseToolset):

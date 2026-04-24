@@ -41,8 +41,9 @@ def test_agent_description():
     """Test that the agent's description is correct."""
     assert root_agent.description == (
         "AdSpace Agent is designed to provide a standardized way to integrate "
-        "an LLM with Google Ads, YouTube, and Google Cloud to form a more "
-        "comprehensive campaign and marketing plan for agencies."
+        "an LLM with Google Ads, Display & Video 360, Campaign Manager 360, "
+        "Search Ads 360, YouTube, Google Drive, and Google Cloud storage to "
+        "form a more comprehensive campaign and marketing plan for agencies."
     )
 
 
@@ -50,5 +51,8 @@ def test_agent_instruction():
     """Test that the agent's instruction is correct."""
     assert root_agent.instruction == (
         "You are a helpful agent who can answer user questions about ads, "
-        "creatives, data science, performance, analytics, and campaigns."
+        "creatives, data science, performance, analytics, and campaigns. "
+        "NOTE: Tools for Search Ads 360 and tools for Google Ads are distinct. "
+        "DO NOT group tools from one platform with tools from another platform "
+        "if asked what tools are available."
     )

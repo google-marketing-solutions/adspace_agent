@@ -21,8 +21,6 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
 from langchain_experimental.tools.python.tool import PythonAstREPLTool
 
-# pyright: reportPrivateUsage=false
-
 python_ast_repl_tool = LangchainTool(
     name="python_repl_ast",
     description=(

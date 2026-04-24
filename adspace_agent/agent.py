@@ -18,12 +18,17 @@ import os
 from dotenv import load_dotenv
 from google.adk.agents import Agent
 from google.adk.artifacts import InMemoryArtifactService
+from google.adk.auth.auth_schemes import OpenIdConnectWithConfig
 from google.adk.memory import InMemoryMemoryService
 from google.adk.models.google_llm import Gemini
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools.google_api_tool import BigQueryToolset
 from google.adk.tools.google_api_tool import GoogleApiToolset
 from google.adk.tools.google_api_tool import YoutubeToolset
+from google.adk.tools.google_api_tool.googleapi_to_openapi_converter import (
+    GoogleApiToOpenApiConverter,
+)
+from google.adk.tools.openapi_tool import OpenAPIToolset
 from google_ads_adk.toolset import GoogleAdsToolset
 
 from adspace_agent.tools.data_analysis import DataAnalysisToolset
@@ -94,6 +99,29 @@ campaign_manager_360_toolset = GoogleApiToolset(
     client_secret=CLIENT_SECRET,
     api_name="dfareporting",
     api_version="v5",
+)
+
+# Overwrite the auto-selected scope for dfareporting to fix 401 error
+spec_dict = GoogleApiToOpenApiConverter("dfareporting", "v5").convert()
+campaign_manager_360_toolset._openapi_toolset = OpenAPIToolset(  # noqa: SLF001
+    spec_dict=spec_dict,
+    spec_str_type="yaml",
+    auth_scheme=OpenIdConnectWithConfig(
+        authorization_endpoint="https://accounts.google.com/o/oauth2/v2/auth",
+        token_endpoint="https://oauth2.googleapis.com/token",  # noqa: S106
+        userinfo_endpoint="https://openidconnect.googleapis.com/v1/userinfo",
+        revocation_endpoint="https://oauth2.googleapis.com/revoke",
+        token_endpoint_auth_methods_supported=[
+            "client_secret_post",
+            "client_secret_basic",
+        ],
+        grant_types_supported=["authorization_code"],
+        scopes=[
+            "https://www.googleapis.com/auth/dfareporting",
+            "https://www.googleapis.com/auth/dfatrafficking",
+            "https://www.googleapis.com/auth/ddmconversions",
+        ],
+    ),
 )
 
 display_video_360_toolset = GoogleApiToolset(

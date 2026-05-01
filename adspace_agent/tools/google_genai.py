@@ -13,8 +13,6 @@
 # limitations under the License.
 """A set of tools for the AdSpace Agent to interact with Google Cloud GenAI."""
 
-# pyright: reportDeprecated=false
-
 import asyncio
 import os
 from typing import override
@@ -23,15 +21,15 @@ import uuid
 from google import genai
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.readonly_context import ReadonlyContext
+from google.adk.tools import FunctionTool
+from google.adk.tools import LongRunningFunctionTool
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
-from google.adk.tools.function_tool import FunctionTool
-from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.genai import types
 from google.genai.types import Part
 
 MODEL: str = os.environ.get("MODEL", "gemini-3.1-flash-lite-preview")
-VEO_MODEL: str = os.environ.get("VEO_MODEL", "veo-3.1-lite-generate-preview")
+VEO_MODEL: str = os.environ.get("VEO_MODEL", "veo-3.1-lite-generate-001")
 IMAGEN_MODEL: str = os.environ.get(
     "IMAGEN_MODEL", "imagen-4.0-fast-generate-001"
 )
@@ -52,6 +50,9 @@ async def get_info_about_youtube_video(
     This function gives the ability to prompt a YouTube video and ask questions
     about the video's visual, audio, and more. It also provides answers to the
     prompt.
+
+    This function is optimized for parallel execution - call multiple times
+    for different videos if needed.
 
     Args:
       youtube_video_id: The external YouTube video ID, found at the end of a
@@ -81,10 +82,10 @@ async def get_info_about_youtube_video(
             role="user",
         )
 
-        response = await genai_client.aio.models.generate_content(  # pyright: ignore[reportUnknownMemberType] # pylint: disable=line-too-long
+        response = await genai_client.aio.models.generate_content(
             model=MODEL, contents=[contents]
         )
-    except Exception as ex:  # noqa: BLE001 # pylint: disable=broad-exception-caught
+    except Exception as ex:  # noqa: BLE001
         return {
             "status": "ERROR",
             "error_details": str(ex),
@@ -100,6 +101,8 @@ async def generate_video(
 ) -> dict[str, str | Part]:
     """Generates a video from a prompt using Google GenAI' Veo 3 model.
 
+    This function is optimized for parallel execution.
+
     Args:
         prompt (str): The prompt to use for creating the video.
         tool_context (CallbackContext): The callback context.
@@ -109,7 +112,7 @@ async def generate_video(
             operation and the response.
     """
     try:
-        operation = genai_client.models.generate_videos(
+        operation = await genai_client.aio.models.generate_videos(
             model=VEO_MODEL,
             source=types.GenerateVideosSource(
                 prompt=prompt,
@@ -119,7 +122,7 @@ async def generate_video(
 
         while not operation.done:
             await asyncio.sleep(5)
-            operation = genai_client.operations.get(operation)
+            operation = await genai_client.aio.operations.get(operation)
 
         if not operation.response:
             return {
@@ -165,7 +168,7 @@ async def generate_video(
             filename=filename,
             artifact=artifact,
         )
-    except Exception as ex:  # noqa: BLE001 # pylint: disable=broad-exception-caught
+    except Exception as ex:  # noqa: BLE001
         return {
             "status": "ERROR",
             "error_details": str(ex),
@@ -183,6 +186,8 @@ async def generate_image(
     tool_context: CallbackContext,
 ) -> dict[str, str | Part]:
     """Generates an image from a prompt using Google GenAI's Imagen 3 model.
+
+    This function is optimized for parallel execution.
 
     Args:
         prompt (str): The prompt to use for creating the image.
@@ -237,7 +242,7 @@ async def generate_image(
             filename=filename,
             artifact=artifact,
         )
-    except Exception as ex:  # noqa: BLE001 # pylint: disable=broad-exception-caught
+    except Exception as ex:  # noqa: BLE001
         return {
             "status": "ERROR",
             "error_details": str(ex),
@@ -253,8 +258,8 @@ class GoogleGenAIToolset(BaseToolset):
     """A custom toolset for calling Google GenAI APIs."""
 
     @override
-    async def get_tools(  # pytype: disable=override-error
+    async def get_tools(
         self,
-        readonly_context: ReadonlyContext | None = None,  # pylint: disable=unused-argument
+        readonly_context: ReadonlyContext | None = None,
     ) -> list[BaseTool]:
         return [get_info_about_youtube_video, generate_video, generate_image]

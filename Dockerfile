@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM python:3.12-slim
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git
 WORKDIR /app
-COPY . ./
+COPY . /app
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+ENV UV_NO_DEV=1
+ENV UV_TOOL_BIN_DIR=/usr/local/bin
 RUN uv sync --locked
 EXPOSE 8000
-ENTRYPOINT ["uv", "run", "adk", "web", "--port", "8000", "--host", "0.0.0.0", "--no-reload"]
+ENTRYPOINT ["sh", "-c", "eval uv run adk web --port 8000 --host 0.0.0.0 --no-reload ${OPTIONAL_ADK_WEB_ARGS}"]

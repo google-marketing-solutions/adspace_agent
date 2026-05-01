@@ -14,7 +14,7 @@
 
 [project]
 name = "adspace_agent"
-version = "0.10.0"
+version = "0.12.0"
 description = "AdSpace Agent is designed to provide a standardized way to integrate an LLM with Google Ads, YouTube, Google Cloud, and Google Search to form a more comprehensive campaign and marketing plan for agencies."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -32,6 +32,7 @@ dependencies = [
   "fastapi",
   "google-adk",
   "google-ads-adk",
+  "google-cloud-aiplatform",
   "google-genai",
   "holidays",
   "langchain-experimental",
@@ -65,31 +66,22 @@ list-tools = "adspace_agent.utils.list_tools:main"
 dev = [
   "commitizen",
   "coverage",
-  "mdformat",
-  "mdformat-config",
-  "mdformat-footnote",
-  "mdformat-frontmatter",
-  "mdformat-gfm",
-  "mdformat-gfm-alerts",
-  "mdformat-ruff",
-  "mdformat-shfmt",
   "prek",
   "pytest",
   "pytest-asyncio",
   "pytest-cov",
   "ruff",
+  "rumdl",
   "tombi",
   "ty"
 ]
 
 [build-system]
-requires = ["uv_build>=0.11.3,<0.12"]
+requires = ["uv_build>=0.11.14,<0.12"]
 build-backend = "uv_build"
 
-[tool.mdformat]
-wrap = 80
-number = true
-validate = true
+[tool.commitizen]
+version_provider = "pep621"
 
 [tool.ruff]
 fix = true
@@ -118,11 +110,6 @@ ignore = [
   "N812",  # lowercase-imported-as-non-lowercase (Google naming flexibility)
   "FIX002",  # line-contains-todo (Google style uses TODOs)
   "TD003",  # missing-todo-link (Google style doesn't require links)
-  "C901",
-  "PLR0912",
-  "E501",
-  "RUF029",
-  "TC002"
 ]
 logger-objects = ["logging", "absl.logging", "tensorflow.io.logging"]
 
@@ -157,6 +144,57 @@ max-statements = 50
 "Bastion".msg = "Deprecated module, see Google Python Style Guide."
 "rexec".msg = "Deprecated module, see Google Python Style Guide."
 "sets".msg = "Deprecated module, see Google Python Style Guide."
+
+[tool.rumdl]
+exclude = [
+  ".git",
+  "node_modules",
+  "vendor",
+  "dist",
+  "build",
+  "LICENSE.md",
+  "LICENSE"
+]
+respect-gitignore = true
+
+[tool.rumdl.MD003]
+style = "atx"
+
+[tool.rumdl.MD004]
+style = "dash"
+
+[tool.rumdl.MD007]
+indent = 4
+
+[tool.rumdl.MD009]
+strict = true
+
+[tool.rumdl.MD013]
+line-length = 80
+code-blocks = false
+tables = false
+reflow = true
+
+[tool.rumdl.MD026]
+punctuation = ".,;:!。，；：！"
+
+[tool.rumdl.MD029]
+style = "one"
+
+[tool.rumdl.MD040]
+severity = "warning"
+
+[tool.rumdl.MD041]
+severity = "warning"
+
+[tool.rumdl.MD046]
+style = "fenced"
+
+[tool.rumdl.MD049]
+style = "underscore"
+
+[tool.rumdl.MD050]
+style = "asterisk"
 
 [tool.tombi.lsp]
 goto-type-definition.enabled = false

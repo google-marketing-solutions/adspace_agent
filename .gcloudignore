@@ -16,3 +16,4 @@
 .github/
 .git/
 !google-ads.yaml
+assets/

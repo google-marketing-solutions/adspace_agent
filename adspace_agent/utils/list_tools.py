@@ -11,8 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""Unified script to list tools for Google Ads, YouTube, and generic Google APIs."""
+"""Unified script to list tools for Google Ads, YouTube, and Google APIs."""
 
 import argparse
 import asyncio

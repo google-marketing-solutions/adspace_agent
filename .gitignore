@@ -11,3 +11,8 @@ __pycache__
 .adk
 dist
 google-ads.yaml
+.rumdl_cache
+adspace_agent_tmp*
+requirements.txt
+sessions.db
+skills/**

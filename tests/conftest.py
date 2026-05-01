@@ -18,8 +18,6 @@ from unittest import mock
 
 import pytest
 
-# Mock classes to prevent actual initialization and refresh
-
 
 class MockGenAIClient:
     """A dummy GenAI client for test collection."""
@@ -28,15 +26,13 @@ class MockGenAIClient:
     models: mock.Mock
     operations: mock.Mock
 
-    def __init__(self, *args: object, **kwargs: object):  # noqa: ARG002 # pylint: disable=unused-argument
+    def __init__(self, *args: object, **kwargs: object):  # noqa: ARG002
         """Initializes the mock client."""
         self.aio = mock.Mock()
         self.models = mock.Mock()
         self.operations = mock.Mock()
 
 
-# Set up dummy environment variables for test collection.
-# These must be set before any modules that initialize clients are imported.
 DUMMY_ENV = {
     "GOOGLE_CLOUD_PROJECT": "dummy-project",
     "GOOGLE_CLOUD_LOCATION": "dummy-location",
@@ -46,22 +42,20 @@ DUMMY_ENV = {
 }
 
 _mock_env = mock.patch.dict(os.environ, DUMMY_ENV)
-_mock_env.start()  # pyright: ignore[reportAny]
+_mock_env.start()
 
 
 _mock_genai_client = mock.patch("google.genai.Client", MockGenAIClient)
-_mock_genai_client.start()  # pyright: ignore[reportUnusedCallResult]
+_mock_genai_client.start()
 
 _mock_google_auth = mock.patch(
     "google.auth.default", return_value=(mock.Mock(), "dummy-project")
 )
-_mock_google_auth.start()  # pyright: ignore[reportUnusedCallResult]
-
-# Mock discovery resource for GoogleApiToOpenApiConverter
+_mock_google_auth.start()
 
 
-def pytest_unconfigure(config: pytest.Config):  # pragma: no cover # noqa: ARG001 # pyright: ignore[reportUnusedParameter] # pylint: disable=unused-argument
+def pytest_unconfigure(config: pytest.Config):  # noqa: ARG001
     """Clean up mocks after tests are done."""
     _mock_google_auth.stop()
     _mock_genai_client.stop()
-    _mock_env.stop()  # pyright: ignore[reportAny]
+    _mock_env.stop()

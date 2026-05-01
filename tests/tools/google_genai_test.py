@@ -20,8 +20,6 @@ import pytest
 
 from adspace_agent.tools import google_genai
 
-# pyright: reportAny=false
-
 
 @pytest.mark.asyncio
 @mock.patch.dict(
@@ -103,7 +101,7 @@ async def test_generate_video_success(mock_genai_client: mock.Mock):
         0
     ].video.video_bytes = b"test_video"
     mock_operation.response.generated_videos[0].video.mime_type = "video/mp4"
-    mock_genai_client.models.generate_videos = mock.Mock(
+    mock_genai_client.aio.models.generate_videos = mock.AsyncMock(
         return_value=mock_operation
     )
 
@@ -119,9 +117,9 @@ async def test_generate_video_success(mock_genai_client: mock.Mock):
     assert result["message"] == "Generated video."
 
     # Verify call arguments
-    mock_genai_client.models.generate_videos.assert_called_once()
-    _, kwargs = mock_genai_client.models.generate_videos.call_args
-    assert kwargs["model"] == "veo-3.1-lite-generate-preview"
+    mock_genai_client.aio.models.generate_videos.assert_called_once()
+    _, kwargs = mock_genai_client.aio.models.generate_videos.call_args
+    assert kwargs["model"] == "veo-3.1-lite-generate-001"
     assert kwargs["source"].prompt == "test_prompt"
 
     mock_tool_context.save_artifact.assert_called_once()
@@ -155,8 +153,12 @@ async def test_generate_video_polling(
     mock_op_done.response.generated_videos[0].video.video_bytes = b"test_video"
     mock_op_done.response.generated_videos[0].video.mime_type = "video/mp4"
 
-    mock_genai_client.models.generate_videos.return_value = mock_op_pending
-    mock_genai_client.operations.get.return_value = mock_op_done
+    mock_genai_client.aio.models.generate_videos = mock.AsyncMock(
+        return_value=mock_op_pending
+    )
+    mock_genai_client.aio.operations.get = mock.AsyncMock(
+        return_value=mock_op_done
+    )
 
     mock_tool_context = mock.AsyncMock()
     mock_tool_context.save_artifact.return_value = "v1"
@@ -166,7 +168,7 @@ async def test_generate_video_polling(
     )
 
     assert result["status"] == "SUCCESS"
-    assert mock_genai_client.operations.get.called
+    assert mock_genai_client.aio.operations.get.called
     assert mock_sleep.called
 
 
@@ -184,7 +186,7 @@ async def test_generate_video_no_response(mock_genai_client: mock.Mock):
     mock_operation = mock.Mock()
     mock_operation.done = True
     mock_operation.response = None
-    mock_genai_client.models.generate_videos = mock.Mock(
+    mock_genai_client.aio.models.generate_videos = mock.AsyncMock(
         return_value=mock_operation
     )
 
@@ -212,7 +214,7 @@ async def test_generate_video_no_generated_videos(mock_genai_client: mock.Mock):
     mock_operation = mock.Mock()
     mock_operation.done = True
     mock_operation.response.generated_videos = []
-    mock_genai_client.models.generate_videos = mock.Mock(
+    mock_genai_client.aio.models.generate_videos = mock.AsyncMock(
         return_value=mock_operation
     )
 
@@ -244,7 +246,7 @@ async def test_generate_video_missing_video_data(mock_genai_client: mock.Mock):
     mock_operation.done = True
     mock_operation.response.generated_videos = [mock.Mock()]
     mock_operation.response.generated_videos[0].video = None
-    mock_genai_client.models.generate_videos = mock.Mock(
+    mock_genai_client.aio.models.generate_videos = mock.AsyncMock(
         return_value=mock_operation
     )
 
@@ -277,7 +279,7 @@ async def test_generate_video_empty_video_content(mock_genai_client: mock.Mock):
     mock_operation.response.generated_videos = [mock.Mock()]
     mock_operation.response.generated_videos[0].video.video_bytes = None
     mock_operation.response.generated_videos[0].video.mime_type = None
-    mock_genai_client.models.generate_videos = mock.Mock(
+    mock_genai_client.aio.models.generate_videos = mock.AsyncMock(
         return_value=mock_operation
     )
 
@@ -305,7 +307,7 @@ async def test_generate_video_empty_video_content(mock_genai_client: mock.Mock):
 @mock.patch("adspace_agent.tools.google_genai.genai_client")
 async def test_generate_video_exception(mock_genai_client: mock.Mock):
     """Tests that generate_video handles exceptions."""
-    mock_genai_client.models.generate_videos = mock.Mock(
+    mock_genai_client.aio.models.generate_videos = mock.AsyncMock(
         side_effect=Exception("Test error")
     )
 
@@ -328,16 +330,20 @@ async def test_generate_video_exception(mock_genai_client: mock.Mock):
     },
 )
 @mock.patch("adspace_agent.tools.google_genai.genai_client")
+@mock.patch("asyncio.sleep", return_value=None)
 async def test_generate_video_operations_get_exception(
+    mock_sleep: mock.Mock,
     mock_genai_client: mock.Mock,
 ):
     """Tests that generate_video handles operations.get exceptions."""
     mock_op_pending = mock.Mock()
     mock_op_pending.done = False
 
-    mock_genai_client.models.generate_videos.return_value = mock_op_pending
-    mock_genai_client.operations.get.side_effect = Exception(
-        "Operation get error"
+    mock_genai_client.aio.models.generate_videos = mock.AsyncMock(
+        return_value=mock_op_pending
+    )
+    mock_genai_client.aio.operations.get = mock.AsyncMock(
+        side_effect=Exception("Operation get error")
     )
 
     mock_tool_context = mock.AsyncMock()
@@ -348,6 +354,7 @@ async def test_generate_video_operations_get_exception(
 
     assert result["status"] == "ERROR"
     assert result["error_details"] == "Operation get error"
+    assert mock_sleep.called
 
 
 @pytest.mark.asyncio
@@ -371,7 +378,9 @@ async def test_generate_video_save_artifact_exception(
     ].video.video_bytes = b"test_video"
     mock_operation.response.generated_videos[0].video.mime_type = "video/mp4"
 
-    mock_genai_client.models.generate_videos.return_value = mock_operation
+    mock_genai_client.aio.models.generate_videos = mock.AsyncMock(
+        return_value=mock_operation
+    )
 
     mock_tool_context = mock.AsyncMock()
     mock_tool_context.save_artifact.side_effect = Exception(
@@ -595,9 +604,8 @@ async def test_google_genai_toolset():
     assert tools[2] is google_genai.generate_image
 
 
-@pytest.mark.asyncio
 @mock.patch("google.genai.Client")
-async def test_module_initialization_vertexai(
+def test_module_initialization_vertexai(
     mock_genai_client: mock.Mock,
 ):
     """Tests that the genai.Client is initialized correctly with Vertex AI."""
@@ -619,9 +627,8 @@ async def test_module_initialization_vertexai(
         )
 
 
-@pytest.mark.asyncio
 @mock.patch("google.genai.Client")
-async def test_module_initialization_no_vertexai(
+def test_module_initialization_no_vertexai(
     mock_genai_client: mock.Mock,
 ):
     """Tests that the genai.Client is initialized without Vertex AI."""

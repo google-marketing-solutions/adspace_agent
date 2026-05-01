@@ -48,7 +48,7 @@ export GOOGLE_ADS_LOGIN_CUSTOMER_ID=
 # export ENABLED_TOOLSETS=bid_manager,bigquery,campaign_manager_360,display_video_360,drive,merchant_center_inventories,merchant_center_products,merchant_center_reports,search_ads_360,storage,youtube,google_ads,google_genai
 
 # Optional: Override the default Veo model
-# export VEO_MODEL=veo-3.1-lite-generate-preview
+# export VEO_MODEL=veo-3.1-lite-generate-001
 
 # Optional: Override the default Imagen model
 # export IMAGEN_MODEL=imagen-4.0-fast-generate-001
@@ -113,7 +113,9 @@ to set up the environment variables.
 gcloud run deploy adspace-agent \
   --source . \
   --memory 4Gi \
-  --port 8000
+  --cpu 1 \
+  --port 8000 \
+  --env-vars-file .env
 ```
 
 You will also need the following APIs enabled:
@@ -133,6 +135,28 @@ gcloud services enable \
   searchads360.googleapis.com \
   storage.googleapis.com \
   youtube.googleapis.com
+```
+
+### Agent Engine
+
+Generate the `requirements.txt` that is needed:
+
+```shell
+uv pip compile pyproject.toml -o requirements.txt
+```
+
+Deploy:
+
+```shell
+uv run adk deploy agent_engine \
+  --project <YOUR_GOOGLE_CLOUD_PROJECT> \
+  --region <YOUR_GOOGLE_CLOUD_LOCATION> \
+  --display_name "AdSpace Agent" \
+  --description "AdSpace Agent is designed to provide a standardized way to integrate an LLM with Google Ads, YouTube, Google Cloud, and Google Search to form a more comprehensive campaign and marketing plan for agencies." \
+  --env_file .env \
+  --requirements_file requirements.txt \
+  --trace_to_cloud \
+  adspace_agent
 ```
 
 ## Contributing

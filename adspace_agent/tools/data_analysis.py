@@ -37,8 +37,8 @@ class DataAnalysisToolset(BaseToolset):
     """A custom toolset that groups all our data analysis functions."""
 
     @override
-    async def get_tools(  # pytype: disable=override-error
+    async def get_tools(
         self,
-        readonly_context: ReadonlyContext | None = None,  # pylint: disable=unused-argument
+        readonly_context: ReadonlyContext | None = None,
     ) -> list[BaseTool]:
         return [python_ast_repl_tool]

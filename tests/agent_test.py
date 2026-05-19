@@ -16,6 +16,10 @@
 from unittest.mock import patch
 
 from google.adk.models.google_llm import Gemini
+from google.adk.skills import Frontmatter
+from google.adk.skills import Resources
+from google.adk.skills import Skill
+from google.adk.tools.skill_toolset import SkillToolset
 import pytest
 
 from adspace_agent.agent import create_agent
@@ -122,3 +126,109 @@ def test_create_agent_with_env_vars():
         # We can't easily check internal variables of create_agent unless we
         # expose them or check side effects.
         # But this executes the lines in question.
+
+
+def test_create_agent_with_local_skills(tmp_path):
+    """Test create_agent with a custom LOCAL_SKILLS_DIR."""
+    mock_frontmatter = Frontmatter(
+        name="test-skill", description="A test skill description."
+    )
+    mock_skill = Skill(
+        frontmatter=mock_frontmatter,
+        instructions="Test instructions",
+        resources=Resources(),
+    )
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "CLIENT_ID": "test_client_id",
+                "CLIENT_SECRET": "test_client_secret",
+                "GOOGLE_ADS_DEVELOPER_TOKEN": "test_token",
+                "LOCAL_SKILLS_DIR": str(skills_dir),
+            },
+        ),
+        patch(
+            "adspace_agent.agent.GoogleApiToOpenApiConverter.convert",
+            return_value=DUMMY_OPENAPI,
+        ),
+        patch(
+            "adspace_agent.agent.list_skills_in_dir",
+            return_value={"test-skill": mock_frontmatter},
+        ),
+        patch(
+            "adspace_agent.agent.load_skill_from_dir",
+            return_value=mock_skill,
+        ),
+    ):
+        agent = create_agent()
+        assert agent.name == "adspace_agent"
+        # Verify that the skills toolset exists and includes our mock skill
+        skills_toolsets = [
+            t for t in agent.tools if t.__class__.__name__ == "SkillToolset"
+        ]
+        assert len(skills_toolsets) == 1
+        skills_toolset = skills_toolsets[0]
+        assert isinstance(skills_toolset, SkillToolset)
+        assert len(skills_toolset._skills) == 1  # noqa: SLF001
+        assert (
+            skills_toolset._skills["test-skill"].name  # noqa: SLF001
+            == "test-skill"
+        )
+
+
+def test_create_agent_with_gcs_skills():
+    """Test create_agent with GCS skills enabled via SKILLS_BUCKET_NAME."""
+    mock_frontmatter = Frontmatter(
+        name="gcs-skill", description="A GCS skill description."
+    )
+    mock_skill = Skill(
+        frontmatter=mock_frontmatter,
+        instructions="GCS instructions",
+        resources=Resources(),
+    )
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "CLIENT_ID": "test_client_id",
+                "CLIENT_SECRET": "test_client_secret",
+                "GOOGLE_ADS_DEVELOPER_TOKEN": "test_token",
+                "SKILLS_BUCKET_NAME": "test-bucket",
+            },
+        ),
+        patch(
+            "adspace_agent.agent.GoogleApiToOpenApiConverter.convert",
+            return_value=DUMMY_OPENAPI,
+        ),
+        patch(
+            "adspace_agent.agent.list_skills_in_dir",
+            return_value={},
+        ),
+        patch(
+            "adspace_agent.agent.list_skills_in_gcs_dir",
+            return_value={"gcs-skill": mock_frontmatter},
+        ),
+        patch(
+            "adspace_agent.agent.load_skill_from_gcs_dir",
+            return_value=mock_skill,
+        ),
+    ):
+        agent = create_agent()
+        assert agent.name == "adspace_agent"
+        skills_toolsets = [
+            t for t in agent.tools if t.__class__.__name__ == "SkillToolset"
+        ]
+        assert len(skills_toolsets) == 1
+        skills_toolset = skills_toolsets[0]
+        assert isinstance(skills_toolset, SkillToolset)
+        assert len(skills_toolset._skills) == 1  # noqa: SLF001
+        assert (
+            skills_toolset._skills["gcs-skill"].name  # noqa: SLF001
+            == "gcs-skill"
+        )

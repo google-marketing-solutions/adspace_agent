@@ -14,6 +14,7 @@
 """The AdSpace Agent main application."""
 
 import os
+import pathlib
 
 from dotenv import load_dotenv
 from google.adk.agents import Agent
@@ -45,9 +46,12 @@ from .tools.google_genai import GoogleGenAIToolset
 from .tools.utilities import UtilitiesToolset
 
 APP_NAME = "adspace_agent"
+
 MODEL: str = os.environ.get("MODEL", "gemini-3.1-flash-lite-preview")
+
 CLIENT_ID: str = os.environ["CLIENT_ID"]
 CLIENT_SECRET: str = os.environ["CLIENT_SECRET"]
+
 GOOGLE_ADS_DEVELOPER_TOKEN: str = os.environ["GOOGLE_ADS_DEVELOPER_TOKEN"]
 GOOGLE_ADS_LOGIN_CUSTOMER_ID: str | None = os.environ.get(
     "GOOGLE_ADS_LOGIN_CUSTOMER_ID"
@@ -382,9 +386,15 @@ def create_agent() -> Agent:  # noqa: PLR0914
                 skills_base_path="skills",
             )
 
-    local_skills = list_skills_in_dir("./skills")
-    for skill_id in local_skills:
-        skill_map[skill_id] = load_skill_from_dir(f"./skills/{skill_id}")
+    local_skills_dir = os.environ.get("LOCAL_SKILLS_DIR") or str(
+        pathlib.Path(__file__).parent.parent / "skills"
+    )
+    if pathlib.Path(local_skills_dir).exists():
+        local_skills = list_skills_in_dir(local_skills_dir)
+        for skill_id in local_skills:
+            skill_map[skill_id] = load_skill_from_dir(
+                str(pathlib.Path(local_skills_dir) / skill_id)
+            )
 
     skills = list(skill_map.values())
 

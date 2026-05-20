@@ -35,6 +35,7 @@ dependencies = [
   "google-api-python-client",
   "google-cloud-aiplatform",
   "google-genai",
+  "greenlet",
   "holidays",
   "langchain-experimental",
   "matplotlib",

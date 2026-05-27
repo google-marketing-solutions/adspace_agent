@@ -28,8 +28,8 @@ from google.adk.tools.base_toolset import BaseToolset
 from google.genai import types
 from google.genai.types import Part
 
-MODEL: str = os.environ.get("MODEL", "gemini-3.1-flash-lite-preview")
-VEO_MODEL: str = os.environ.get("VEO_MODEL", "veo-3.1-lite-generate-001")
+MODEL: str = os.environ.get("MODEL", "gemini-3.1-flash-lite")
+VEO_MODEL: str = os.environ.get("VEO_MODEL", "veo-3.1-lite-generate-preview")
 IMAGEN_MODEL: str = os.environ.get(
     "IMAGEN_MODEL", "imagen-4.0-fast-generate-001"
 )

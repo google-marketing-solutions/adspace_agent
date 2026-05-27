@@ -71,7 +71,7 @@ def test_agent_name(agent):
 
 def test_agent_model(agent):
     """Test that the agent's model is correct."""
-    assert agent.model == Gemini(model="gemini-3.1-flash-lite-preview")
+    assert agent.model == Gemini(model="gemini-3.1-flash-lite")
 
 
 def test_agent_description(agent):

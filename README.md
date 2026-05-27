@@ -38,20 +38,15 @@ export CLIENT_SECRET=
 export GOOGLE_ADS_DEVELOPER_TOKEN=
 export GOOGLE_ADS_LOGIN_CUSTOMER_ID=
 
-# Optional: Override the default Gemini model
-# export MODEL=gemini-3.1-flash-lite-preview
-
-# Optional: Filter tools for GoogleAdsToolset (comma-separated)
-# export GOOGLE_ADS_TOOL_FILTER=googleads_customers_google_ads_search,googleads_google_ads_fields_search
-
-# Optional: Enable specific toolsets (comma-separated)
-# export ENABLED_TOOLSETS=bid_manager,bigquery,campaign_manager_360,display_video_360,drive,merchant_center_inventories,merchant_center_products,merchant_center_reports,search_ads_360,storage,youtube,google_ads,google_genai
-
-# Optional: Override the default Veo model
-# export VEO_MODEL=veo-3.1-lite-generate-001
-
-# Optional: Override the default Imagen model
+# Optionals:
+# export MODEL=gemini-3.1-flash-lite
+# export VEO_MODEL=veo-3.1-lite-generate-preview
 # export IMAGEN_MODEL=imagen-4.0-fast-generate-001
+# export ENABLED_TOOLSETS=bid_manager,bigquery,campaign_manager_360,display_video_360,drive,merchant_center_inventories,merchant_center_products,merchant_center_reports,search_ads_360,storage,youtube,google_ads,google_genai
+# export GOOGLE_ADS_TOOL_FILTER=googleads_customers_google_ads_search,googleads_google_ads_fields_search
+# export SKILLS_BUCKET_NAME="adspace-agent"
+# export LOCAL_SKILLS_DIR="./skills"
+# export OPTIONAL_ADK_WEB_ARGS="--logo-text \"AdSpace Agent\" --logo-image-url \"https://raw.githubusercontent.com/google-marketing-solutions/adspace_agent/main/assets/logo.png\" --eval_storage_uri \"gs://adspace-agent\" --session_service_uri \"sqlite+aiosqlite:///./sessions.db\" --artifact_service_uri \"gs://adspace-agent\" --memory_service_uri \"memory://\""
 ```
 
 See: `.env.sample` for more details. When deploying, you can set those
@@ -109,15 +104,6 @@ To deploy the application, you can use the Google Cloud user interface to set
 the environment variables. Refer to the previous section for instructions on how
 to set up the environment variables.
 
-```shell
-gcloud run deploy adspace-agent \
-  --source . \
-  --memory 4Gi \
-  --cpu 1 \
-  --port 8000 \
-  --env-vars-file .env
-```
-
 You will also need the following APIs enabled:
 
 ```shell
@@ -137,26 +123,16 @@ gcloud services enable \
   youtube.googleapis.com
 ```
 
-### Agent Engine
+### Cloud Run
 
-Generate the `requirements.txt` that is needed:
-
-```shell
-uv pip compile pyproject.toml -o requirements.txt
-```
-
-Deploy:
+To deploy to Cloud Run:
 
 ```shell
-uv run adk deploy agent_engine \
-  --project <YOUR_GOOGLE_CLOUD_PROJECT> \
-  --region <YOUR_GOOGLE_CLOUD_LOCATION> \
-  --display_name "AdSpace Agent" \
-  --description "AdSpace Agent is designed to provide a standardized way to integrate an LLM with Google Ads, YouTube, Google Cloud, and Google Search to form a more comprehensive campaign and marketing plan for agencies." \
-  --env_file .env \
-  --requirements_file requirements.txt \
-  --trace_to_cloud \
-  adspace_agent
+gcloud run deploy adspace-agent \
+  --source . \
+  --memory 4Gi \
+  --cpu 1 \
+  --port 8000
 ```
 
 ## Contributing

@@ -30,7 +30,8 @@ from google.adk.skills import load_skill_from_dir
 from google.adk.skills import load_skill_from_gcs_dir
 from google.adk.skills import Skill
 from google.adk.tools import skill_toolset
-from google.adk.tools.google_api_tool import BigQueryToolset
+from google.adk.tools.bigquery import BigQueryCredentialsConfig
+from google.adk.tools.bigquery import BigQueryToolset
 from google.adk.tools.google_api_tool import GoogleApiToolset
 from google.adk.tools.google_api_tool import YoutubeToolset
 from google.adk.tools.google_api_tool.googleapi_to_openapi_converter import (
@@ -47,7 +48,7 @@ from .tools.utilities import UtilitiesToolset
 
 APP_NAME = "adspace_agent"
 
-MODEL: str = os.environ.get("MODEL", "gemini-3.1-flash-lite-preview")
+MODEL: str = os.environ.get("MODEL", "gemini-3.1-flash-lite")
 
 CLIENT_ID: str = os.environ["CLIENT_ID"]
 CLIENT_SECRET: str = os.environ["CLIENT_SECRET"]
@@ -118,8 +119,10 @@ def create_agent() -> Agent:  # noqa: PLR0914
     )
 
     bigquery_toolset = BigQueryToolset(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
+        credentials_config=BigQueryCredentialsConfig(
+            client_id=CLIENT_ID,
+            client_secret=CLIENT_SECRET,
+        )
     )
 
     campaign_manager_360_toolset = GoogleApiToolset(

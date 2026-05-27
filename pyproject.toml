@@ -34,6 +34,7 @@ dependencies = [
   "google-ads-adk",
   "google-api-python-client",
   "google-cloud-aiplatform",
+  "google-cloud-dataplex",
   "google-genai",
   "greenlet",
   "holidays",
@@ -63,6 +64,7 @@ dependencies = [
 ]
 
 [project.scripts]
+deploy-agent-engine = "adspace_agent.deploy:main"
 list-tools = "adspace_agent.utils.list_tools:main"
 
 [dependency-groups]

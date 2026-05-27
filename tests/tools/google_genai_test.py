@@ -119,7 +119,7 @@ async def test_generate_video_success(mock_genai_client: mock.Mock):
     # Verify call arguments
     mock_genai_client.aio.models.generate_videos.assert_called_once()
     _, kwargs = mock_genai_client.aio.models.generate_videos.call_args
-    assert kwargs["model"] == "veo-3.1-lite-generate-001"
+    assert kwargs["model"] == google_genai.VEO_MODEL
     assert kwargs["source"].prompt == "test_prompt"
 
     mock_tool_context.save_artifact.assert_called_once()

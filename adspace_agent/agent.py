@@ -14,7 +14,6 @@
 """The AdSpace Agent main application."""
 
 import os
-import pathlib
 
 from dotenv import load_dotenv
 from google.adk.agents import Agent
@@ -23,15 +22,9 @@ from google.adk.agents.context_cache_config import ContextCacheConfig
 from google.adk.apps import App
 from google.adk.apps.app import EventsCompactionConfig
 from google.adk.auth.auth_schemes import OpenIdConnectWithConfig
+from google.adk.integrations.bigquery import BigQueryCredentialsConfig
+from google.adk.integrations.bigquery import BigQueryToolset
 from google.adk.models.google_llm import Gemini
-from google.adk.skills import list_skills_in_dir
-from google.adk.skills import list_skills_in_gcs_dir
-from google.adk.skills import load_skill_from_dir
-from google.adk.skills import load_skill_from_gcs_dir
-from google.adk.skills import Skill
-from google.adk.tools import skill_toolset
-from google.adk.tools.bigquery import BigQueryCredentialsConfig
-from google.adk.tools.bigquery import BigQueryToolset
 from google.adk.tools.google_api_tool import GoogleApiToolset
 from google.adk.tools.google_api_tool import YoutubeToolset
 from google.adk.tools.google_api_tool.googleapi_to_openapi_converter import (
@@ -44,7 +37,9 @@ from google_ads_adk.toolset import GoogleAdsToolset
 
 from .tools.data_analysis import DataAnalysisToolset
 from .tools.google_genai import GoogleGenAIToolset
+from .tools.skills import SkillsToolset
 from .tools.utilities import UtilitiesToolset
+from .utils import patch_auth  # noqa: F401
 
 APP_NAME = "adspace_agent"
 
@@ -375,36 +370,6 @@ def create_agent() -> Agent:  # noqa: PLR0914
 
     google_genai_toolset = GoogleGenAIToolset()
 
-    skill_map: dict[str, Skill] = {}
-
-    if os.environ.get("SKILLS_BUCKET_NAME"):
-        gcs_skills = list_skills_in_gcs_dir(
-            os.environ["SKILLS_BUCKET_NAME"],
-            "skills",
-        )
-        for skill_id in gcs_skills:
-            skill_map[skill_id] = load_skill_from_gcs_dir(
-                bucket_name=os.environ["SKILLS_BUCKET_NAME"],
-                skill_id=skill_id,
-                skills_base_path="skills",
-            )
-
-    local_skills_dir = os.environ.get("LOCAL_SKILLS_DIR") or str(
-        pathlib.Path(__file__).parent.parent / "skills"
-    )
-    if pathlib.Path(local_skills_dir).exists():
-        local_skills = list_skills_in_dir(local_skills_dir)
-        for skill_id in local_skills:
-            skill_map[skill_id] = load_skill_from_dir(
-                str(pathlib.Path(local_skills_dir) / skill_id)
-            )
-
-    skills = list(skill_map.values())
-
-    skills_toolset = skill_toolset.SkillToolset(
-        skills=skills,
-    )
-
     tools = []
     toolset_map = {
         "bid_manager": bid_manager_toolset,
@@ -428,7 +393,7 @@ def create_agent() -> Agent:  # noqa: PLR0914
         PreloadMemoryTool(),
         UtilitiesToolset(),
         LoadArtifactsTool(),
-        skills_toolset,
+        SkillsToolset(),
     ])
 
     for key, toolset in toolset_map.items():

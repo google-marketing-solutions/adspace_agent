@@ -19,10 +19,10 @@ from google.adk.models.google_llm import Gemini
 from google.adk.skills import Frontmatter
 from google.adk.skills import Resources
 from google.adk.skills import Skill
-from google.adk.tools.skill_toolset import SkillToolset
 import pytest
 
 from adspace_agent.agent import create_agent
+from adspace_agent.tools.skills import SkillsToolset
 
 DUMMY_OPENAPI = {
     "components": {
@@ -157,11 +157,11 @@ def test_create_agent_with_local_skills(tmp_path):
             return_value=DUMMY_OPENAPI,
         ),
         patch(
-            "adspace_agent.agent.list_skills_in_dir",
+            "adspace_agent.tools.skills.list_skills_in_dir",
             return_value={"test-skill": mock_frontmatter},
         ),
         patch(
-            "adspace_agent.agent.load_skill_from_dir",
+            "adspace_agent.tools.skills.load_skill_from_dir",
             return_value=mock_skill,
         ),
     ):
@@ -169,14 +169,14 @@ def test_create_agent_with_local_skills(tmp_path):
         assert agent.name == "adspace_agent"
         # Verify that the skills toolset exists and includes our mock skill
         skills_toolsets = [
-            t for t in agent.tools if t.__class__.__name__ == "SkillToolset"
+            t for t in agent.tools if t.__class__.__name__ == "SkillsToolset"
         ]
         assert len(skills_toolsets) == 1
         skills_toolset = skills_toolsets[0]
-        assert isinstance(skills_toolset, SkillToolset)
-        assert len(skills_toolset._skills) == 1  # noqa: SLF001
+        assert isinstance(skills_toolset, SkillsToolset)
+        assert len(skills_toolset.skills_toolset._skills) == 1  # noqa: SLF001
         assert (
-            skills_toolset._skills["test-skill"].name  # noqa: SLF001
+            skills_toolset.skills_toolset._skills["test-skill"].name  # noqa: SLF001
             == "test-skill"
         )
 
@@ -207,28 +207,28 @@ def test_create_agent_with_gcs_skills():
             return_value=DUMMY_OPENAPI,
         ),
         patch(
-            "adspace_agent.agent.list_skills_in_dir",
+            "adspace_agent.tools.skills.list_skills_in_dir",
             return_value={},
         ),
         patch(
-            "adspace_agent.agent.list_skills_in_gcs_dir",
+            "adspace_agent.tools.skills.list_skills_in_gcs_dir",
             return_value={"gcs-skill": mock_frontmatter},
         ),
         patch(
-            "adspace_agent.agent.load_skill_from_gcs_dir",
+            "adspace_agent.tools.skills.load_skill_from_gcs_dir",
             return_value=mock_skill,
         ),
     ):
         agent = create_agent()
         assert agent.name == "adspace_agent"
         skills_toolsets = [
-            t for t in agent.tools if t.__class__.__name__ == "SkillToolset"
+            t for t in agent.tools if t.__class__.__name__ == "SkillsToolset"
         ]
         assert len(skills_toolsets) == 1
         skills_toolset = skills_toolsets[0]
-        assert isinstance(skills_toolset, SkillToolset)
-        assert len(skills_toolset._skills) == 1  # noqa: SLF001
+        assert isinstance(skills_toolset, SkillsToolset)
+        assert len(skills_toolset.skills_toolset._skills) == 1  # noqa: SLF001
         assert (
-            skills_toolset._skills["gcs-skill"].name  # noqa: SLF001
+            skills_toolset.skills_toolset._skills["gcs-skill"].name  # noqa: SLF001
             == "gcs-skill"
         )

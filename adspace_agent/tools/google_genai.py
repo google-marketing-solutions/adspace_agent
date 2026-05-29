@@ -29,7 +29,7 @@ from google.genai import types
 from google.genai.types import Part
 
 MODEL: str = os.environ.get("MODEL", "gemini-3.1-flash-lite")
-VEO_MODEL: str = os.environ.get("VEO_MODEL", "veo-3.1-lite-generate-preview")
+VEO_MODEL: str = os.environ.get("VEO_MODEL", "veo-3.1-fast-generate-001")
 IMAGEN_MODEL: str = os.environ.get(
     "IMAGEN_MODEL", "imagen-4.0-fast-generate-001"
 )
@@ -111,6 +111,7 @@ async def generate_video(
         dict[str, Union[str, Part]]: A dictionary containing the status of the
             operation and the response.
     """
+    result: dict[str, str | Part] = {}
     try:
         operation = await genai_client.aio.models.generate_videos(
             model=VEO_MODEL,
@@ -123,61 +124,62 @@ async def generate_video(
         while not operation.done:
             await asyncio.sleep(5)
             operation = await genai_client.aio.operations.get(operation)
-
-        if not operation.response:
-            return {
-                "status": "ERROR",
-                "error_details": "Video generation failed: No response.",
-            }
-
-        if not operation.response.generated_videos:
-            return {
-                "status": "ERROR",
-                "error_details": (
-                    "Video generation failed: No videos generated."
-                ),
-            }
-
-        generated_video = operation.response.generated_videos[0]
-        if not generated_video.video:
-            return {
-                "status": "ERROR",
-                "error_details": (
-                    "Video generation failed: Missing video data."
-                ),
-            }
-
-        video_bytes = generated_video.video.video_bytes
-        mime_type = generated_video.video.mime_type
-
-        if not video_bytes or not mime_type:
-            return {
-                "status": "ERROR",
-                "error_details": (
-                    "Video generation failed: Empty video content."
-                ),
-            }
-
-        artifact = types.Part(
-            inline_data=types.Blob(mime_type=mime_type, data=video_bytes)
-        )
-
-        filename = f"generated_video_{uuid.uuid4().hex}.mp4"
-
-        _ = await tool_context.save_artifact(
-            filename=filename,
-            artifact=artifact,
-        )
     except Exception as ex:  # noqa: BLE001
         return {
             "status": "ERROR",
             "error_details": str(ex),
         }
-    else:
-        return {
-            "status": "SUCCESS",
-            "message": "Generated video.",
+
+    if not operation.response:
+        result = {
+            "status": "ERROR",
+            "error_details": "Video generation failed: No response.",
         }
+    elif not operation.response.generated_videos:
+        result = {
+            "status": "ERROR",
+            "error_details": "Video generation failed: No videos generated.",
+        }
+    elif not operation.response.generated_videos[0].video:
+        result = {
+            "status": "ERROR",
+            "error_details": "Video generation failed: Missing video data.",
+        }
+    else:
+        generated_video = operation.response.generated_videos[0]
+        video = generated_video.video
+        assert video is not None  # noqa: S101
+        video_bytes = video.video_bytes
+        mime_type = video.mime_type
+
+        if not video_bytes or not mime_type:
+            result = {
+                "status": "ERROR",
+                "error_details": (
+                    "Video generation failed: Empty video content."
+                ),
+            }
+        else:
+            artifact = types.Part(
+                inline_data=types.Blob(mime_type=mime_type, data=video_bytes)
+            )
+            filename = f"generated_video_{uuid.uuid4().hex}.mp4"
+            try:
+                _ = await tool_context.save_artifact(
+                    filename=filename,
+                    artifact=artifact,
+                )
+                result = {
+                    "status": "SUCCESS",
+                    "message": "Generated video.",
+                }
+            except Exception as ex:  # noqa: BLE001
+                result = {
+                    "status": "ERROR",
+                    "error_details": str(ex),
+                }
+
+    return result
 
 
 @LongRunningFunctionTool
@@ -197,61 +199,64 @@ async def generate_image(
         dict[str, Union[str, Part]]: A dictionary containing the status of the
             operation and the response.
     """
+    result: dict[str, str | Part] = {}
     try:
         response = await genai_client.aio.models.generate_images(
             model=IMAGEN_MODEL,
             prompt=prompt,
             config=types.GenerateImagesConfig(number_of_images=1),
         )
-
-        if not response.generated_images:
-            return {
-                "status": "ERROR",
-                "error_details": (
-                    "Image generation failed: No images generated."
-                ),
-            }
-
-        generated_image = response.generated_images[0]
-        if not generated_image.image:
-            return {
-                "status": "ERROR",
-                "error_details": (
-                    "Image generation failed: Missing image data."
-                ),
-            }
-
-        image_bytes = generated_image.image.image_bytes
-        mime_type = generated_image.image.mime_type
-
-        if not image_bytes or not mime_type:
-            return {
-                "status": "ERROR",
-                "error_details": (
-                    "Image generation failed: Empty image content."
-                ),
-            }
-
-        artifact = types.Part(
-            inline_data=types.Blob(mime_type=mime_type, data=image_bytes)
-        )
-
-        filename = f"generated_image_{uuid.uuid4().hex}.png"
-
-        _ = await tool_context.save_artifact(
-            filename=filename,
-            artifact=artifact,
-        )
     except Exception as ex:  # noqa: BLE001
         return {
             "status": "ERROR",
             "error_details": str(ex),
         }
-    else:
-        return {
-            "status": "SUCCESS",
-            "message": "Generated image.",
+
+    if not response.generated_images:
+        result = {
+            "status": "ERROR",
+            "error_details": "Image generation failed: No images generated.",
         }
+    elif not response.generated_images[0].image:
+        result = {
+            "status": "ERROR",
+            "error_details": "Image generation failed: Missing image data.",
+        }
+    else:
+        generated_image = response.generated_images[0]
+        image = generated_image.image
+        assert image is not None  # noqa: S101
+        image_bytes = image.image_bytes
+        mime_type = image.mime_type
+
+        if not image_bytes or not mime_type:
+            result = {
+                "status": "ERROR",
+                "error_details": (
+                    "Image generation failed: Empty image content."
+                ),
+            }
+        else:
+            artifact = types.Part(
+                inline_data=types.Blob(mime_type=mime_type, data=image_bytes)
+            )
+            filename = f"generated_image_{uuid.uuid4().hex}.png"
+            try:
+                _ = await tool_context.save_artifact(
+                    filename=filename,
+                    artifact=artifact,
+                )
+                result = {
+                    "status": "SUCCESS",
+                    "message": "Generated image.",
+                }
+            except Exception as ex:  # noqa: BLE001
+                result = {
+                    "status": "ERROR",
+                    "error_details": str(ex),
+                }
+
+    return result
 
 
 class GoogleGenAIToolset(BaseToolset):

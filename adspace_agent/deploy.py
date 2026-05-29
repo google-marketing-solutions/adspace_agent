@@ -85,26 +85,49 @@ def main() -> None:
     }
     env_vars = {k: v for k, v in env_vars.items() if v is not None}
 
-    print("Creating/updating remote app on Agent Engine...")
+    print("Checking for existing remote app on Agent Engine...")
+    existing_engine = None
+    try:
+        for engine in agent_engines.list():
+            if engine.display_name == "AdSpace Agent":
+                existing_engine = engine
+                break
+    except Exception as e:  # noqa: BLE001
+        print(f"Error checking for existing reasoning engines: {e}")
 
-    remote_app = agent_engines.create(
-        display_name="AdSpace Agent",
-        description=(
-            "AdSpace Agent is designed to provide a standardized way to "
-            "integrate an LLM with Google Ads, Display & Video 360, "
-            "Campaign Manager 360, Search Ads 360, YouTube, Google Drive, "
-            "and Google Cloud storage to form a more comprehensive campaign "
-            "and marketing plan for agencies."
-        ),
-        agent_engine=typing.cast("typing.Any", app),
-        requirements=requirements,
-        extra_packages=["adspace_agent", "skills"],
-        env_vars=typing.cast("typing.Any", env_vars),
-        resource_limits={
-            "cpu": "8",
-            "memory": "32Gi",
-        },
-    )
+    if existing_engine:
+        print(f"Updating existing app: {existing_engine.resource_name}...")
+        remote_app = agent_engines.update(
+            resource_name=existing_engine.resource_name,
+            agent_engine=typing.cast("typing.Any", app),
+            requirements=requirements,
+            extra_packages=["adspace_agent", "skills"],
+            env_vars=typing.cast("typing.Any", env_vars),
+            resource_limits={
+                "cpu": "8",
+                "memory": "32Gi",
+            },
+        )
+    else:
+        print("Creating new remote app on Agent Engine...")
+        remote_app = agent_engines.create(
+            display_name="AdSpace Agent",
+            description=(
+                "AdSpace Agent is designed to provide a standardized way to "
+                "integrate an LLM with Google Ads, Display & Video 360, "
+                "Campaign Manager 360, Search Ads 360, YouTube, Google "
+                "Drive, and Google Cloud storage to form a more "
+                "comprehensive campaign and marketing plan for agencies."
+            ),
+            agent_engine=typing.cast("typing.Any", app),
+            requirements=requirements,
+            extra_packages=["adspace_agent", "skills"],
+            env_vars=typing.cast("typing.Any", env_vars),
+            resource_limits={
+                "cpu": "8",
+                "memory": "32Gi",
+            },
+        )
 
     print(f"Deployment successful. Remote app ID: {remote_app.resource_name}")
 

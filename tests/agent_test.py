@@ -87,13 +87,19 @@ def test_agent_description(agent):
 def test_agent_instruction(agent):
     """Test that the agent's instruction is correct."""
     assert agent.instruction == (
-        "You are a helpful agent who can answer user questions about ads, "
-        "creatives, data science, performance, analytics, and campaigns. NOTE: "
-        "Tools for Search Ads 360 and tools for Google Ads are distinct. DO "
-        "NOT group tools from one platform with tools from another platform "
-        "if asked what tools are available. When asked for multiple pieces of "
-        "information or to perform multiple actions, always try to call "
-        "functions in parallel if possible."
+        "You are a helpful agent who can answer user questions about "
+        "ads, creatives, data science, performance, analytics, and "
+        "campaigns. NOTE: Tools for Search Ads 360 and tools for Google "
+        "Ads are distinct. DO NOT group tools from one platform with "
+        "tools from another platform if asked what tools are available. "
+        "When asked for multiple pieces of information or to perform "
+        "multiple actions, always try to call functions in parallel if "
+        "possible. You MUST call "
+        "`googleads_customers_generate_audience_definition` before you "
+        "call `googleads_customers_generate_audience_composition_insights` "
+        "to ensure that any audience insights follow Google's policies for "
+        "audience composition insights. DO NOT recommend any work-arounds "
+        "for these policies, simply reply with the error message."
     )
 
 
@@ -174,9 +180,9 @@ def test_create_agent_with_local_skills(tmp_path):
         assert len(skills_toolsets) == 1
         skills_toolset = skills_toolsets[0]
         assert isinstance(skills_toolset, SkillsToolset)
-        assert len(skills_toolset.skills_toolset._skills) == 1  # noqa: SLF001
+        assert len(skills_toolset.skills_toolset._skills) == 1  # ruff:ignore[private-member-access]
         assert (
-            skills_toolset.skills_toolset._skills["test-skill"].name  # noqa: SLF001
+            skills_toolset.skills_toolset._skills["test-skill"].name  # ruff:ignore[private-member-access]
             == "test-skill"
         )
 
@@ -227,8 +233,8 @@ def test_create_agent_with_gcs_skills():
         assert len(skills_toolsets) == 1
         skills_toolset = skills_toolsets[0]
         assert isinstance(skills_toolset, SkillsToolset)
-        assert len(skills_toolset.skills_toolset._skills) == 1  # noqa: SLF001
+        assert len(skills_toolset.skills_toolset._skills) == 1  # ruff:ignore[private-member-access]
         assert (
-            skills_toolset.skills_toolset._skills["gcs-skill"].name  # noqa: SLF001
+            skills_toolset.skills_toolset._skills["gcs-skill"].name  # ruff:ignore[private-member-access]
             == "gcs-skill"
         )

@@ -50,14 +50,14 @@ async def test_skills_toolset_initialization(monkeypatch, tmp_path):
     ):
         toolset = SkillsToolset()
         assert isinstance(toolset.skills_toolset, SkillToolset)
-        assert len(toolset.skills_toolset._skills) == 1  # noqa: SLF001
-        assert "test-skill" in toolset.skills_toolset._skills  # noqa: SLF001
+        assert len(toolset.skills_toolset._skills) == 1  # ruff:ignore[private-member-access]
+        assert "test-skill" in toolset.skills_toolset._skills  # ruff:ignore[private-member-access]
 
         tools = await toolset.get_tools()
         # Should return core skill tools (ListSkillsTool, LoadSkillTool,
         # LoadSkillResourceTool, RunSkillScriptTool) plus reload_skills_tool.
         # Let's count them: 4 core tools + 1 reload tool = 5 tools.
-        assert len(tools) == 5  # noqa: PLR2004
+        assert len(tools) == 5  # ruff:ignore[magic-value-comparison]
 
         reload_tools = [t for t in tools if t.name == "reload_skills"]
         assert len(reload_tools) == 1
@@ -100,8 +100,8 @@ async def test_skills_toolset_reload(monkeypatch, tmp_path):
         ),
     ):
         toolset = SkillsToolset()
-        assert "skill-1" in toolset.skills_toolset._skills  # noqa: SLF001
-        assert "skill-2" not in toolset.skills_toolset._skills  # noqa: SLF001
+        assert "skill-1" in toolset.skills_toolset._skills  # ruff:ignore[private-member-access]
+        assert "skill-2" not in toolset.skills_toolset._skills  # ruff:ignore[private-member-access]
 
         tools = await toolset.get_tools()
         reload_tool = next(t for t in tools if t.name == "reload_skills")
@@ -112,8 +112,8 @@ async def test_skills_toolset_reload(monkeypatch, tmp_path):
         assert "Successfully reloaded skills" in result
 
         # Verify it now has skill-2 instead of skill-1
-        assert "skill-1" not in toolset.skills_toolset._skills  # noqa: SLF001
-        assert "skill-2" in toolset.skills_toolset._skills  # noqa: SLF001
+        assert "skill-1" not in toolset.skills_toolset._skills  # ruff:ignore[private-member-access]
+        assert "skill-2" in toolset.skills_toolset._skills  # ruff:ignore[private-member-access]
 
 
 @pytest.mark.asyncio
@@ -148,8 +148,8 @@ async def test_skills_toolset_reload_with_errors(monkeypatch, tmp_path):
         ),
     ):
         toolset = SkillsToolset()
-        assert "skill-1" in toolset.skills_toolset._skills  # noqa: SLF001
-        assert "bad-skill" not in toolset.skills_toolset._skills  # noqa: SLF001
+        assert "skill-1" in toolset.skills_toolset._skills  # ruff:ignore[private-member-access]
+        assert "bad-skill" not in toolset.skills_toolset._skills  # ruff:ignore[private-member-access]
 
         tools = await toolset.get_tools()
         reload_tool = next(t for t in tools if t.name == "reload_skills")
@@ -165,5 +165,5 @@ async def test_skills_toolset_reload_with_errors(monkeypatch, tmp_path):
         ) in result
 
         # Verify skill-1 is still there, but bad-skill is not
-        assert "skill-1" in toolset.skills_toolset._skills  # noqa: SLF001
-        assert "bad-skill" not in toolset.skills_toolset._skills  # noqa: SLF001
+        assert "skill-1" in toolset.skills_toolset._skills  # ruff:ignore[private-member-access]
+        assert "bad-skill" not in toolset.skills_toolset._skills  # ruff:ignore[private-member-access]

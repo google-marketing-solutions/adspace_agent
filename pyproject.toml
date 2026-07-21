@@ -103,29 +103,29 @@ docstring-code-format = true
 preview = true
 select = ["ALL"]
 ignore = [
-  "D203",  # one-blank-line-before-class (Google style)
-  "D213",  # multi-line-summary-second-line (Google style)
-  "COM812",  # missing-trailing-comma (formatter conflict)
-  "ISC001",  # single-line-implicit-string-concatenation (formatter conflict)
-  "T201",  # print-found (fine for CLI tools)
-  "E701",  # single-line-if-stmt (Google style allows this)
-  "N802",  # function-name-lowercase (Google allows CamelCase functions)
-  "N803",  # argument-name-lowercase (Google allows CamelCase arguments)
-  "N806",  # non-lowercase-variable-in-function (Google allows CamelCase variables)
-  "N812",  # lowercase-imported-as-non-lowercase (Google naming flexibility)
-  "FIX002",  # line-contains-todo (Google style uses TODOs)
-  "TD003",  # missing-todo-link (Google style doesn't require links)
+  "incorrect-blank-line-before-class",  # one-blank-line-before-class (Google style)
+  "multi-line-summary-second-line",  # multi-line-summary-second-line (Google style)
+  "missing-trailing-comma",  # missing-trailing-comma (formatter conflict)
+  "single-line-implicit-string-concatenation",  # single-line-implicit-string-concatenation (formatter conflict)
+  "print",  # print-found (fine for CLI tools)
+  "multiple-statements-on-one-line-colon",  # single-line-if-stmt (Google style allows this)
+  "invalid-function-name",  # function-name-lowercase (Google allows CamelCase functions)
+  "invalid-argument-name",  # argument-name-lowercase (Google allows CamelCase arguments)
+  "non-lowercase-variable-in-function",  # non-lowercase-variable-in-function (Google allows CamelCase variables)
+  "lowercase-imported-as-non-lowercase",  # lowercase-imported-as-non-lowercase (Google naming flexibility)
+  "line-contains-todo",  # line-contains-todo (Google style uses TODOs)
+  "missing-todo-link",  # missing-todo-link (Google style doesn't require links)
 ]
 logger-objects = ["logging", "absl.logging", "tensorflow.io.logging"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = [
-  "S101",  # assert-used (required for pytest)
+  "assert",  # assert-used (required for pytest)
   "ANN",  # type annotations (not needed for tests)
-  "D100",  # missing docstring in module
-  "D103",  # missing docstring in function
+  "undocumented-public-module",  # missing docstring in module
+  "undocumented-public-function",  # missing docstring in function
 ]
-"__init__.py" = ["D104"]
+"__init__.py" = ["undocumented-public-package"]
 
 [tool.ruff.lint.isort]
 force-single-line = true

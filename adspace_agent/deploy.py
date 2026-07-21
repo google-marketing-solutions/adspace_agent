@@ -18,13 +18,13 @@ import pathlib
 import typing
 
 from dotenv import load_dotenv
+from vertexai import agent_engines
+
+from adspace_agent.agent import root_agent
 
 load_dotenv()
 
-import vertexai  # noqa: E402
-from vertexai import agent_engines  # noqa: E402
-
-from adspace_agent.agent import root_agent  # noqa: E402
+import vertexai  # ruff:ignore[module-import-not-at-top-of-file]
 
 
 def _load_requirements(path: pathlib.Path) -> list[str]:
@@ -92,7 +92,7 @@ def main() -> None:
             if engine.display_name == "AdSpace Agent":
                 existing_engine = engine
                 break
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # ruff:ignore[blind-except]
         print(f"Error checking for existing reasoning engines: {e}")
 
     if existing_engine:

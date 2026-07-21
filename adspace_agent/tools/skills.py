@@ -46,7 +46,7 @@ def _load_skills_from_env() -> tuple[list[Skill], list[str]]:
         bucket_name = os.environ["SKILLS_BUCKET_NAME"]
         try:
             gcs_skills = list_skills_in_gcs_dir(bucket_name, "skills")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # ruff:ignore[blind-except]
             errors.append(
                 f"Failed to list GCS skills in bucket '{bucket_name}': {e}"
             )
@@ -60,7 +60,7 @@ def _load_skills_from_env() -> tuple[list[Skill], list[str]]:
                     skills_base_path="skills",
                 )
                 skill_map[skill.name] = skill
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # ruff:ignore[blind-except]
                 errors.append(f"GCS skill '{skill_id}' failed to load: {e}")
 
     local_skills_dir = os.environ.get("LOCAL_SKILLS_DIR") or str(
@@ -69,7 +69,7 @@ def _load_skills_from_env() -> tuple[list[Skill], list[str]]:
     if pathlib.Path(local_skills_dir).exists():
         try:
             local_skills = list_skills_in_dir(local_skills_dir)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # ruff:ignore[blind-except]
             errors.append(
                 f"Failed to list local skills in '{local_skills_dir}': {e}"
             )
@@ -81,7 +81,7 @@ def _load_skills_from_env() -> tuple[list[Skill], list[str]]:
                     str(pathlib.Path(local_skills_dir) / skill_id)
                 )
                 skill_map[new_skill.name] = new_skill
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # ruff:ignore[blind-except]
                 errors.append(f"Local skill '{skill_id}' failed to load: {e}")
 
     return list(skill_map.values()), errors
@@ -110,8 +110,8 @@ class SkillsToolset(BaseToolset):
             A status message indicating the result of the reload.
         """
         new_skills, errors = _load_skills_from_env()
-        self.skills_toolset._skills.clear()  # noqa: SLF001
-        self.skills_toolset._skills.update(  # noqa: SLF001
+        self.skills_toolset._skills.clear()  # ruff:ignore[private-member-access]
+        self.skills_toolset._skills.update(  # ruff:ignore[private-member-access]
             {s.name: s for s in new_skills}
         )
 

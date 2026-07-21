@@ -61,7 +61,7 @@ def patch_auth_handler() -> None:
                 v = state.get(k)
                 if isinstance(v, str) and v.startswith("ya29."):
                     return _build_cred(v)
-        except Exception:  # noqa: S110, BLE001
+        except Exception:  # ruff:ignore[try-except-pass, blind-except]
             pass
 
         return None

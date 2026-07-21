@@ -36,7 +36,7 @@ async def list_user_files(tool_context: ToolContext) -> str:
     except ValueError as e:
         print(f"Error listing artifacts: {e}. Is ArtifactService configured?")
         return "Error: Could not list artifacts."
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # ruff:ignore[blind-except]
         print(f"An unexpected error occurred during artifact list: {e}")
         return "Error: An unexpected error occurred while listing artifacts."
     else:

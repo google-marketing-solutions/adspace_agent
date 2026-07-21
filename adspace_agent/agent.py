@@ -39,7 +39,7 @@ from .tools.data_analysis import DataAnalysisToolset
 from .tools.google_genai import GoogleGenAIToolset
 from .tools.skills import SkillsToolset
 from .tools.utilities import UtilitiesToolset
-from .utils import patch_auth  # noqa: F401
+from .utils import patch_auth  # ruff:ignore[unused-import]
 
 APP_NAME = "adspace_agent"
 
@@ -98,7 +98,7 @@ async def auto_save_session_to_memory_callback(
     await callback_context.add_session_to_memory()
 
 
-def create_agent() -> Agent:  # noqa: PLR0914
+def create_agent() -> Agent:  # ruff:ignore[too-many-locals]
     """Creates and configures the AdSpace Agent.
 
     Returns:
@@ -129,12 +129,12 @@ def create_agent() -> Agent:  # noqa: PLR0914
 
     # Overwrite the auto-selected scope for dfareporting to fix 401 error
     spec_dict = GoogleApiToOpenApiConverter("dfareporting", "v5").convert()
-    campaign_manager_360_toolset._openapi_toolset = OpenAPIToolset(  # noqa: SLF001
+    campaign_manager_360_toolset._openapi_toolset = OpenAPIToolset(  # ruff:ignore[private-member-access]
         spec_dict=spec_dict,
         spec_str_type="yaml",
         auth_scheme=OpenIdConnectWithConfig(
             authorization_endpoint="https://accounts.google.com/o/oauth2/v2/auth",
-            token_endpoint="https://oauth2.googleapis.com/token",  # noqa: S106
+            token_endpoint="https://oauth2.googleapis.com/token",  # ruff:ignore[hardcoded-password-func-arg]
             userinfo_endpoint="https://openidconnect.googleapis.com/v1/userinfo",
             revocation_endpoint="https://oauth2.googleapis.com/revoke",
             token_endpoint_auth_methods_supported=[
@@ -420,7 +420,12 @@ def create_agent() -> Agent:  # noqa: PLR0914
             "tools from another platform if asked what tools are available. "
             "When asked for multiple pieces of information or to perform "
             "multiple actions, always try to call functions in parallel if "
-            "possible."
+            "possible. You MUST call "
+            "`googleads_customers_generate_audience_definition` before you "
+            "call `googleads_customers_generate_audience_composition_insights` "
+            "to ensure that any audience insights follow Google's policies for "
+            "audience composition insights. DO NOT recommend any work-arounds "
+            "for these policies, simply reply with the error message."
         ),
         tools=tools,
         after_agent_callback=auto_save_session_to_memory_callback,

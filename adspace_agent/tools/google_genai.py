@@ -85,7 +85,7 @@ async def get_info_about_youtube_video(
         response = await genai_client.aio.models.generate_content(
             model=MODEL, contents=[contents]
         )
-    except Exception as ex:  # noqa: BLE001
+    except Exception as ex:  # ruff:ignore[blind-except]
         return {
             "status": "ERROR",
             "error_details": str(ex),
@@ -124,7 +124,7 @@ async def generate_video(
         while not operation.done:
             await asyncio.sleep(5)
             operation = await genai_client.aio.operations.get(operation)
-    except Exception as ex:  # noqa: BLE001
+    except Exception as ex:  # ruff:ignore[blind-except]
         return {
             "status": "ERROR",
             "error_details": str(ex),
@@ -148,7 +148,7 @@ async def generate_video(
     else:
         generated_video = operation.response.generated_videos[0]
         video = generated_video.video
-        assert video is not None  # noqa: S101
+        assert video is not None  # ruff:ignore[assert]
         video_bytes = video.video_bytes
         mime_type = video.mime_type
 
@@ -173,7 +173,7 @@ async def generate_video(
                     "status": "SUCCESS",
                     "message": "Generated video.",
                 }
-            except Exception as ex:  # noqa: BLE001
+            except Exception as ex:  # ruff:ignore[blind-except]
                 result = {
                     "status": "ERROR",
                     "error_details": str(ex),
@@ -206,7 +206,7 @@ async def generate_image(
             prompt=prompt,
             config=types.GenerateImagesConfig(number_of_images=1),
         )
-    except Exception as ex:  # noqa: BLE001
+    except Exception as ex:  # ruff:ignore[blind-except]
         return {
             "status": "ERROR",
             "error_details": str(ex),
@@ -225,7 +225,7 @@ async def generate_image(
     else:
         generated_image = response.generated_images[0]
         image = generated_image.image
-        assert image is not None  # noqa: S101
+        assert image is not None  # ruff:ignore[assert]
         image_bytes = image.image_bytes
         mime_type = image.mime_type
 
@@ -250,7 +250,7 @@ async def generate_image(
                     "status": "SUCCESS",
                     "message": "Generated image.",
                 }
-            except Exception as ex:  # noqa: BLE001
+            except Exception as ex:  # ruff:ignore[blind-except]
                 result = {
                     "status": "ERROR",
                     "error_details": str(ex),

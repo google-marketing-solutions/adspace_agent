@@ -13,7 +13,7 @@
 # limitations under the License.
 """Tests for list_tools.py."""
 
-import subprocess  # noqa: S404
+import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import sys
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock

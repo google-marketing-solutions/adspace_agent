@@ -26,7 +26,7 @@ class MockGenAIClient:
     models: mock.Mock
     operations: mock.Mock
 
-    def __init__(self, *args: object, **kwargs: object):  # noqa: ARG002
+    def __init__(self, *args: object, **kwargs: object):  # ruff:ignore[unused-method-argument]
         """Initializes the mock client."""
         self.aio = mock.Mock()
         self.models = mock.Mock()
@@ -54,7 +54,7 @@ _mock_google_auth = mock.patch(
 _mock_google_auth.start()
 
 
-def pytest_unconfigure(config: pytest.Config):  # noqa: ARG001
+def pytest_unconfigure(config: pytest.Config):  # ruff:ignore[unused-function-argument]
     """Clean up mocks after tests are done."""
     _mock_google_auth.stop()
     _mock_genai_client.stop()

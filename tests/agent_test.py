@@ -13,6 +13,7 @@
 # limitations under the License.
 """Testing the agent module."""
 
+import importlib
 from unittest.mock import patch
 
 from google.adk.models.google_llm import Gemini
@@ -21,6 +22,7 @@ from google.adk.skills import Resources
 from google.adk.skills import Skill
 import pytest
 
+import adspace_agent.agent as agent_module
 from adspace_agent.agent import create_agent
 from adspace_agent.tools.skills import SkillsToolset
 
@@ -71,7 +73,7 @@ def test_agent_name(agent):
 
 def test_agent_model(agent):
     """Test that the agent's model is correct."""
-    assert agent.model == Gemini(model="gemini-3.1-flash-lite")
+    assert agent.model == Gemini(model="gemini-3.6-flash")
 
 
 def test_agent_description(agent):
@@ -238,3 +240,69 @@ def test_create_agent_with_gcs_skills():
             skills_toolset.skills_toolset._skills["gcs-skill"].name  # ruff:ignore[private-member-access]
             == "gcs-skill"
         )
+
+
+def test_app_events_compaction_config_defaults():
+    """Test app's events_compaction_config default settings."""
+    expected_interval = 3
+    expected_overlap = 1
+    expected_threshold = 500000
+    expected_retention = 3
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "CLIENT_ID": "test_client_id",
+                "CLIENT_SECRET": "test_client_secret",
+                "GOOGLE_ADS_DEVELOPER_TOKEN": "test_token",
+            },
+        ),
+        patch(
+            "adspace_agent.agent.GoogleApiToOpenApiConverter.convert",
+            return_value=DUMMY_OPENAPI,
+        ),
+    ):
+        importlib.reload(agent_module)
+        app = agent_module.app
+        config = app.events_compaction_config
+        assert config is not None
+        assert config.compaction_interval == expected_interval
+        assert config.overlap_size == expected_overlap
+        assert config.token_threshold == expected_threshold
+        assert config.event_retention_size == expected_retention
+
+
+def test_app_events_compaction_config_env_vars():
+    """Test app's events_compaction_config with custom env variables."""
+    expected_interval = 5
+    expected_overlap = 2
+    expected_threshold = 600000
+    expected_retention = 4
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "CLIENT_ID": "test_client_id",
+                "CLIENT_SECRET": "test_client_secret",
+                "GOOGLE_ADS_DEVELOPER_TOKEN": "test_token",
+                "COMPACTION_INTERVAL": str(expected_interval),
+                "COMPACTION_OVERLAP_SIZE": str(expected_overlap),
+                "COMPACTION_TOKEN_THRESHOLD": str(expected_threshold),
+                "COMPACTION_EVENT_RETENTION_SIZE": str(expected_retention),
+            },
+        ),
+        patch(
+            "adspace_agent.agent.GoogleApiToOpenApiConverter.convert",
+            return_value=DUMMY_OPENAPI,
+        ),
+    ):
+        importlib.reload(agent_module)
+        app = agent_module.app
+        config = app.events_compaction_config
+        assert config is not None
+        assert config.compaction_interval == expected_interval
+        assert config.overlap_size == expected_overlap
+        assert config.token_threshold == expected_threshold
+        assert config.event_retention_size == expected_retention

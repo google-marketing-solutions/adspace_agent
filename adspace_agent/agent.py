@@ -43,7 +43,18 @@ from .utils import patch_auth  # ruff:ignore[unused-import]
 
 APP_NAME = "adspace_agent"
 
-MODEL: str = os.environ.get("MODEL", "gemini-3.1-flash-lite")
+MODEL: str = os.environ.get("MODEL", "gemini-3.6-flash")
+
+COMPACTION_INTERVAL: int = int(os.environ.get("COMPACTION_INTERVAL", "3"))
+COMPACTION_OVERLAP_SIZE: int = int(
+    os.environ.get("COMPACTION_OVERLAP_SIZE", "1")
+)
+COMPACTION_TOKEN_THRESHOLD: int = int(
+    os.environ.get("COMPACTION_TOKEN_THRESHOLD", "500000")
+)
+COMPACTION_EVENT_RETENTION_SIZE: int = int(
+    os.environ.get("COMPACTION_EVENT_RETENTION_SIZE", "3")
+)
 
 CLIENT_ID: str = os.environ["CLIENT_ID"]
 CLIENT_SECRET: str = os.environ["CLIENT_SECRET"]
@@ -443,7 +454,13 @@ app = App(
         cache_intervals=5,  # Refresh after 5 uses
     ),
     events_compaction_config=EventsCompactionConfig(
-        compaction_interval=3,  # Trigger compaction every 3 new invocations.
-        overlap_size=1,  # Include last invocation from the previous window.
+        # Trigger compaction every N new invocations.
+        compaction_interval=COMPACTION_INTERVAL,
+        # Include N last invocations from the previous window.
+        overlap_size=COMPACTION_OVERLAP_SIZE,
+        # Trigger compaction when token threshold is reached.
+        token_threshold=COMPACTION_TOKEN_THRESHOLD,
+        # Retain N raw events.
+        event_retention_size=COMPACTION_EVENT_RETENTION_SIZE,
     ),
 )

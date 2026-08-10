@@ -39,7 +39,7 @@ export GOOGLE_ADS_DEVELOPER_TOKEN=
 export GOOGLE_ADS_LOGIN_CUSTOMER_ID=
 
 # Optionals:
-# export MODEL=gemini-3.1-flash-lite
+# export MODEL=gemini-3.6-flash
 # export VEO_MODEL=veo-3.1-fast-generate-001
 # export IMAGEN_MODEL=imagen-4.0-fast-generate-001
 # export ENABLED_TOOLSETS=bid_manager,bigquery,campaign_manager_360,display_video_360,drive,merchant_center_inventories,merchant_center_products,merchant_center_reports,search_ads_360,storage,youtube,google_ads,google_genai

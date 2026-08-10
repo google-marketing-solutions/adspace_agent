@@ -56,8 +56,8 @@ async def test_skills_toolset_initialization(monkeypatch, tmp_path):
         tools = await toolset.get_tools()
         # Should return core skill tools (ListSkillsTool, LoadSkillTool,
         # LoadSkillResourceTool, RunSkillScriptTool) plus reload_skills_tool.
-        # Let's count them: 4 core tools + 1 reload tool = 5 tools.
-        assert len(tools) == 5  # ruff:ignore[magic-value-comparison]
+        expected_tool_count = 5
+        assert len(tools) == expected_tool_count
 
         reload_tools = [t for t in tools if t.name == "reload_skills"]
         assert len(reload_tools) == 1

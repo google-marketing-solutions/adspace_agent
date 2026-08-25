@@ -25,6 +25,9 @@ from google.adk.auth.auth_schemes import OpenIdConnectWithConfig
 from google.adk.integrations.bigquery import BigQueryCredentialsConfig
 from google.adk.integrations.bigquery import BigQueryToolset
 from google.adk.models.google_llm import Gemini
+from google.adk.plugins.save_files_as_artifacts_plugin import (
+    SaveFilesAsArtifactsPlugin,
+)
 from google.adk.tools.google_api_tool import GoogleApiToolset
 from google.adk.tools.google_api_tool import YoutubeToolset
 from google.adk.tools.google_api_tool.googleapi_to_openapi_converter import (
@@ -35,6 +38,12 @@ from google.adk.tools.openapi_tool import OpenAPIToolset
 from google.adk.tools.preload_memory_tool import PreloadMemoryTool
 from google_ads_adk.toolset import GoogleAdsToolset
 
+from .tools.cm360_trafficking.cm360_trafficking import (
+    before_traffic_campaigns_in_cm360_tool_callback,
+)
+from .tools.cm360_trafficking.cm360_trafficking import (
+    CM360TraffickingParserToolset,
+)
 from .tools.data_analysis import DataAnalysisToolset
 from .tools.google_genai import GoogleGenAIToolset
 from .tools.skills import SkillsToolset
@@ -404,6 +413,7 @@ def create_agent() -> Agent:  # ruff:ignore[too-many-locals]
         PreloadMemoryTool(),
         UtilitiesToolset(),
         LoadArtifactsTool(),
+        CM360TraffickingParserToolset(),
         SkillsToolset(),
     ])
 
@@ -439,6 +449,7 @@ def create_agent() -> Agent:  # ruff:ignore[too-many-locals]
             "for these policies, simply reply with the error message."
         ),
         tools=tools,
+        before_tool_callback=before_traffic_campaigns_in_cm360_tool_callback,
         after_agent_callback=auto_save_session_to_memory_callback,
     )
 
@@ -463,4 +474,5 @@ app = App(
         # Retain N raw events.
         event_retention_size=COMPACTION_EVENT_RETENTION_SIZE,
     ),
+    plugins=[SaveFilesAsArtifactsPlugin()],
 )

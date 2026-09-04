@@ -373,10 +373,14 @@ def _diff_ad(  # ruff: ignore[complex-structure, too-many-branches, too-many-loc
     # 4. Diff clickThroughUrl (for click tracker ads)
     if "clickThroughUrl" in sheet_ad:
         s_url = (
-            sheet_ad.get("clickThroughUrl", {}).get("customClickThroughUrl", "").strip()
+            sheet_ad.get("clickThroughUrl", {})
+            .get("customClickThroughUrl", "")
+            .strip()
         )
         c_url = (
-            cm_ad.get("clickThroughUrl", {}).get("customClickThroughUrl", "").strip()
+            cm_ad.get("clickThroughUrl", {})
+            .get("customClickThroughUrl", "")
+            .strip()
         )
         if s_url and s_url != c_url:
             patch_payload["clickThroughUrl"] = sheet_ad["clickThroughUrl"]
@@ -551,7 +555,9 @@ def _resolve_and_build_operations(  # ruff: ignore[complex-structure, too-many-a
         A list of operation dictionaries (placements, creatives, event tags,
         then ads) with resolved operation types and existing IDs.
     """
-    logger.info("Fetching existing event tags and ads from CM360 for reconciliation...")
+    logger.info(
+        "Fetching existing event tags and ads from CM360 for reconciliation..."
+    )
     assigned_placement_ids = _extract_assigned_placement_ids(ads)
     existing_tags_list = list_cm_event_tags(
         profile_id=profile_id,
@@ -668,7 +674,9 @@ def _resolve_and_build_operations(  # ruff: ignore[complex-structure, too-many-a
         for override in ad_payload.get("eventTagOverrides", []):
             target_tag = str(override.get("id", "")).strip()
             if target_tag in existing_event_tags_by_name:
-                override["id"] = str(existing_event_tags_by_name[target_tag].get("id"))
+                override["id"] = str(
+                    existing_event_tags_by_name[target_tag].get("id")
+                )
 
     # 5. Build Ad operations: INSERT for new ads, PATCH for diffs
     if ads:
@@ -764,7 +772,9 @@ def _execute_placement_operation(
         )
         res = request_call.execute()
     except Exception as api_err:
-        logger.exception("Failed to execute placement patch for %s", placement_name)
+        logger.exception(
+            "Failed to execute placement patch for %s", placement_name
+        )
         return {
             "id": placement_id,
             "name": placement_name,
@@ -857,7 +867,9 @@ def _execute_creative_operation(
         )
         res = request_call.execute()
     except Exception as api_err:
-        logger.exception("Failed to execute creative patch for %s", creative_name)
+        logger.exception(
+            "Failed to execute creative patch for %s", creative_name
+        )
         return {
             "id": creative_id,
             "name": creative_name,
@@ -1048,7 +1060,8 @@ def _validate_and_resolve_ad_event_tags(
     for override in payload_event_tag_overrides:
         target_tag = str(override.get("id", "")).strip()
         if target_tag in failed_event_tag_names or (
-            target_tag not in existing_event_tag_mappings and not target_tag.isdigit()
+            target_tag not in existing_event_tag_mappings
+            and not target_tag.isdigit()
         ):
             missing_or_failed_tags.append(target_tag)
 
@@ -1169,13 +1182,17 @@ def _execute_ad_operation(
     ad_id = str(op.get("id", payload.get("id", "")))
     logger.info("Executing %s for %s", operation_type, ad_name)
     if operation_type == "dfareporting.ads.insert":
-        request_call = cm360_service.ads().insert(profileId=profile_id, body=payload)
+        request_call = cm360_service.ads().insert(
+            profileId=profile_id, body=payload
+        )
     elif operation_type == "dfareporting.ads.patch":
         request_call = cm360_service.ads().patch(
             profileId=profile_id, id=ad_id, body=payload
         )
     else:
-        request_call = cm360_service.ads().update(profileId=profile_id, body=payload)
+        request_call = cm360_service.ads().update(
+            profileId=profile_id, body=payload
+        )
     try:
         res = request_call.execute()
     except Exception as api_err:
@@ -1285,7 +1302,9 @@ def _build_trafficking_summary_response(  # ruff: ignore[too-many-arguments, too
             "SUCCESS"
             if error_count == 0
             else (
-                "ERROR" if (success_count + skipped_count == 0) else "PARTIAL_SUCCESS"
+                "ERROR"
+                if (success_count + skipped_count == 0)
+                else "PARTIAL_SUCCESS"
             )
         ),
         "message": (
@@ -1368,7 +1387,9 @@ async def _update_trafficking_sheet_status(  # ruff: ignore[complex-structure, t
         for idx, row in df_raw.iterrows():
             if not isinstance(idx, int):
                 continue
-            row_values = [str(v).strip() for v in row.to_numpy() if not pd.isna(v)]
+            row_values = [
+                str(v).strip() for v in row.to_numpy() if not pd.isna(v)
+            ]
             if (
                 "Trafficking Status" in row_values
                 or "Placement Name" in row_values
@@ -1435,7 +1456,9 @@ async def _update_trafficking_sheet_status(  # ruff: ignore[complex-structure, t
     updated_csv_content = csv_buffer.getvalue()
 
     artifact = types.Part(text=updated_csv_content)
-    await tool_context.save_artifact(filename=target_filename, artifact=artifact)
+    await tool_context.save_artifact(
+        filename=target_filename, artifact=artifact
+    )
     logger.info(
         "📄 [traffic_campaigns_in_cm360_tool] - Successfully updated %d"
         " row(s) to 'Trafficked' in artifact '%s'.",

@@ -81,7 +81,7 @@ description: Use this skill ONLY when the user requests something related to tra
    | Test Creative 1 | HTML5 | 2920x1796 | 100% | None | None  |
    | Test Creative 2 (copy) | HTML5 | 2920x1796 | 33% | None | None  |
 
-  ℹ️ *Notes on Creatives:
+   ℹ️ *Notes on Creatives:
    1. If only creative rotations were updated in the sheet, creatives will show `None` here because creative assets themselves (for example dimensions) were not updated. In Campaign Manager 360, creative rotation is managed at the Ad level, so your rotation updates were executed directly on the corresponding **Ads** listed in the table above.
    2. If an ad has only one creative in rotation, weight changes in the sheet will not take effect since CM360 does not apply weights.
 

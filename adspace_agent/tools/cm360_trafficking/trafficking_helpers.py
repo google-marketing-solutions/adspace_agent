@@ -373,12 +373,14 @@ def _diff_ad(  # ruff: ignore[complex-structure, too-many-branches, too-many-loc
     # 4. Diff clickThroughUrl (for click tracker ads)
     if "clickThroughUrl" in sheet_ad:
         s_url = (
-            sheet_ad.get("clickThroughUrl", {})
+            sheet_ad
+            .get("clickThroughUrl", {})
             .get("customClickThroughUrl", "")
             .strip()
         )
         c_url = (
-            cm_ad.get("clickThroughUrl", {})
+            cm_ad
+            .get("clickThroughUrl", {})
             .get("customClickThroughUrl", "")
             .strip()
         )
@@ -439,12 +441,14 @@ def _diff_ad(  # ruff: ignore[complex-structure, too-many-branches, too-many-loc
                     rotation_changed = True
 
                 s_url = (
-                    s_ca.get("clickThroughUrl", {})
+                    s_ca
+                    .get("clickThroughUrl", {})
                     .get("customClickThroughUrl", "")
                     .strip()
                 )
                 c_url = (
-                    c_ca.get("clickThroughUrl", {})
+                    c_ca
+                    .get("clickThroughUrl", {})
                     .get("customClickThroughUrl", "")
                     .strip()
                 )
@@ -598,15 +602,13 @@ def _resolve_and_build_operations(  # ruff: ignore[complex-structure, too-many-a
                 )
                 if diff_fields:
                     placement_id = str(cm_placement.get("id"))
-                    operations.append(
-                        {
-                            "operation": "dfareporting.placements.patch",
-                            "id": placement_id,
-                            "name": clean_name,
-                            "diff_fields": diff_fields,
-                            "payload": patch_payload,
-                        }
-                    )
+                    operations.append({
+                        "operation": "dfareporting.placements.patch",
+                        "id": placement_id,
+                        "name": clean_name,
+                        "diff_fields": diff_fields,
+                        "payload": patch_payload,
+                    })
 
     # 2. Build Creative PATCH operations (diffs only)
     if creatives and existing_creatives:
@@ -620,15 +622,13 @@ def _resolve_and_build_operations(  # ruff: ignore[complex-structure, too-many-a
                 )
                 if diff_fields:
                     creative_id = str(cm_creative.get("id"))
-                    operations.append(
-                        {
-                            "operation": "dfareporting.creatives.patch",
-                            "id": creative_id,
-                            "name": clean_name,
-                            "diff_fields": diff_fields,
-                            "payload": patch_payload,
-                        }
-                    )
+                    operations.append({
+                        "operation": "dfareporting.creatives.patch",
+                        "id": creative_id,
+                        "name": clean_name,
+                        "diff_fields": diff_fields,
+                        "payload": patch_payload,
+                    })
 
     # 3. Build Event Tag operations: INSERT for new tags, PATCH for diffs
     if event_tags:
@@ -644,15 +644,13 @@ def _resolve_and_build_operations(  # ruff: ignore[complex-structure, too-many-a
                     cm_event_tag=cm_tag,
                 )
                 if diff_fields:
-                    operations.append(
-                        {
-                            "operation": "dfareporting.eventTags.patch",
-                            "id": tag_id,
-                            "name": clean_tag_name,
-                            "diff_fields": diff_fields,
-                            "payload": patch_payload,
-                        }
-                    )
+                    operations.append({
+                        "operation": "dfareporting.eventTags.patch",
+                        "id": tag_id,
+                        "name": clean_tag_name,
+                        "diff_fields": diff_fields,
+                        "payload": patch_payload,
+                    })
                 else:
                     logger.info(
                         "Event tag '%s' (ID: %s) already matches CM360 state."
@@ -661,13 +659,11 @@ def _resolve_and_build_operations(  # ruff: ignore[complex-structure, too-many-a
                         tag_id,
                     )
             else:
-                operations.append(
-                    {
-                        "operation": "dfareporting.eventTags.insert",
-                        "name": clean_tag_name,
-                        "payload": tag_payload,
-                    }
-                )
+                operations.append({
+                    "operation": "dfareporting.eventTags.insert",
+                    "name": clean_tag_name,
+                    "payload": tag_payload,
+                })
 
     # 4. Resolve existing Event Tag IDs in Ad overrides
     for ad_payload in ads.values():
@@ -705,15 +701,13 @@ def _resolve_and_build_operations(  # ruff: ignore[complex-structure, too-many-a
                     cm_ad=existing_ad,
                 )
                 if diff_fields:
-                    operations.append(
-                        {
-                            "operation": "dfareporting.ads.patch",
-                            "id": ad_id,
-                            "name": clean_ad_name,
-                            "diff_fields": diff_fields,
-                            "payload": patch_payload,
-                        }
-                    )
+                    operations.append({
+                        "operation": "dfareporting.ads.patch",
+                        "id": ad_id,
+                        "name": clean_ad_name,
+                        "diff_fields": diff_fields,
+                        "payload": patch_payload,
+                    })
                 else:
                     logger.info(
                         "Ad '%s' (ID: %s) already matches CM360 state."
@@ -722,13 +716,11 @@ def _resolve_and_build_operations(  # ruff: ignore[complex-structure, too-many-a
                         ad_id,
                     )
             else:
-                operations.append(
-                    {
-                        "operation": "dfareporting.ads.insert",
-                        "name": clean_ad_name,
-                        "payload": ad_payload,
-                    }
-                )
+                operations.append({
+                    "operation": "dfareporting.ads.insert",
+                    "name": clean_ad_name,
+                    "payload": ad_payload,
+                })
 
     return operations
 
@@ -1027,14 +1019,12 @@ def _process_event_tag_operations(
                 tag_name,
             )
             failed_event_tag_names.add(tag_name)
-            results.append(
-                {
-                    "name": tag_name,
-                    "operation": operation_type,
-                    "status": "ERROR",
-                    "message": str(api_err),
-                }
-            )
+            results.append({
+                "name": tag_name,
+                "operation": operation_type,
+                "status": "ERROR",
+                "message": str(api_err),
+            })
 
     return results, created_event_tag_mappings, failed_event_tag_names
 

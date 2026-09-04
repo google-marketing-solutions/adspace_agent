@@ -1626,4 +1626,3 @@ def test_diff_placement_aligns_pricing_periods() -> None:
             "rateOrCostNanos": "5000000000",
         }
     ]
-

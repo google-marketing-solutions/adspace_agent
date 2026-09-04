@@ -15,7 +15,6 @@
 
 import io
 import logging
-from typing import Any
 
 from google.adk.tools.tool_context import ToolContext
 from google.cloud import storage
@@ -44,8 +43,11 @@ def parse_size(val: object) -> dict[str, int]:
     return {"width": 0, "height": 0}
 
 
+GLOBAL_METADATA_ROWS_COUNT = 2
+
+
 def format_date(val: object) -> str | None:
-    """Formats datetime values into a YYYY-MM-DD string.
+    """Formats date values into a standard YYYY-MM-DD string.
 
     Args:
         val: The raw date value to format.
@@ -56,9 +58,9 @@ def format_date(val: object) -> str | None:
     if pd.isna(val):
         return None
     try:
-        parsed = pd.to_datetime(val)
+        parsed = pd.to_datetime(str(val))
         return parsed.strftime("%Y-%m-%d")
-    except Exception:
+    except (ValueError, TypeError, KeyError):
         return str(val).split()[0]
 
 
@@ -74,10 +76,45 @@ def format_date_time(val: object) -> str | None:
     if pd.isna(val):
         return None
     try:
-        parsed = pd.to_datetime(val)
+        parsed = pd.to_datetime(str(val))
         return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
-    except Exception:
+    except (ValueError, TypeError, KeyError):
         return str(val)
+
+
+def normalize_iso_datetime(val: object) -> str | None:
+    """Normalizes datetime values into a standard UTC ISO-8601 string.
+
+    Args:
+        val: Raw datetime string, timestamp, or None.
+
+    Returns:
+        Formatted datetime string 'YYYY-MM-DDTHH:MM:SSZ' or None.
+    """
+    if pd.isna(val) or val is None:
+        return None
+    val_str = str(val).strip()
+    if not val_str or val_str.lower() in {"none", "nan", "null"}:
+        return None
+    try:
+        parsed = pd.to_datetime(val_str)
+        return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, TypeError, KeyError):
+        return val_str
+
+
+def normalize_placement_status(val: object) -> str:
+    """Returns placement activeStatus enum string directly from sheet.
+
+    Args:
+        val: Raw status string or object.
+
+    Returns:
+        Stripped placement activeStatus enum string, or empty string.
+    """
+    if pd.isna(val) or not val:
+        return ""
+    return str(val).strip()
 
 
 def parse_weight(val: object) -> int:
@@ -101,7 +138,9 @@ def parse_weight(val: object) -> int:
         return 100
 
 
-def clean_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
+def clean_dataframe(  # ruff: ignore[complex-structure]
+    df_raw: pd.DataFrame,
+) -> pd.DataFrame:
     """Finds the header dynamically and cleans the campaign trafficking data.
 
     Locates the table header row, cleans column names, removes empty rows,
@@ -117,9 +156,9 @@ def clean_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     Raises:
         ValueError: If the table header row cannot be located in the sheet.
     """
-    header_row_idx = None
+    header_row_idx: int | None = None
     for idx, row in df_raw.iterrows():
-        if idx < 2:  # Skip the top global metadata rows
+        if not isinstance(idx, int) or idx < GLOBAL_METADATA_ROWS_COUNT:
             continue
         row_values = [str(v).strip() for v in row.to_numpy() if not pd.isna(v)]
         if (
@@ -132,7 +171,11 @@ def clean_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
 
     if header_row_idx is None:
         for idx, row in df_raw.iterrows():
-            row_values = [str(v).strip() for v in row.to_numpy() if not pd.isna(v)]
+            if not isinstance(idx, int):
+                continue
+            row_values = [
+                str(v).strip() for v in row.to_numpy() if not pd.isna(v)
+            ]
             if (
                 "Trafficking Status" in row_values
                 or "Placement Name" in row_values
@@ -152,9 +195,12 @@ def clean_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     # Drop rows that are completely empty
     df = df.dropna(how="all")
 
-    # Drop rows where all critical identifier fields are empty (likely non-data rows)
+    # Drop rows where all critical identifier fields are empty
+    # (likely non-data rows)
     subset_cols = [
-        c for c in ["Placement Name", "Ad Name", "Creative Name"] if c in df.columns
+        c
+        for c in ["Placement Name", "Ad Name", "Creative Name"]
+        if c in df.columns
     ]
     if subset_cols:
         df = df.dropna(subset=subset_cols, how="all")
@@ -197,10 +243,12 @@ async def load_raw_dataframe(
         tool_context: Active tool context containing session artifacts.
 
     Returns:
-        A tuple of (df_raw, target_filename) where df_raw is the loaded DataFrame.
+        A tuple of (df_raw, target_filename) where df_raw is the loaded
+        DataFrame.
 
     Raises:
-        ValueError: If no CSV files are found or if the artifact cannot be loaded.
+        ValueError: If no CSV files are found or if the artifact cannot be
+            loaded.
     """
     df_raw = None
 
@@ -212,7 +260,10 @@ async def load_raw_dataframe(
     matching_files = [f for f in artifacts if f.lower().endswith(".csv")]
 
     if not matching_files:
-        msg = "No CSV trafficking files (.csv) found in session artifacts. Please upload your trafficking CSV file."
+        msg = (
+            "No CSV trafficking files (.csv) found in session artifacts."
+            " Please upload your trafficking CSV file."
+        )
         raise ValueError(msg)
 
     # Select the latest uploaded matching CSV file
@@ -238,36 +289,45 @@ async def load_raw_dataframe(
     return df_raw, target_filename
 
 
-def prepare_data(
+def prepare_data(  # ruff: ignore[complex-structure]
     df_raw: pd.DataFrame,
 ) -> tuple[pd.DataFrame, str, str, str, str | None]:
-    """Extracts metadata from global header rows and cleans the trafficking data.
+    """Extracts metadata from header rows and cleans the trafficking data.
 
     Args:
         df_raw: Raw DataFrame loaded from CSV.
 
     Returns:
-        A tuple of (cleaned_df, profile_id, advertiser_id, campaign_id, campaign_name).
+        A tuple of (cleaned_df, profile_id, advertiser_id, campaign_id,
+        campaign_name).
 
     Raises:
-        ValueError: If required metadata fields (Profile ID, Advertiser ID, Campaign ID) are missing.
+        ValueError: If required metadata fields (Profile ID, Advertiser ID,
+            Campaign ID) are missing.
     """
     profile_id = None
     advertiser_id = None
     campaign_id = None
     campaign_name = None
 
-    def clean_id(val: Any) -> str | None:
-        """Cleans and strips ID values from floats/strings."""
+    def clean_id(val: str | float | None) -> str | None:
+        """Cleans and strips ID values from floats/strings.
+
+        Args:
+            val: Raw value to clean.
+
+        Returns:
+            Cleaned ID string, or None if empty.
+        """
         if val is None or pd.isna(val):
             return None
         val_str = str(val).strip()
         if val_str.lower() in {"", "none", "nan", "null"}:
             return None
-        val_str = val_str.removesuffix(".0")
-        return val_str
+        return val_str.removesuffix(".0")
 
-    # Extract Profile ID, Advertiser ID, Campaign ID, and Campaign Name from the first two rows (global config)
+    # Extract Profile ID, Advertiser ID, Campaign ID, and Campaign Name
+    # from the first two rows (global config)
     for row_idx in range(len(df_raw) - 1):
         header_row = df_raw.iloc[row_idx]
         values_row = df_raw.iloc[row_idx + 1]
@@ -288,13 +348,22 @@ def prepare_data(
         break
 
     if not profile_id:
-        msg = "Missing required campaign metadata field: Profile ID in the first two rows."
+        msg = (
+            "Missing required campaign metadata field: Profile ID in the first"
+            " two rows."
+        )
         raise ValueError(msg)
     if not advertiser_id:
-        msg = "Missing required campaign metadata field: Advertiser ID in the first two rows."
+        msg = (
+            "Missing required campaign metadata field: Advertiser ID in the"
+            " first two rows."
+        )
         raise ValueError(msg)
     if not campaign_id:
-        msg = "Missing required campaign metadata field: Campaign ID in the first two rows."
+        msg = (
+            "Missing required campaign metadata field: Campaign ID in the"
+            " first two rows."
+        )
         raise ValueError(msg)
 
     # Clean and parse data rows

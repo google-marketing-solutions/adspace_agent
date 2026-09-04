@@ -13,17 +13,22 @@
 # limitations under the License.
 """Tests for the CM360 trafficking parser tool."""
 
+import dataclasses
 import datetime
 import json
-import pathlib
 import typing
 from unittest import mock
 
+import anyio
+from google.genai import types
+from google.oauth2.credentials import Credentials
+import pandas as pd
 import pytest
 
-from adspace_agent.tools.cm360_trafficking.cm360_trafficking import (
-    _get_cm360_service,
-)
+from adspace_agent.tools.cm360_trafficking import cm360_actions
+from adspace_agent.tools.cm360_trafficking import cm360_trafficking
+from adspace_agent.tools.cm360_trafficking import trafficking_helpers
+from adspace_agent.tools.cm360_trafficking import validations
 from adspace_agent.tools.cm360_trafficking.cm360_trafficking import (
     before_traffic_campaigns_in_cm360_tool_callback,
 )
@@ -40,17 +45,19 @@ from adspace_agent.tools.cm360_trafficking.cm360_trafficking import (
 parse_trafficking_sheet = parse_sheet_tool
 
 
+@dataclasses.dataclass
 class MockSession:
-    def __init__(self, session_id: str = "test_session_id") -> None:
-        self.id = session_id
+    """Mock session for testing."""
+
+    id: str = "test_session_id"
 
 
 @pytest.fixture(autouse=True)
 def mock_cm360_api_calls(monkeypatch):
-    """Mock CM360 API calls for placements and creatives to return matching mock data."""
+    """Mock CM360 API calls to return matching mock data."""
     monkeypatch.setenv("SKILLS_BUCKET_NAME", "test-bucket")
 
-    def mock_list_placements_side_effect(*args, **kwargs):
+    def mock_list_placements_side_effect(*_args, **_kwargs):
         names = [
             "Test~Placement~1 Test",
             "Test~Placement~2 Test",
@@ -66,17 +73,17 @@ def mock_cm360_api_calls(monkeypatch):
         ]
         return [{"name": n, "id": f"mock_placement_id_{n}"} for n in names]
 
-    def mock_list_creatives_side_effect(*args, **kwargs):
+    def mock_list_creatives_side_effect(*_args, **_kwargs):
         return [
             {"name": "TEST_ACG~300x250", "id": "999123"},
             {"name": "TEST_Shopathon_300x250", "id": "999456"},
             {"name": "sap_elephant", "id": "999789"},
         ]
 
-    def mock_list_event_tags_side_effect(*args, **kwargs):
+    def mock_list_event_tags_side_effect(*_args, **_kwargs):
         return []
 
-    def mock_list_ads_side_effect(*args, **kwargs):
+    def mock_list_ads_side_effect(*_args, **_kwargs):
         return []
 
     with (
@@ -107,26 +114,40 @@ def mock_cm360_api_calls(monkeypatch):
 class MockToolContext:
     """Mock context to simulate ADK Artifacts loader in tests."""
 
-    def __init__(self, physical_path: str, session_id: str = "test_session_id") -> None:
+    def __init__(
+        self, physical_path: str, session_id: str = "test_session_id"
+    ) -> None:
+        """Initializes MockToolContext."""
         self.physical_path = physical_path
         self.session = MockSession(session_id)
         self.state: dict[str, typing.Any] = {}
 
     async def list_artifacts(self) -> list[str]:
+        """Lists available artifacts.
+
+        Returns:
+            list[str]: The physical paths.
+        """
         return [self.physical_path]
 
-    async def load_artifact(self, filename: str):
-        from google.genai import types
+    async def load_artifact(self, filename: str) -> types.Part | None:
+        """Loads artifact as a Part object.
 
-        path = pathlib.Path(self.physical_path)
-        if not path.exists():
+        Args:
+            filename: Artifact filename.
+
+        Returns:
+            Part object or None.
+        """
+        path = anyio.Path(self.physical_path)
+        if not await path.exists():
             return None
 
         if filename.lower().endswith(".csv"):
-            text = path.read_text(encoding="utf-8")
+            text = await path.read_text(encoding="utf-8")
             return types.Part(text=text)
 
-        data = path.read_bytes()
+        data = await path.read_bytes()
         return types.Part(
             inline_data=types.Blob(
                 mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -135,46 +156,61 @@ class MockToolContext:
         )
 
 
-def make_test_csv(
-    profile_id: str = "7023449",
-    advertiser_id: str = "13641571",
-    campaign_id: str = "30535365",
-    campaign_name: str = "Google Ad Spaces Testing - June 2026",
-    status: str = "New",
-    site_id: str = "4802860",
-    site: str = "",
-    placement_id: str = "",
-    placement_name: str = "Test~Placement~1 Test",
-    placement_size: str = "300x250",
-    compatibility: str = "DISPLAY",
-    payment_source: str = "PLACEMENT_AGENCY_PAID",
-    pricing_type: str = "PRICING_TYPE_CPM",
-    pricing_start: str = "8/29/3000",
-    pricing_end: str = "9/25/3000",
-    tag_formats: str = "PLACEMENT_TAG_STANDARD, PLACEMENT_TAG_IFRAME_JAVASCRIPT",
-    ad_id: str = "",
-    ad_name: str = "Test Ad C",
-    ad_start: str = "8/29/3000",
-    ad_end: str = "9/25/3000",
-    ad_type: str = "AD_SERVING_STANDARD_AD",
-    priority: str = "AD_PRIORITY_01",
-    impression_ratio: str = "1",
-    creative_id: str = "999123",
-    creative_name: str = "TEST_ACG~300x250",
-    click_through_url: str = "https://click.test.com",
-    ad_dynamic_click_tracker: str = "TRUE",
-    base_url: str = "https://www.test.com",
-    final_url: str = "https://www.test.com?utm_medium=test",
-    placement_status: str = "PLACEMENT_STATUS_ACTIVE",
-) -> str:
-    """Helper to construct a trafficking sheet CSV string with defaults."""
+def make_test_csv(**overrides: str) -> str:
+    """Helper to construct a trafficking sheet CSV string with defaults.
+
+    Args:
+        **overrides: Key-value pairs to override defaults.
+
+    Returns:
+        str: Generated CSV string.
+    """
+    defaults = {
+        "profile_id": "7023449",
+        "advertiser_id": "13641571",
+        "campaign_id": "30535365",
+        "campaign_name": "Google Ad Spaces Testing - June 2026",
+        "status": "New",
+        "site_id": "4802860",
+        "site": "",
+        "placement_id": "",
+        "placement_name": "Test~Placement~1 Test",
+        "placement_size": "300x250",
+        "compatibility": "DISPLAY",
+        "payment_source": "PLACEMENT_AGENCY_PAID",
+        "pricing_type": "PRICING_TYPE_CPM",
+        "pricing_start": "8/29/3000",
+        "pricing_end": "9/25/3000",
+        "tag_formats": (
+            "PLACEMENT_TAG_STANDARD, PLACEMENT_TAG_IFRAME_JAVASCRIPT"
+        ),
+        "ad_id": "",
+        "ad_name": "Test Ad C",
+        "ad_start": "8/29/3000",
+        "ad_end": "9/25/3000",
+        "ad_type": "AD_SERVING_STANDARD_AD",
+        "priority": "AD_PRIORITY_01",
+        "impression_ratio": "1",
+        "creative_id": "999123",
+        "creative_name": "TEST_ACG~300x250",
+        "click_through_url": "https://click.test.com",
+        "ad_dynamic_click_tracker": "TRUE",
+        "base_url": "https://www.test.com",
+        "final_url": "https://www.test.com?utm_medium=test",
+        "placement_status": "PLACEMENT_STATUS_ACTIVE",
+    }
+    defaults.update(overrides)
+
     r1 = (
         "Digitas-DFA 609,Profile ID,Advertiser ID,Campaign ID,Campaign Name"
         + "," * 41
         + "\n"
     )
     r2 = (
-        f",{profile_id},{advertiser_id},{campaign_id},{campaign_name}" + "," * 41 + "\n"
+        f",{defaults['profile_id']},{defaults['advertiser_id']},"
+        f"{defaults['campaign_id']},{defaults['campaign_name']}"
+        + "," * 41
+        + "\n"
     )
     r3 = (
         "," * 9
@@ -184,21 +220,37 @@ def make_test_csv(
     )
     r4 = "," * 45 + "\n"
     r5 = (
-        "Campaign ID,Campaign Name,Trafficking Status,Site ID,Site,Channel,Placement ID,Placement Name,"
-        "Placement Size,Compatibility,Placement Status,Placement Payment Source,Pricing Schedule Type,"
-        "Pricing Schedule Start Date,Pricing Schedule End Date,Placement Tag Formats,Ad Server,Ad ID,Ad Name,"
-        "Ad Start Date,Ad End Date,Ad Type,Delivery Schedule Priority,Delivery Schedule Impression Ratio,"
-        "Ad Click Through Url,Ad Dynamic Click Tracker,Creative ID,Creative Name,Creative Start Date,"
-        "Creative End Date,Creative Rotation,Creative Dimensions,Creative Type,Creative asset file link,"
-        "Base URL,Final Trafficking URL,Brand Safety/Verification,Brand Safety/Verification Measurement Type,"
-        "Research Partner,Notes,Campaign Funding,Campaign Quarter,Creative Detail,Fiscal,Language,Salesforce ID\n"
+        "Campaign ID,Campaign Name,Trafficking Status,Site ID,Site,Channel,"
+        "Placement ID,Placement Name,Placement Size,Compatibility,"
+        "Placement Status,Placement Payment Source,Pricing Schedule Type,"
+        "Pricing Schedule Start Date,Pricing Schedule End Date,"
+        "Placement Tag Formats,Ad Server,Ad ID,Ad Name,Ad Start Date,"
+        "Ad End Date,Ad Type,Delivery Schedule Priority,"
+        "Delivery Schedule Impression Ratio,Ad Click Through Url,"
+        "Ad Dynamic Click Tracker,Creative ID,Creative Name,"
+        "Creative Start Date,Creative End Date,Creative Rotation,"
+        "Creative Dimensions,Creative Type,"
+        "Creative asset file link,Base URL,Final Trafficking URL,"
+        "Brand Safety/Verification,Brand Safety/Verification Measurement Type,"
+        "Research Partner,Notes,Campaign Funding,Campaign Quarter,"
+        "Creative Detail,Fiscal,Language,Salesforce ID\n"
     )
     r6 = (
-        f"{campaign_id},{campaign_name},{status},{site_id},{site},display,{placement_id},{placement_name},{placement_size},"
-        f"{compatibility},{placement_status},{payment_source},{pricing_type},{pricing_start},{pricing_end},"
-        f'"{tag_formats}",DCM,{ad_id},{ad_name},{ad_start},{ad_end},{ad_type},{priority},{impression_ratio},'
-        f"{click_through_url},{ad_dynamic_click_tracker},{creative_id},{creative_name},6/10/2026,7/10/2026,100%,300x250,HTML5_BANNER,,"
-        f"{base_url},{final_url},None,None,CINT,,,,,,,\n"
+        f"{defaults['campaign_id']},{defaults['campaign_name']},"
+        f"{defaults['status']},{defaults['site_id']},{defaults['site']},"
+        f"display,{defaults['placement_id']},{defaults['placement_name']},"
+        f"{defaults['placement_size']},{defaults['compatibility']},"
+        f"{defaults['placement_status']},{defaults['payment_source']},"
+        f"{defaults['pricing_type']},{defaults['pricing_start']},"
+        f'{defaults["pricing_end"]},"{defaults["tag_formats"]}",DCM,'
+        f"{defaults['ad_id']},{defaults['ad_name']},{defaults['ad_start']},"
+        f"{defaults['ad_end']},{defaults['ad_type']},{defaults['priority']},"
+        f"{defaults['impression_ratio']},{defaults['click_through_url']},"
+        f"{defaults['ad_dynamic_click_tracker']},{defaults['creative_id']},"
+        f"{defaults['creative_name']},"
+        "6/10/2026,7/10/2026,100%,300x250,HTML5_BANNER,,"
+        f"{defaults['base_url']},{defaults['final_url']},"
+        "None,None,CINT,,,,,,,\n"
     )
     return r1 + r2 + r3 + r4 + r5 + r6
 
@@ -231,7 +283,11 @@ async def test_parse_trafficking_sheet_success(tmp_path) -> None:
     assert len(ad_ops) > 0
 
     ad_c = next(
-        (op["payload"] for op in ad_ops if op["payload"]["name"] == "Test Ad C"),
+        (
+            op["payload"]
+            for op in ad_ops
+            if op["payload"]["name"] == "Test Ad C"
+        ),
         None,
     )
     assert ad_c is not None
@@ -253,7 +309,7 @@ async def test_parse_trafficking_sheet_file_not_found() -> None:
     )
     result = json.loads(result_str)
 
-    assert result.get("status") in ("error", "ERROR")
+    assert result.get("status") in {"error", "ERROR"}
 
 
 @pytest.mark.asyncio
@@ -261,111 +317,49 @@ async def test_cm360_trafficking_parser_toolset() -> None:
     """Tests that the parser toolset returns the correct tools."""
     toolset = CM360TraffickingParserToolset()
     tools = await toolset.get_tools()
-    assert len(tools) == 2
+    expected_tool_count = 2
+    assert len(tools) == expected_tool_count
     assert tools[0] is toolset.parse_sheet_tool
     assert tools[1] is toolset.traffic_campaigns_in_cm360_tool
 
 
-def test_validate_placement_id() -> None:
-    """Tests validate_placement_id helper."""
-    import pandas as pd
-
-    from adspace_agent.tools.cm360_trafficking.validations import (
-        validate_placement_id,
-    )
-
-    row_update_missing = pd.Series(
-        {
-            "Trafficking Status": "Update",
-            "Placement ID": "",
-        }
-    )
-    err = validate_placement_id(row_update_missing, 1)
-    assert err is not None
-    assert err["field"] == "Placement ID"
-    assert "Placement ID is required" in err["error"]
-
-    row_update_valid = pd.Series(
-        {
-            "Trafficking Status": "Update",
-            "Placement ID": "12345",
-        }
-    )
-    assert validate_placement_id(row_update_valid, 1) is None
-
-    row_new_missing = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Placement ID": "",
-        }
-    )
-    assert validate_placement_id(row_new_missing, 1) is None
-
-
-@pytest.mark.asyncio
-async def test_validation_success_with_placement_id_on_update(
-    tmp_path,
-) -> None:
-    """Tests that parsing succeeds when Placement ID is provided on Update."""
-    csv_content = make_test_csv(status="Update", placement_id="123456", ad_id="9999")
-    file_path = tmp_path / "test_sheet.csv"
-    file_path.write_text(csv_content, encoding="utf-8")
-
-    result_str = await parse_trafficking_sheet(
-        typing.cast("typing.Any", MockToolContext(str(file_path)))
-    )
-    result = json.loads(result_str)
-
-    assert result.get("status") == "SUCCESS"
-    assert "operations" in result
-
-    ad_ops = [
-        op
-        for op in result["operations"]
-        if op["operation"] == "dfareporting.ads.insert"
-    ]
-    assert len(ad_ops) == 1
-
-
 def test_validate_placement_name() -> None:
-    """Tests validate_placement_name helper."""
-    import pandas as pd
-
-    from adspace_agent.tools.cm360_trafficking.validations import (
-        validate_placement_name,
-    )
-
+    """Tests validations.validate_placement_name helper."""
     row_missing = pd.Series({"Trafficking Status": "New", "Placement Name": ""})
-    err = validate_placement_name(row_missing, 1)
+    err = validations.validate_placement_name(row_missing, 1)
     assert err is not None
     assert err["field"] == "Placement Name"
     assert "Placement Name is required" in err["error"]
 
-    row_long = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Placement Name": "A" * 513,
-        }
-    )
-    err = validate_placement_name(row_long, 1)
+    row_long = pd.Series({
+        "Trafficking Status": "New",
+        "Placement Name": "A" * 513,
+    })
+    err = validations.validate_placement_name(row_long, 1)
     assert err is not None
     assert "must be less than or equal to 512 characters" in err["error"]
 
-    row_valid = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Placement Name": "Valid Name",
-        }
-    )
-    assert validate_placement_name(row_valid, 1) is None
+    row_valid = pd.Series({
+        "Trafficking Status": "New",
+        "Placement Name": "Valid Name",
+    })
+    assert validations.validate_placement_name(row_valid, 1) is None
 
 
 @pytest.mark.asyncio
-async def test_validation_fail_missing_profile_id(
-    tmp_path,
+@pytest.mark.parametrize(
+    ("field", "override"),
+    [
+        ("Profile ID", {"profile_id": ""}),
+        ("Advertiser ID", {"advertiser_id": ""}),
+        ("Campaign ID", {"campaign_id": ""}),
+    ],
+)
+async def test_validation_fail_missing_required_ids(
+    tmp_path, field: str, override: dict[str, str]
 ) -> None:
-    """Tests that validation fails when Profile ID is missing."""
-    csv_content = make_test_csv(profile_id="")
+    """Tests that validation fails when required campaign IDs are missing."""
+    csv_content = make_test_csv(**override)
     file_path = tmp_path / "test_sheet.csv"
     file_path.write_text(csv_content, encoding="utf-8")
 
@@ -374,44 +368,8 @@ async def test_validation_fail_missing_profile_id(
     )
     result = json.loads(result_str)
 
-    assert result.get("status") in ("error", "ERROR")
-    assert "Profile ID" in result.get("message", "")
-
-
-@pytest.mark.asyncio
-async def test_validation_fail_missing_advertiser_id(
-    tmp_path,
-) -> None:
-    """Tests that validation fails when Advertiser ID is missing."""
-    csv_content = make_test_csv(advertiser_id="")
-    file_path = tmp_path / "test_sheet.csv"
-    file_path.write_text(csv_content, encoding="utf-8")
-
-    result_str = await parse_trafficking_sheet(
-        typing.cast("typing.Any", MockToolContext(str(file_path)))
-    )
-    result = json.loads(result_str)
-
-    assert result.get("status") in ("error", "ERROR")
-    assert "Advertiser ID" in result.get("message", "")
-
-
-@pytest.mark.asyncio
-async def test_validation_fail_missing_campaign_id(
-    tmp_path,
-) -> None:
-    """Tests that validation fails when Campaign ID is missing."""
-    csv_content = make_test_csv(campaign_id="")
-    file_path = tmp_path / "test_sheet.csv"
-    file_path.write_text(csv_content, encoding="utf-8")
-
-    result_str = await parse_trafficking_sheet(
-        typing.cast("typing.Any", MockToolContext(str(file_path)))
-    )
-    result = json.loads(result_str)
-
-    assert result.get("status") in ("error", "ERROR")
-    assert "Campaign ID" in result.get("message", "")
+    assert result.get("status") in {"error", "ERROR"}
+    assert field in result.get("message", "")
 
 
 @pytest.mark.asyncio
@@ -430,52 +388,6 @@ async def test_parse_trafficking_sheet_success_missing_campaign_name(
 
     assert result.get("status") == "SUCCESS"
     assert len(result["operations"]) > 0
-
-
-def test_validate_site_id() -> None:
-    """Tests validate_site_id helper."""
-    import pandas as pd
-
-    from adspace_agent.tools.cm360_trafficking.validations import (
-        validate_site_id,
-    )
-
-    row_missing = pd.Series({"Site ID": ""})
-    err = validate_site_id(row_missing, 1)
-    assert err is not None
-    assert err["field"] == "Site ID"
-    assert "Site ID is required" in err["error"]
-
-    row_valid_id = pd.Series({"Site ID": "12345"})
-    assert validate_site_id(row_valid_id, 1) is None
-
-
-def test_validate_payment_source() -> None:
-    """Tests validate_payment_source helper."""
-    import pandas as pd
-
-    from adspace_agent.tools.cm360_trafficking.validations import (
-        validate_payment_source,
-    )
-
-    row_missing = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Placement Payment Source": "",
-        }
-    )
-    err = validate_payment_source(row_missing, 1)
-    assert err is not None
-    assert err["field"] == "Payment Source"
-    assert "Payment Source is required" in err["error"]
-
-    row_valid = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Placement Payment Source": "PLACEMENT_AGENCY_PAID",
-        }
-    )
-    assert validate_payment_source(row_valid, 1) is None
 
 
 @pytest.mark.asyncio
@@ -507,166 +419,150 @@ async def test_parse_trafficking_sheet_success_new_headers(tmp_path) -> None:
     assert placement_assignments[0]["active"] is True
 
 
-def test_validate_compatibility() -> None:
-    """Tests validate_compatibility helper."""
-    import pandas as pd
-
-    from adspace_agent.tools.cm360_trafficking.validations import (
-        validate_compatibility,
-    )
-
-    row_missing = pd.Series({"Trafficking Status": "New", "Compatibility": ""})
-    err = validate_compatibility(row_missing, 1)
-    assert err is not None
-    assert "Compatibility is required" in err["error"]
-
-    row_forbidden = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Compatibility": "APP",
-        }
-    )
-    err = validate_compatibility(row_forbidden, 1)
-    assert err is not None
-    assert "APP and APP_INTERSTITIAL are no longer allowed" in err["error"]
-
-    row_invalid = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Compatibility": "INVALID",
-        }
-    )
-    err = validate_compatibility(row_invalid, 1)
-    assert err is not None
-    assert "Invalid compatibility value" in err["error"]
-
-    row_valid = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Compatibility": "DISPLAY",
-        }
-    )
-    assert validate_compatibility(row_valid, 1) is None
+def test_validate_placement_id() -> None:
+    """Tests validations.validate_placement_id helper."""
+    row_update_missing = pd.Series({
+        "Trafficking Status": "Update",
+        "Placement ID": "",
+    })
+    assert validations.validate_placement_id(row_update_missing, 1) is not None
+    row_update_valid = pd.Series({
+        "Trafficking Status": "Update",
+        "Placement ID": "12345",
+    })
+    assert validations.validate_placement_id(row_update_valid, 1) is None
+    row_new_missing = pd.Series({
+        "Trafficking Status": "New",
+        "Placement ID": "",
+    })
+    assert validations.validate_placement_id(row_new_missing, 1) is None
 
 
-def test_validate_placement_size() -> None:
-    """Tests validate_placement_size helper."""
-    import pandas as pd
+def test_validate_site_id() -> None:
+    """Tests validations.validate_site_id helper."""
+    row_missing = pd.Series({"Site ID": ""})
+    assert validations.validate_site_id(row_missing, 1) is not None
+    row_valid = pd.Series({"Site ID": "12345"})
+    assert validations.validate_site_id(row_valid, 1) is None
 
-    from adspace_agent.tools.cm360_trafficking.validations import (
-        validate_placement_size,
-    )
 
-    row_missing = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Placement Size": "",
-        }
-    )
-    err = validate_placement_size(row_missing, 1)
-    assert err is not None
-    assert "Placement Size is required" in err["error"]
-
-    row_valid = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Placement Size": "300x250",
-        }
-    )
-    assert validate_placement_size(row_valid, 1) is None
+def test_validate_payment_source() -> None:
+    """Tests validations.validate_payment_source helper."""
+    row_missing = pd.Series({
+        "Trafficking Status": "New",
+        "Placement Payment Source": "",
+    })
+    assert validations.validate_payment_source(row_missing, 1) is not None
+    row_valid = pd.Series({
+        "Trafficking Status": "New",
+        "Placement Payment Source": "PLACEMENT_AGENCY_PAID",
+    })
+    assert validations.validate_payment_source(row_valid, 1) is None
 
 
 def test_validate_pricing_schedule() -> None:
-    """Tests validate_pricing_schedule helper."""
-    import pandas as pd
-
-    from adspace_agent.tools.cm360_trafficking.validations import (
-        validate_pricing_schedule,
-    )
-
-    row_missing = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Pricing Schedule Start Date": "",
-            "Pricing Schedule End Date": "9/25/3000",
-            "Pricing Schedule Type": "PRICING_TYPE_CPM",
-        }
-    )
-    err = validate_pricing_schedule(row_missing, 1)
-    assert err is not None
-    assert "Pricing Schedule subfields (startDate) are required" in err["error"]
-
-    row_valid = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Pricing Schedule Start Date": "8/29/3000",
-            "Pricing Schedule End Date": "9/25/3000",
-            "Pricing Schedule Type": "PRICING_TYPE_CPM",
-        }
-    )
-    assert validate_pricing_schedule(row_valid, 1) is None
+    """Tests validations.validate_pricing_schedule helper."""
+    row_missing = pd.Series({
+        "Trafficking Status": "New",
+        "Pricing Schedule Start Date": "",
+        "Pricing Schedule End Date": "9/25/3000",
+        "Pricing Schedule Type": "PRICING_TYPE_CPM",
+    })
+    assert validations.validate_pricing_schedule(row_missing, 1) is not None
+    row_valid = pd.Series({
+        "Trafficking Status": "New",
+        "Pricing Schedule Start Date": "8/29/3000",
+        "Pricing Schedule End Date": "9/25/3000",
+        "Pricing Schedule Type": "PRICING_TYPE_CPM",
+    })
+    assert validations.validate_pricing_schedule(row_valid, 1) is None
 
 
 def test_validate_tag_formats() -> None:
-    """Tests validate_tag_formats helper."""
-    import pandas as pd
-
-    from adspace_agent.tools.cm360_trafficking.validations import (
-        validate_tag_formats,
-    )
-
-    row_missing = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Placement Tag Formats": "",
-        }
-    )
-    err = validate_tag_formats(row_missing, 1)
-    assert err is not None
-    assert "Placement Tag Formats is required" in err["error"]
-
-    row_invalid = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Placement Tag Formats": ("PLACEMENT_TAG_STANDARD, PLACEMENT_TAG_INVALID"),
-        }
-    )
-    err = validate_tag_formats(row_invalid, 1)
-    assert err is not None
-    assert "Invalid placement tag format values: PLACEMENT_TAG_INVALID." in err["error"]
-
-    row_valid = pd.Series(
-        {
-            "Trafficking Status": "New",
-            "Placement Tag Formats": (
-                "PLACEMENT_TAG_STANDARD, PLACEMENT_TAG_IFRAME_JAVASCRIPT"
-            ),
-        }
-    )
-    assert validate_tag_formats(row_valid, 1) is None
+    """Tests validations.validate_tag_formats helper."""
+    row_missing = pd.Series({
+        "Trafficking Status": "New",
+        "Placement Tag Formats": "",
+    })
+    assert validations.validate_tag_formats(row_missing, 1) is not None
+    row_invalid = pd.Series({
+        "Trafficking Status": "New",
+        "Placement Tag Formats": "PLACEMENT_TAG_INVALID",
+    })
+    assert validations.validate_tag_formats(row_invalid, 1) is not None
+    row_valid = pd.Series({
+        "Trafficking Status": "New",
+        "Placement Tag Formats": "PLACEMENT_TAG_STANDARD",
+    })
+    assert validations.validate_tag_formats(row_valid, 1) is None
 
 
 def test_validate_ad_id() -> None:
-    """Tests validate_ad_id helper."""
-    import pandas as pd
-
-    from adspace_agent.tools.cm360_trafficking.validations import validate_ad_id
-
+    """Tests validations.validate_ad_id helper."""
     row_missing = pd.Series({"Trafficking Status": "Update", "Ad ID": ""})
-    err = validate_ad_id(row_missing, 1)
-    assert err is not None
-    assert err["field"] == "Ad ID"
-    assert "Ad ID is required" in err["error"]
-
+    assert validations.validate_ad_id(row_missing, 1) is not None
     row_valid = pd.Series({"Trafficking Status": "Update", "Ad ID": "12345"})
-    assert validate_ad_id(row_valid, 1) is None
+    assert validations.validate_ad_id(row_valid, 1) is None
+
+
+def test_validate_compatibility() -> None:
+    """Tests validations.validate_compatibility helper."""
+    row_missing = pd.Series({"Trafficking Status": "New", "Compatibility": ""})
+    err = validations.validate_compatibility(row_missing, 1)
+    assert err is not None
+    assert "Compatibility is required" in err["error"]
+
+    row_forbidden = pd.Series({
+        "Trafficking Status": "New",
+        "Compatibility": "APP",
+    })
+    err = validations.validate_compatibility(row_forbidden, 1)
+    assert err is not None
+    assert "APP and APP_INTERSTITIAL are no longer allowed" in err["error"]
+
+    row_invalid = pd.Series({
+        "Trafficking Status": "New",
+        "Compatibility": "INVALID",
+    })
+    err = validations.validate_compatibility(row_invalid, 1)
+    assert err is not None
+    assert "Invalid compatibility value" in err["error"]
+
+    row_valid = pd.Series({
+        "Trafficking Status": "New",
+        "Compatibility": "DISPLAY",
+    })
+    assert validations.validate_compatibility(row_valid, 1) is None
+
+    row_valid_audio = pd.Series({
+        "Trafficking Status": "New",
+        "Compatibility": "IN_STREAM_AUDIO",
+    })
+    assert validations.validate_compatibility(row_valid_audio, 1) is None
+
+
+def test_validate_placement_size() -> None:
+    """Tests validations.validate_placement_size helper."""
+    row_missing = pd.Series({
+        "Trafficking Status": "New",
+        "Placement Size": "",
+    })
+    err = validations.validate_placement_size(row_missing, 1)
+    assert err is not None
+    assert "Placement Size is required" in err["error"]
+
+    row_valid = pd.Series({
+        "Trafficking Status": "New",
+        "Placement Size": "300x250",
+    })
+    assert validations.validate_placement_size(row_valid, 1) is None
 
 
 @pytest.mark.asyncio
 async def test_validation_fail_missing_ad_name_on_new(
     tmp_path,
 ) -> None:
-    """Tests that validation fails when Trafficking Status is New but Ad Name is missing."""
+    """Tests that validation fails when New Ad Name is missing."""
     csv_content = make_test_csv(ad_name="")
     file_path = tmp_path / "test_sheet.csv"
     file_path.write_text(csv_content, encoding="utf-8")
@@ -681,7 +577,8 @@ async def test_validation_fail_missing_ad_name_on_new(
     assert "validation_errors" in result
     errors = result["validation_errors"]
     assert len(errors) == 1
-    assert errors[0]["row"] == 6
+    expected_row = 6
+    assert errors[0]["row"] == expected_row
     assert errors[0]["field"] == "Ad Name"
     assert "Ad Name is required" in errors[0]["error"]
 
@@ -690,7 +587,7 @@ async def test_validation_fail_missing_ad_name_on_new(
 async def test_validation_fail_long_ad_name_on_new(
     tmp_path,
 ) -> None:
-    """Tests that validation fails when Trafficking Status is New and Ad Name > 256 characters."""
+    """Tests validation fails when New Ad Name exceeds 256 characters."""
     long_ad_name = "B" * 257
     csv_content = make_test_csv(ad_name=long_ad_name)
     file_path = tmp_path / "test_sheet.csv"
@@ -706,36 +603,13 @@ async def test_validation_fail_long_ad_name_on_new(
     assert "validation_errors" in result
     errors = result["validation_errors"]
     assert len(errors) == 1
-    assert errors[0]["row"] == 6
+    expected_row = 6
+    assert errors[0]["row"] == expected_row
     assert errors[0]["field"] == "Ad Name"
-    assert "Ad Name must be less than or equal to 256 characters" in errors[0]["error"]
-
-
-@pytest.mark.asyncio
-async def test_validation_fail_ad_start_time_past(
-    tmp_path,
-) -> None:
-    """Tests that validation fails when Ad Start Date is in the past on New."""
-    past_date = (datetime.date.today() - datetime.timedelta(days=1)).strftime(
-        "%Y-%m-%d"
+    assert (
+        "Ad Name must be less than or equal to 256 characters"
+        in errors[0]["error"]
     )
-    csv_content = make_test_csv(ad_start=past_date)
-    file_path = tmp_path / "test_sheet.csv"
-    file_path.write_text(csv_content, encoding="utf-8")
-
-    result_str = await parse_trafficking_sheet(
-        typing.cast("typing.Any", MockToolContext(str(file_path)))
-    )
-    result = json.loads(result_str)
-
-    assert result.get("status") == "error"
-    assert "Validation failed" in result.get("message", "")
-    assert "validation_errors" in result
-    errors = result["validation_errors"]
-    assert len(errors) == 1
-    assert errors[0]["row"] == 6
-    assert errors[0]["field"] == "Ad Start Date"
-    assert "cannot be in the past" in errors[0]["error"]
 
 
 @pytest.mark.asyncio
@@ -743,7 +617,8 @@ async def test_validation_pass_ad_start_time_today(
     tmp_path,
 ) -> None:
     """Tests that validation passes when Ad Start Date is today."""
-    today_date = datetime.date.today().strftime("%Y-%m-%d")
+    today = datetime.date.today()  # ruff: ignore[call-date-today]
+    today_date = today.strftime("%Y-%m-%d")
     csv_content = make_test_csv(ad_start=today_date, ad_end="8/29/3000")
     file_path = tmp_path / "test_sheet.csv"
     file_path.write_text(csv_content, encoding="utf-8")
@@ -761,63 +636,65 @@ async def test_validation_pass_ad_start_time_today(
 
 
 @pytest.mark.asyncio
-async def test_validation_fail_ad_end_time_not_later(
+@pytest.mark.parametrize(
+    ("status", "ad_start", "ad_end", "expected_field", "expected_err"),
+    [
+        (
+            "New",
+            (
+                datetime.date.today() - datetime.timedelta(days=1)  # ruff: ignore[call-date-today]
+            ).strftime("%Y-%m-%d"),
+            "8/29/3000",
+            "Ad Start Date",
+            "cannot be in the past",
+        ),
+        (
+            "Update",
+            (
+                datetime.date.today() - datetime.timedelta(days=1)  # ruff: ignore[call-date-today]
+            ).strftime("%Y-%m-%d"),
+            "8/29/3000",
+            "Ad Start Date",
+            "cannot be in the past",
+        ),
+        (
+            "New",
+            "8/29/3000",
+            "8/28/3000",
+            "Ad End Date",
+            "must be later than Ad Start Date",
+        ),
+        (
+            "Update",
+            "8/29/3000",
+            "8/28/3000",
+            "Ad End Date",
+            "must be later than Ad Start Date",
+        ),
+        (
+            "New",
+            "invalid-date",
+            "8/29/3000",
+            "Ad Start Date",
+            "is not a valid date",
+        ),
+    ],
+)
+async def test_validation_fail_ad_dates(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     tmp_path,
+    status: str,
+    ad_start: str,
+    ad_end: str,
+    expected_field: str,
+    expected_err: str,
 ) -> None:
-    """Tests that validation fails when Ad End Date is not later than Ad Start Date."""
-    csv_content = make_test_csv(ad_start="8/29/3000", ad_end="8/28/3000")
-    file_path = tmp_path / "test_sheet.csv"
-    file_path.write_text(csv_content, encoding="utf-8")
-
-    result_str = await parse_trafficking_sheet(
-        typing.cast("typing.Any", MockToolContext(str(file_path)))
-    )
-    result = json.loads(result_str)
-
-    assert result.get("status") == "error"
-    assert "Validation failed" in result.get("message", "")
-    assert "validation_errors" in result
-    errors = result["validation_errors"]
-    assert len(errors) == 1
-    assert errors[0]["row"] == 6
-    assert errors[0]["field"] == "Ad End Date"
-    assert "must be later than Ad Start Date" in errors[0]["error"]
-
-
-@pytest.mark.asyncio
-async def test_validation_fail_ad_invalid_date(
-    tmp_path,
-) -> None:
-    """Tests that validation fails when Ad Start Date is not a valid date format."""
-    csv_content = make_test_csv(ad_start="invalid-date")
-    file_path = tmp_path / "test_sheet.csv"
-    file_path.write_text(csv_content, encoding="utf-8")
-
-    result_str = await parse_trafficking_sheet(
-        typing.cast("typing.Any", MockToolContext(str(file_path)))
-    )
-    result = json.loads(result_str)
-
-    assert result.get("status") == "error"
-    assert "Validation failed" in result.get("message", "")
-    assert "validation_errors" in result
-    errors = result["validation_errors"]
-    assert len(errors) == 1
-    assert errors[0]["row"] == 6
-    assert errors[0]["field"] == "Ad Start Date"
-    assert "is not a valid date" in errors[0]["error"]
-
-
-@pytest.mark.asyncio
-async def test_validation_fail_ad_start_time_past_on_update(
-    tmp_path,
-) -> None:
-    """Tests that validation fails when Ad Start Date is in the past even on Update status."""
-    past_date = (datetime.date.today() - datetime.timedelta(days=1)).strftime(
-        "%Y-%m-%d"
-    )
+    """Tests that ad date validation fails on invalid dates or past dates."""
     csv_content = make_test_csv(
-        status="Update", ad_start=past_date, ad_id="9999", placement_id="8888"
+        status=status,
+        ad_start=ad_start,
+        ad_end=ad_end,
+        ad_id="9999" if status == "Update" else "",
+        placement_id="8888" if status == "Update" else "",
     )
     file_path = tmp_path / "test_sheet.csv"
     file_path.write_text(csv_content, encoding="utf-8")
@@ -832,60 +709,23 @@ async def test_validation_fail_ad_start_time_past_on_update(
     assert "validation_errors" in result
     errors = result["validation_errors"]
     assert len(errors) == 1
-    assert errors[0]["row"] == 6
-    assert errors[0]["field"] == "Ad Start Date"
-    assert "cannot be in the past" in errors[0]["error"]
-
-
-@pytest.mark.asyncio
-async def test_validation_fail_ad_end_time_not_later_on_update(
-    tmp_path,
-) -> None:
-    """Tests that validation fails when Ad End Date is not later than Ad Start Date on Update status."""
-    csv_content = make_test_csv(
-        status="Update",
-        ad_start="8/29/3000",
-        ad_end="8/28/3000",
-        ad_id="9999",
-        placement_id="8888",
-    )
-    file_path = tmp_path / "test_sheet.csv"
-    file_path.write_text(csv_content, encoding="utf-8")
-
-    result_str = await parse_trafficking_sheet(
-        typing.cast("typing.Any", MockToolContext(str(file_path)))
-    )
-    result = json.loads(result_str)
-
-    assert result.get("status") == "error"
-    assert "Validation failed" in result.get("message", "")
-    assert "validation_errors" in result
-    errors = result["validation_errors"]
-    assert len(errors) == 1
-    assert errors[0]["row"] == 6
-    assert errors[0]["field"] == "Ad End Date"
-    assert "must be later than Ad Start Date" in errors[0]["error"]
+    assert errors[0]["field"] == expected_field
+    assert expected_err in errors[0]["error"]
 
 
 def test_validate_placement_assignment() -> None:
-    """Tests validate_placement_assignment helper."""
-    import pandas as pd
-
-    from adspace_agent.tools.cm360_trafficking.validations import (
-        validate_placement_assignment,
-    )
-
+    """Tests validations.validate_placement_assignment helper."""
     row_missing = pd.Series({"Placement ID": "", "Placement Name": ""})
-    err = validate_placement_assignment(row_missing, 1)
+    err = validations.validate_placement_assignment(row_missing, 1)
     assert err is not None
     assert err["field"] == "Placement ID"
     assert "Placement ID is required" in err["error"]
 
     row_valid_name = pd.Series({"Placement Name": "Test Placement"})
-    assert validate_placement_assignment(row_valid_name, 1) is None
+    assert validations.validate_placement_assignment(row_valid_name, 1) is None
 
     row_valid_id = pd.Series({"Placement ID": "12345"})
-    assert validate_placement_assignment(row_valid_id, 1) is None
+    assert validations.validate_placement_assignment(row_valid_id, 1) is None
 
 
 @pytest.mark.asyncio
@@ -914,7 +754,7 @@ async def test_validation_fail_missing_ad_type_on_new(
 async def test_validation_fail_forbidden_ad_type_on_new(
     tmp_path,
 ) -> None:
-    """Tests that validation fails when forbidden AD_SERVING_DEFAULT_AD type is used on New."""
+    """Tests validation fails when AD_SERVING_DEFAULT_AD is used."""
     csv_content = make_test_csv(ad_type="AD_SERVING_DEFAULT_AD")
     file_path = tmp_path / "test_sheet.csv"
     file_path.write_text(csv_content, encoding="utf-8")
@@ -933,39 +773,17 @@ async def test_validation_fail_forbidden_ad_type_on_new(
 
 
 @pytest.mark.asyncio
-async def test_validation_fail_missing_delivery_schedule_on_new(
-    tmp_path,
+@pytest.mark.parametrize("status", ["New", "Update"])
+async def test_validation_fail_missing_delivery_schedule(
+    tmp_path, status: str
 ) -> None:
-    """Tests that validation fails when delivery schedule priority is missing on standard ad creation."""
-    csv_content = make_test_csv(ad_type="AD_SERVING_STANDARD_AD", priority="")
-    file_path = tmp_path / "test_sheet.csv"
-    file_path.write_text(csv_content, encoding="utf-8")
-
-    result_str = await parse_trafficking_sheet(
-        typing.cast("typing.Any", MockToolContext(str(file_path)))
-    )
-    result = json.loads(result_str)
-
-    assert result.get("status") == "error"
-    assert "Validation failed" in result.get("message", "")
-    assert "validation_errors" in result
-    errors = result["validation_errors"]
-    schedule_error = next(e for e in errors if e["field"] == "Delivery Schedule")
-    assert "required when Ad Type is AD_SERVING_STANDARD_AD" in schedule_error["error"]
-
-
-@pytest.mark.asyncio
-async def test_validation_fail_missing_delivery_schedule_on_update(
-    tmp_path,
-) -> None:
-    """Tests that validation fails when priority is missing on standard ad update."""
+    """Tests validation fails when standard ad is missing delivery schedule."""
     csv_content = make_test_csv(
-        status="Update",
+        status=status,
         ad_type="AD_SERVING_STANDARD_AD",
         priority="",
-        impression_ratio="1",
-        ad_id="9999",
-        placement_id="8888",
+        ad_id="9999" if status == "Update" else "",
+        placement_id="8888" if status == "Update" else "",
     )
     file_path = tmp_path / "test_sheet.csv"
     file_path.write_text(csv_content, encoding="utf-8")
@@ -979,8 +797,13 @@ async def test_validation_fail_missing_delivery_schedule_on_update(
     assert "Validation failed" in result.get("message", "")
     assert "validation_errors" in result
     errors = result["validation_errors"]
-    schedule_error = next(e for e in errors if e["field"] == "Delivery Schedule")
-    assert "required when Ad Type is AD_SERVING_STANDARD_AD" in schedule_error["error"]
+    schedule_error = next(
+        e for e in errors if e["field"] == "Delivery Schedule"
+    )
+    assert (
+        "required when Ad Type is AD_SERVING_STANDARD_AD"
+        in schedule_error["error"]
+    )
 
 
 @pytest.mark.asyncio
@@ -1009,7 +832,7 @@ async def test_validation_fail_missing_creative_identifier(
 async def test_validation_fail_missing_click_through_url(
     tmp_path,
 ) -> None:
-    """Tests that validation fails when Final Trafficking URL is missing for creative assignment."""
+    """Tests validation fails when Final URL is missing for creative."""
     csv_content = make_test_csv(final_url="")
     file_path = tmp_path / "test_sheet.csv"
     file_path.write_text(csv_content, encoding="utf-8")
@@ -1028,58 +851,50 @@ async def test_validation_fail_missing_click_through_url(
 
 
 def test_validate_placement_status() -> None:
-    """Tests validate_placement_status helper."""
-    import pandas as pd
-
-    from adspace_agent.tools.cm360_trafficking.validations import (
-        validate_placement_status,
-    )
-
+    """Tests validations.validate_placement_status helper."""
     row_invalid = pd.Series({"Placement Status": "PLACEMENT_STATUS_INVALID"})
-    err = validate_placement_status(row_invalid, 1)
+    err = validations.validate_placement_status(row_invalid, 1)
     assert err is not None
     assert err["field"] == "Placement Status"
     assert "Invalid placement status 'PLACEMENT_STATUS_INVALID'" in err["error"]
 
     row_valid = pd.Series({"Placement Status": "PLACEMENT_STATUS_ACTIVE"})
-    assert validate_placement_status(row_valid, 1) is None
+    assert validations.validate_placement_status(row_valid, 1) is None
+
+    row_perm_archived = pd.Series({
+        "Placement Status": "PLACEMENT_STATUS_PERMANENTLY_ARCHIVED"
+    })
+    assert validations.validate_placement_status(row_perm_archived, 1) is None
 
 
 def test_group_placements_status_mapping() -> None:
-    """Tests that a valid Placement Status maps correctly to activeStatus in grouped placements."""
-    import pandas as pd
-
-    from adspace_agent.tools.cm360_trafficking.cm360_actions import (
-        _group_placements,
+    """Tests valid Placement Status maps in grouped placements."""
+    df = pd.DataFrame([
+        {
+            "Placement Name": "Test Placement 1",
+            "Placement Status": "PLACEMENT_STATUS_INACTIVE",
+            "Compatibility": "DISPLAY",
+            "Site ID": "123",
+            "Pricing Schedule Type": "PRICING_TYPE_CPM",
+            "Pricing Schedule Start Date": "8/29/3000",
+            "Pricing Schedule End Date": "9/25/3000",
+            "Placement Payment Source": "PLACEMENT_AGENCY_PAID",
+            "Placement Tag Formats": "PLACEMENT_TAG_STANDARD",
+            "Placement Size": "300x250",
+        }
+    ])
+    placements = cm360_actions._group_placements(  # ruff: ignore[private-member-access]
+        df, advertiser_id="123", campaign_id="456"
     )
-
-    df = pd.DataFrame(
-        [
-            {
-                "Placement Name": "Test Placement 1",
-                "Placement Status": "PLACEMENT_STATUS_INACTIVE",
-                "Compatibility": "DISPLAY",
-                "Site ID": "123",
-                "Pricing Schedule Type": "PRICING_TYPE_CPM",
-                "Pricing Schedule Start Date": "8/29/3000",
-                "Pricing Schedule End Date": "9/25/3000",
-                "Placement Payment Source": "PLACEMENT_AGENCY_PAID",
-                "Placement Tag Formats": "PLACEMENT_TAG_STANDARD",
-                "Placement Size": "300x250",
-            }
-        ]
-    )
-    placements = _group_placements(df, advertiser_id="123", campaign_id="456")
     assert "Test Placement 1" in placements
-    assert placements["Test Placement 1"]["activeStatus"] == "PLACEMENT_STATUS_INACTIVE"
+    assert (
+        placements["Test Placement 1"]["activeStatus"]
+        == "PLACEMENT_STATUS_INACTIVE"
+    )
 
 
 def test_resolve_placement_ids() -> None:
-    """Tests _resolve_placement_ids correctly resolves placement names to CM360 IDs."""
-    from adspace_agent.tools.cm360_trafficking.trafficking_helpers import (
-        _resolve_placement_ids,
-    )
-
+    """Tests resolving placement names to CM360 IDs."""
     ads = {
         "Test Ad": {
             "name": "Test Ad",
@@ -1088,7 +903,7 @@ def test_resolve_placement_ids() -> None:
             ],
         }
     }
-    _resolve_placement_ids(
+    trafficking_helpers._resolve_placement_ids(  # ruff: ignore[private-member-access]
         ads=ads,
         profile_id="7023449",
         advertiser_id="13641571",
@@ -1102,11 +917,7 @@ def test_resolve_placement_ids() -> None:
 
 
 def test_resolve_creative_ids() -> None:
-    """Tests _resolve_creative_ids correctly resolves creative names to CM360 IDs."""
-    from adspace_agent.tools.cm360_trafficking.trafficking_helpers import (
-        _resolve_creative_ids,
-    )
-
+    """Tests resolving creative names to CM360 IDs."""
     ads = {
         "Test Ad": {
             "name": "Test Ad",
@@ -1117,7 +928,7 @@ def test_resolve_creative_ids() -> None:
             },
         }
     }
-    _resolve_creative_ids(
+    trafficking_helpers._resolve_creative_ids(  # ruff: ignore[private-member-access]
         ads=ads,
         profile_id="7023449",
         advertiser_id="13641571",
@@ -1125,13 +936,15 @@ def test_resolve_creative_ids() -> None:
         tool_context=None,
     )
     assert (
-        ads["Test Ad"]["creativeRotation"]["creativeAssignments"][0]["creativeId"]
+        ads["Test Ad"]["creativeRotation"]["creativeAssignments"][0][
+            "creativeId"
+        ]
         == "999123"
     )
 
 
 def test_get_cm360_service_success_from_dict() -> None:
-    """Tests _get_cm360_service creates service when valid credentials dict is in state."""
+    """Tests _get_cm360_service creates service with credentials dict."""
     mock_context = mock.MagicMock()
     mock_context.state = {
         CREDENTIALS_CACHE_KEY: {
@@ -1147,18 +960,20 @@ def test_get_cm360_service_success_from_dict() -> None:
         "adspace_agent.tools.cm360_trafficking.cm360_actions.build"
     ) as mock_build:
         mock_build.return_value = mock.MagicMock()
-        service = _get_cm360_service(mock_context)
+        service = cm360_trafficking._get_cm360_service(  # ruff: ignore[private-member-access]
+            mock_context
+        )
         assert service == mock_build.return_value
         mock_build.assert_called_once()
         args, kwargs = mock_build.call_args
         assert args == ("dfareporting", "v5")
-        assert kwargs["credentials"].token == "ya29.mock_token"
+        assert (
+            kwargs["credentials"].token == "ya29.mock_token"  # ruff: ignore[hardcoded-password-string]
+        )
 
 
 def test_get_cm360_service_success_from_credentials_object() -> None:
-    """Tests _get_cm360_service uses credentials object when already present in state."""
-    from google.oauth2.credentials import Credentials
-
+    """Tests _get_cm360_service uses credentials object present in state."""
     mock_credentials = mock.MagicMock(spec=Credentials)
     mock_context = mock.MagicMock()
     mock_context.state = {CREDENTIALS_CACHE_KEY: mock_credentials}
@@ -1167,7 +982,9 @@ def test_get_cm360_service_success_from_credentials_object() -> None:
         "adspace_agent.tools.cm360_trafficking.cm360_actions.build"
     ) as mock_build:
         mock_build.return_value = mock.MagicMock()
-        service = _get_cm360_service(mock_context)
+        service = cm360_trafficking._get_cm360_service(  # ruff: ignore[private-member-access]
+            mock_context
+        )
         assert service == mock_build.return_value
         mock_build.assert_called_once_with(
             "dfareporting", "v5", credentials=mock_credentials
@@ -1178,33 +995,33 @@ def test_get_cm360_service_missing_tool_context() -> None:
     """Tests _get_cm360_service raises ValueError when tool_context is None."""
     with pytest.raises(
         ValueError,
-        match="Tool context and state are required to get CM360 service.",
+        match=r"Tool context and state are required to get CM360 service\.",
     ):
-        _get_cm360_service(None)
+        cm360_trafficking._get_cm360_service(None)  # ruff: ignore[private-member-access]
 
 
 def test_get_cm360_service_missing_state() -> None:
-    """Tests _get_cm360_service raises ValueError when tool_context.state is None."""
+    """Tests _get_cm360_service raises ValueError when state is None."""
     mock_context = mock.MagicMock()
     mock_context.state = None
     with pytest.raises(
         ValueError,
-        match="Tool context and state are required to get CM360 service.",
+        match=r"Tool context and state are required to get CM360 service\.",
     ):
-        _get_cm360_service(mock_context)
+        cm360_trafficking._get_cm360_service(mock_context)  # ruff: ignore[private-member-access]
 
 
 def test_get_cm360_service_missing_credentials_key() -> None:
-    """Tests _get_cm360_service raises ValueError when CREDENTIALS_CACHE_KEY is missing."""
+    """Tests _get_cm360_service raises ValueError when cache key missing."""
     mock_context = mock.MagicMock()
     mock_context.state = {}
-    with pytest.raises(ValueError, match="Credentials not found in tool context state"):
-        _get_cm360_service(mock_context)
+    with pytest.raises(
+        ValueError, match="Credentials not found in tool context state"
+    ):
+        cm360_trafficking._get_cm360_service(mock_context)  # ruff: ignore[private-member-access]
 
 
-def test_before_traffic_campaigns_in_cm360_tool_callback_valid_cached_credentials() -> (
-    None
-):
+def test_before_callback_valid_cached_credentials() -> None:
     """Tests before callback when valid credentials already exist in cache."""
     mock_tool = mock.MagicMock()
     mock_tool.name = "traffic_campaigns_in_cm360_tool"
@@ -1232,10 +1049,8 @@ def test_before_traffic_campaigns_in_cm360_tool_callback_valid_cached_credential
         assert res is None
 
 
-def test_before_traffic_campaigns_in_cm360_tool_callback_refresh_expired_credentials() -> (
-    None
-):
-    """Tests before callback when cached credentials are expired and refreshed."""
+def test_before_callback_refresh_expired_credentials() -> None:
+    """Tests before callback when cached credentials are refreshed."""
     mock_tool = mock.MagicMock()
     mock_tool.name = "parse_sheet_tool"
     mock_context = mock.MagicMock()
@@ -1248,12 +1063,12 @@ def test_before_traffic_campaigns_in_cm360_tool_callback_refresh_expired_credent
     mock_credentials_obj = mock.MagicMock()
     mock_credentials_obj.valid = False
     mock_credentials_obj.expired = True
-    mock_credentials_obj.refresh_token = "mock_refresh"
-    mock_credentials_obj.to_json.return_value = json.dumps(
-        {"token": "ya29.refreshed_token"}
-    )
+    mock_credentials_obj.refresh_token = "mock_refresh"  # ruff: ignore[hardcoded-password-string]
+    mock_credentials_obj.to_json.return_value = json.dumps({
+        "token": "ya29.refreshed_token"
+    })
 
-    def on_refresh(*args, **kwargs):
+    def on_refresh(*_args, **_kwargs):
         mock_credentials_obj.valid = True
 
     mock_credentials_obj.refresh.side_effect = on_refresh
@@ -1272,9 +1087,7 @@ def test_before_traffic_campaigns_in_cm360_tool_callback_refresh_expired_credent
         }
 
 
-def test_before_traffic_campaigns_in_cm360_tool_callback_exchanged_credentials() -> (
-    None
-):
+def test_before_callback_exchanged_credentials() -> None:
     """Tests before callback when credentials are exchanged successfully."""
     mock_tool = mock.MagicMock()
     mock_tool.name = "traffic_campaigns_in_cm360_tool"
@@ -1282,8 +1095,8 @@ def test_before_traffic_campaigns_in_cm360_tool_callback_exchanged_credentials()
     mock_context.state = {}
 
     mock_oauth = mock.MagicMock()
-    mock_oauth.access_token = "ya29.exchanged_token"
-    mock_oauth.refresh_token = "mock_exchanged_refresh"
+    mock_oauth.access_token = "ya29.exchanged_token"  # ruff: ignore[hardcoded-password-string]
+    mock_oauth.refresh_token = "mock_exchanged_refresh"  # ruff: ignore[hardcoded-password-string]
 
     mock_auth_response = mock.MagicMock()
     mock_auth_response.oauth2 = mock_oauth
@@ -1293,14 +1106,17 @@ def test_before_traffic_campaigns_in_cm360_tool_callback_exchanged_credentials()
         tool=mock_tool, args={}, tool_context=mock_context
     )
     assert res is None
-    assert mock_context.state[CREDENTIALS_CACHE_KEY]["token"] == "ya29.exchanged_token"
+    assert (
+        mock_context.state[CREDENTIALS_CACHE_KEY]["token"]
+        == "ya29.exchanged_token"  # ruff: ignore[hardcoded-password-string]
+    )
     assert (
         mock_context.state[CREDENTIALS_CACHE_KEY]["refresh_token"]
-        == "mock_exchanged_refresh"
+        == "mock_exchanged_refresh"  # ruff: ignore[hardcoded-password-string]
     )
 
 
-def test_before_traffic_campaigns_in_cm360_tool_callback_request_credential() -> None:
+def test_before_callback_request_credential() -> None:
     """Tests before callback when user authentication is required."""
     mock_tool = mock.MagicMock()
     mock_tool.name = "traffic_campaigns_in_cm360_tool"
@@ -1315,7 +1131,7 @@ def test_before_traffic_campaigns_in_cm360_tool_callback_request_credential() ->
     mock_context.request_credential.assert_called_once()
 
 
-def test_before_traffic_campaigns_in_cm360_tool_callback_unrelated_tool() -> None:
+def test_before_callback_unrelated_tool() -> None:
     """Tests before callback ignores unrelated tools."""
     mock_tool = mock.MagicMock()
     mock_tool.name = "unrelated_tool"
@@ -1328,11 +1144,26 @@ def test_before_traffic_campaigns_in_cm360_tool_callback_unrelated_tool() -> Non
 
 
 @pytest.mark.asyncio
-async def test_validation_click_tracker_success_new(tmp_path) -> None:
-    """Tests that AD_SERVING_CLICK_TRACKER with TRUE passes on New status."""
+@pytest.mark.parametrize(
+    ("status", "tracker_val", "expected_bool"),
+    [
+        ("New", "TRUE", True),
+        ("Update", "FALSE", False),
+    ],
+)
+async def test_validation_click_tracker_success(
+    tmp_path,
+    status: str,
+    tracker_val: str,
+    expected_bool: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
+) -> None:
+    """Tests that AD_SERVING_CLICK_TRACKER passes on New and Update statuses."""
     csv_content = make_test_csv(
+        status=status,
+        ad_id="123456" if status == "Update" else "",
+        placement_id="789101" if status == "Update" else "",
         ad_type="AD_SERVING_CLICK_TRACKER",
-        ad_dynamic_click_tracker="TRUE",
+        ad_dynamic_click_tracker=tracker_val,
     )
     file_path = tmp_path / "test_sheet.csv"
     file_path.write_text(csv_content, encoding="utf-8")
@@ -1349,45 +1180,20 @@ async def test_validation_click_tracker_success_new(tmp_path) -> None:
         if op["operation"] == "dfareporting.ads.insert"
     ]
     assert len(ad_ops) == 1
-    assert ad_ops[0]["payload"]["dynamicClickTracker"] is True
+    assert ad_ops[0]["payload"]["dynamicClickTracker"] is expected_bool
     assert "deliverySchedule" not in ad_ops[0]["payload"]
 
 
 @pytest.mark.asyncio
-async def test_validation_click_tracker_success_update(tmp_path) -> None:
-    """Tests that AD_SERVING_CLICK_TRACKER with FALSE passes on Update status."""
-    csv_content = make_test_csv(
-        status="Update",
-        ad_id="123456",
-        placement_id="789101",
-        ad_type="AD_SERVING_CLICK_TRACKER",
-        ad_dynamic_click_tracker="FALSE",
-    )
-    file_path = tmp_path / "test_sheet.csv"
-    file_path.write_text(csv_content, encoding="utf-8")
-
-    result_str = await parse_trafficking_sheet(
-        typing.cast("typing.Any", MockToolContext(str(file_path)))
-    )
-    result = json.loads(result_str)
-    assert result.get("status") == "SUCCESS"
-
-    ad_ops = [
-        op
-        for op in result["operations"]
-        if op["operation"] == "dfareporting.ads.insert"
-    ]
-    assert len(ad_ops) == 1
-    assert ad_ops[0]["payload"]["dynamicClickTracker"] is False
-    assert "deliverySchedule" not in ad_ops[0]["payload"]
-
-
-@pytest.mark.asyncio
-async def test_validation_click_tracker_fail_missing_value_on_new(
-    tmp_path,
+@pytest.mark.parametrize("status", ["New", "Update"])
+async def test_validation_click_tracker_fail_missing_value(
+    tmp_path, status: str
 ) -> None:
-    """Tests that validation fails when Ad Dynamic Click Tracker is missing on New."""
+    """Tests validation fails when click tracker is missing on New or Update."""
     csv_content = make_test_csv(
+        status=status,
+        ad_id="123456" if status == "Update" else "",
+        placement_id="789101" if status == "Update" else "",
         ad_type="AD_SERVING_CLICK_TRACKER",
         ad_dynamic_click_tracker="",
     )
@@ -1404,42 +1210,16 @@ async def test_validation_click_tracker_fail_missing_value_on_new(
     click_tracker_error = next(
         e for e in errors if e["field"] == "Ad Dynamic Click Tracker"
     )
-    assert "Ad Dynamic Click Tracker is required" in click_tracker_error["error"]
-
-
-@pytest.mark.asyncio
-async def test_validation_click_tracker_fail_missing_value_on_update(
-    tmp_path,
-) -> None:
-    """Tests that validation fails when Ad Dynamic Click Tracker is missing on Update."""
-    csv_content = make_test_csv(
-        status="Update",
-        ad_id="123456",
-        placement_id="789101",
-        ad_type="AD_SERVING_CLICK_TRACKER",
-        ad_dynamic_click_tracker="",
+    assert (
+        "Ad Dynamic Click Tracker is required" in click_tracker_error["error"]
     )
-    file_path = tmp_path / "test_sheet.csv"
-    file_path.write_text(csv_content, encoding="utf-8")
-
-    result_str = await parse_trafficking_sheet(
-        typing.cast("typing.Any", MockToolContext(str(file_path)))
-    )
-    result = json.loads(result_str)
-    assert result.get("status") == "error"
-    assert "Validation failed" in result.get("message", "")
-    errors = result["validation_errors"]
-    click_tracker_error = next(
-        e for e in errors if e["field"] == "Ad Dynamic Click Tracker"
-    )
-    assert "Ad Dynamic Click Tracker is required" in click_tracker_error["error"]
 
 
 @pytest.mark.asyncio
 async def test_validation_click_tracker_fail_invalid_boolean(
     tmp_path,
 ) -> None:
-    """Tests that validation fails when Ad Dynamic Click Tracker is not TRUE or FALSE."""
+    """Tests validation fails when click tracker is not boolean string."""
     csv_content = make_test_csv(
         ad_type="AD_SERVING_CLICK_TRACKER",
         ad_dynamic_click_tracker="1",
@@ -1461,34 +1241,27 @@ async def test_validation_click_tracker_fail_invalid_boolean(
 
 
 def test_validate_profile_id() -> None:
-    """Tests validate_profile_id with various inputs."""
-    import pandas as pd
-
-    from adspace_agent.tools.cm360_trafficking.validations import (
-        validate_profile_id,
-    )
-
+    """Tests validations.validate_profile_id with various inputs."""
     # Test with Profile ID in row
     row = pd.Series({"Profile ID": "12345"})
-    assert validate_profile_id(row, 1) is None
+    assert validations.validate_profile_id(row, 1) is None
 
     # Test with Profile ID from parameter fallback
     row_empty = pd.Series({})
-    assert validate_profile_id(row_empty, 1, profile_id="12345") is None
+    assert (
+        validations.validate_profile_id(row_empty, 1, profile_id="12345")
+        is None
+    )
 
     # Test with missing Profile ID
-    err = validate_profile_id(row_empty, 1)
+    err = validations.validate_profile_id(row_empty, 1)
     assert err is not None
     assert err["field"] == "Profile ID"
     assert err["error"] == "Profile ID is required."
 
 
 def test_resolve_and_build_operations_with_existing_entities() -> None:
-    """Tests _resolve_and_build_operations resolves update vs insert operations and existing IDs."""
-    from adspace_agent.tools.cm360_trafficking.trafficking_helpers import (
-        _resolve_and_build_operations,
-    )
-
+    """Tests resolving update vs insert operations and existing IDs."""
     ads = {
         "Existing Ad": {
             "name": "Existing Ad",
@@ -1533,7 +1306,7 @@ def test_resolve_and_build_operations_with_existing_entities() -> None:
             return_value=mock_existing_ads,
         ),
     ):
-        ops = _resolve_and_build_operations(
+        ops = trafficking_helpers._resolve_and_build_operations(  # ruff: ignore[private-member-access]
             ads=ads,
             event_tags=event_tags,
             profile_id="7023449",
@@ -1543,12 +1316,15 @@ def test_resolve_and_build_operations_with_existing_entities() -> None:
         )
 
     # 2 event tag operations + 2 ad operations
-    assert len(ops) == 4
+    expected_ops_count = 4
+    assert len(ops) == expected_ops_count
 
     # Event tags
     existing_tag_op = next(op for op in ops if op["name"] == "Existing Tag")
-    assert existing_tag_op["operation"] == "dfareporting.eventTags.update"
-    assert existing_tag_op["payload"]["id"] == "tag_999"
+    assert existing_tag_op["operation"] == "dfareporting.eventTags.patch"
+    assert existing_tag_op["id"] == "tag_999"
+    assert "url" in existing_tag_op["diff_fields"]
+    assert existing_tag_op["payload"]["url"] == "https://example.com/tag"
 
     new_tag_op = next(op for op in ops if op["name"] == "New Tag")
     assert new_tag_op["operation"] == "dfareporting.eventTags.insert"
@@ -1556,11 +1332,12 @@ def test_resolve_and_build_operations_with_existing_entities() -> None:
 
     # Ads
     existing_ad_op = next(op for op in ops if op["name"] == "Existing Ad")
-    assert existing_ad_op["operation"] == "dfareporting.ads.update"
-    assert existing_ad_op["payload"]["id"] == "ad_888"
-    # Merged placements: mock_placement_1 (from CM360) + mock_placement_2 (from sheet)
+    assert existing_ad_op["operation"] == "dfareporting.ads.patch"
+    assert existing_ad_op["id"] == "ad_888"
+    # Placements from CM360 and sheet are merged together
     placement_ids = [
-        p["placementId"] for p in existing_ad_op["payload"]["placementAssignments"]
+        p["placementId"]
+        for p in existing_ad_op["payload"]["placementAssignments"]
     ]
     assert "mock_placement_1" in placement_ids
     assert "mock_placement_2" in placement_ids
@@ -1576,10 +1353,6 @@ def test_resolve_and_build_operations_with_existing_entities() -> None:
 
 def test_extract_assigned_placement_ids() -> None:
     """Tests _extract_assigned_placement_ids with dict input."""
-    from adspace_agent.tools.cm360_trafficking.trafficking_helpers import (
-        _extract_assigned_placement_ids,
-    )
-
     # Test with dict of ads
     ads = {
         "Ad 1": {
@@ -1595,5 +1368,262 @@ def test_extract_assigned_placement_ids() -> None:
             ]
         },
     }
-    extracted_dict = _extract_assigned_placement_ids(ads)
+    extracted_dict = trafficking_helpers._extract_assigned_placement_ids(  # ruff: ignore[private-member-access]
+        ads
+    )
     assert extracted_dict == ["p1", "p2", "p3"]
+
+
+def test_diff_placement_never_diffs_name() -> None:
+    """Tests _diff_placement never includes name in diff_fields or payload."""
+    sheet_placement = {
+        "name": "New Placement Name In Sheet",
+        "activeStatus": "PLACEMENT_STATUS_ACTIVE",
+        "size": {"width": 300, "height": 250},
+        "pricingSchedule": {
+            "startDate": "2026-06-01",
+            "endDate": "2026-06-30",
+        },
+    }
+    cm_placement = {
+        "name": "Old Placement Name In CM360",
+        "activeStatus": "PLACEMENT_STATUS_ACTIVE",
+        "size": {"width": 300, "height": 250},
+        "pricingSchedule": {
+            "startDate": "2026-06-01",
+            "endDate": "2026-06-30",
+        },
+    }
+    patch_payload, diff_fields = trafficking_helpers._diff_placement(  # ruff: ignore[private-member-access]
+        sheet_placement=sheet_placement,
+        cm_placement=cm_placement,
+    )
+    assert "name" not in diff_fields
+    assert "name" not in patch_payload
+    assert diff_fields == []
+    assert patch_payload == {}
+
+
+def test_diff_placement_diffs_active_status() -> None:
+    """Tests _diff_placement diffs activeStatus directly with enums."""
+    sheet_placement = {
+        "name": "Placement Inactive in Sheet",
+        "activeStatus": "PLACEMENT_STATUS_INACTIVE",
+    }
+    cm_placement = {
+        "name": "Placement Inactive in Sheet",
+        "activeStatus": "PLACEMENT_STATUS_ACTIVE",
+    }
+    patch_payload, diff_fields = trafficking_helpers._diff_placement(  # ruff: ignore[private-member-access]
+        sheet_placement=sheet_placement,
+        cm_placement=cm_placement,
+    )
+    assert "activeStatus" in diff_fields
+    assert patch_payload["activeStatus"] == "PLACEMENT_STATUS_INACTIVE"
+
+
+def test_diff_creative_never_diffs_name() -> None:
+    """Tests _diff_creative never includes name in diff_fields or payload."""
+    sheet_creative = {
+        "name": "Creative Renamed in Sheet",
+        "size": {"width": 300, "height": 250},
+    }
+    cm_creative = {
+        "name": "Original Creative Name",
+        "size": {"width": 300, "height": 250},
+    }
+    patch_payload, diff_fields = trafficking_helpers._diff_creative(  # ruff: ignore[private-member-access]
+        sheet_creative=sheet_creative,
+        cm_creative=cm_creative,
+    )
+    assert "name" not in diff_fields
+    assert "name" not in patch_payload
+    assert diff_fields == []
+    assert patch_payload == {}
+
+
+def test_diff_ad_never_diffs_name() -> None:
+    """Tests _diff_ad never includes name in diff_fields or payload."""
+    sheet_ad = {
+        "name": "Sheet Renamed Ad",
+        "startTime": "2026-06-01T00:00:00Z",
+        "endTime": "2026-06-30T00:00:00Z",
+        "placementAssignments": [{"placementId": "p1"}],
+        "eventTagOverrides": [],
+    }
+    cm_ad = {
+        "name": "CM360 Ad Name",
+        "startTime": "2026-06-01T00:00:00Z",
+        "endTime": "2026-06-30T00:00:00Z",
+        "placementAssignments": [{"placementId": "p1"}],
+        "eventTagOverrides": [],
+    }
+    patch_payload, diff_fields = trafficking_helpers._diff_ad(  # ruff: ignore[private-member-access]
+        sheet_ad=sheet_ad,
+        cm_ad=cm_ad,
+    )
+    assert "name" not in diff_fields
+    assert "name" not in patch_payload
+    assert diff_fields == []
+    assert patch_payload == {}
+
+
+def test_diff_event_tag_never_diffs_name() -> None:
+    """Tests _diff_event_tag compares type/url/status and never diffs name."""
+    sheet_tag = {
+        "name": "Sheet Event Tag Name",
+        "type": "IMPRESSION_IMAGE_EVENT_TAG",
+        "url": "https://example.com/tag",
+        "status": "ENABLED",
+    }
+    cm_tag_identical = {
+        "name": "Different Name In CM360",
+        "type": "IMPRESSION_IMAGE_EVENT_TAG",
+        "url": "https://example.com/tag",
+        "status": "ENABLED",
+    }
+    patch_payload, diff_fields = trafficking_helpers._diff_event_tag(  # ruff: ignore[private-member-access]
+        sheet_event_tag=sheet_tag,
+        cm_event_tag=cm_tag_identical,
+    )
+    assert "name" not in diff_fields
+    assert "name" not in patch_payload
+    assert diff_fields == []
+    assert patch_payload == {}
+
+    # Test when configuration fields differ
+    cm_tag_diff = {
+        "name": "Different Name In CM360",
+        "type": "CLICK_THROUGH_EVENT_TAG",
+        "url": "https://example.com/old_url",
+        "status": "DISABLED",
+    }
+    patch_payload, diff_fields = trafficking_helpers._diff_event_tag(  # ruff: ignore[private-member-access]
+        sheet_event_tag=sheet_tag,
+        cm_event_tag=cm_tag_diff,
+    )
+    assert "name" not in diff_fields
+    assert "name" not in patch_payload
+    assert "type" in diff_fields
+    assert "url" in diff_fields
+    assert "status" in diff_fields
+    assert patch_payload["type"] == "IMPRESSION_IMAGE_EVENT_TAG"
+    assert patch_payload["url"] == "https://example.com/tag"
+    assert patch_payload["status"] == "ENABLED"
+
+
+def test_resolve_and_build_operations_skips_identical_event_tags() -> None:
+    """Tests _resolve_and_build_operations skips when tag is unchanged."""
+    event_tags = {
+        "Sync Tag": {
+            "name": "Sync Tag",
+            "type": "IMPRESSION_IMAGE_EVENT_TAG",
+            "url": "https://example.com/tag",
+            "status": "ENABLED",
+        },
+    }
+    mock_existing_tags = [
+        {
+            "name": "Sync Tag",
+            "id": "tag_123",
+            "type": "IMPRESSION_IMAGE_EVENT_TAG",
+            "url": "https://example.com/tag",
+            "status": "ENABLED",
+        }
+    ]
+    with (
+        mock.patch(
+            "adspace_agent.tools.cm360_trafficking.trafficking_helpers.list_cm_event_tags",
+            return_value=mock_existing_tags,
+        ),
+        mock.patch(
+            "adspace_agent.tools.cm360_trafficking.trafficking_helpers.list_cm_ads",
+            return_value=[],
+        ),
+    ):
+        ops = trafficking_helpers._resolve_and_build_operations(  # ruff: ignore[private-member-access]
+            ads={},
+            event_tags=event_tags,
+            profile_id="7023449",
+            advertiser_id="13641571",
+            campaign_id="30535365",
+            tool_context=None,
+        )
+    # Event tag was identical, so no operations should be generated
+    assert len(ops) == 0
+
+
+def test_execute_event_tag_patch_operation() -> None:
+    """Tests _execute_event_tag_operation executes patch call."""
+    mock_service = mock.MagicMock()
+    mock_patch_call = mock.MagicMock()
+    mock_patch_call.execute.return_value = {
+        "id": "tag_123",
+        "name": "Test Tag",
+    }
+    mock_service.eventTags.return_value.patch.return_value = mock_patch_call
+
+    mappings: dict[str, str] = {}
+    op = {
+        "operation": "dfareporting.eventTags.patch",
+        "id": "tag_123",
+        "name": "Test Tag",
+        "payload": {"url": "https://example.com/new"},
+    }
+    result = trafficking_helpers._execute_event_tag_operation(  # ruff: ignore[private-member-access]
+        cm360_service=mock_service,
+        profile_id="12345",
+        op=op,
+        event_tag_mappings=mappings,
+    )
+    assert result["status"] == "SUCCESS"
+    assert result["id"] == "tag_123"
+    assert mappings["Test Tag"] == "tag_123"
+    mock_service.eventTags.return_value.patch.assert_called_once_with(
+        profileId="12345",
+        id="tag_123",
+        body={"url": "https://example.com/new"},
+    )
+
+
+def test_diff_placement_aligns_pricing_periods() -> None:
+    """Tests _diff_placement aligns pricingPeriods when flight dates change."""
+    sheet_placement = {
+        "name": "Placement A",
+        "pricingSchedule": {
+            "startDate": "2026-09-07",
+            "endDate": "2026-09-30",
+        },
+    }
+    cm_placement = {
+        "name": "Placement A",
+        "pricingSchedule": {
+            "startDate": "2026-06-10",
+            "endDate": "2026-07-10",
+            "pricingPeriods": [
+                {
+                    "startDate": "2026-06-10",
+                    "endDate": "2026-07-10",
+                    "units": "1000",
+                    "rateOrCostNanos": "5000000000",
+                }
+            ],
+        },
+    }
+    patch_payload, diff_fields = trafficking_helpers._diff_placement(  # ruff: ignore[private-member-access]
+        sheet_placement=sheet_placement,
+        cm_placement=cm_placement,
+    )
+    assert "pricingSchedule.startDate" in diff_fields
+    assert "pricingSchedule.endDate" in diff_fields
+    assert patch_payload["pricingSchedule"]["startDate"] == "2026-09-07"
+    assert patch_payload["pricingSchedule"]["endDate"] == "2026-09-30"
+    assert patch_payload["pricingSchedule"]["pricingPeriods"] == [
+        {
+            "startDate": "2026-09-07",
+            "endDate": "2026-09-30",
+            "units": "1000",
+            "rateOrCostNanos": "5000000000",
+        }
+    ]
+

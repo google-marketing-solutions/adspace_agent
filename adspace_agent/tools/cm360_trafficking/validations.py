@@ -18,8 +18,11 @@ from typing import Any
 
 import pandas as pd
 
+MAX_PLACEMENT_NAME_LENGTH = 512
+MAX_AD_NAME_LENGTH = 256
 
-def _is_empty(val: Any) -> bool:
+
+def _is_empty(val: str | float | None) -> bool:
     """Checks if a value is empty, None, pd.isna, 'nan', or 'none'.
 
     Args:
@@ -34,7 +37,9 @@ def _is_empty(val: Any) -> bool:
     return val_str in {"", "none", "nan"}
 
 
-def validate_placement_id(row: pd.Series, row_num: int) -> dict[str, Any] | None:
+def validate_placement_id(
+    row: pd.Series, row_num: int
+) -> dict[str, Any] | None:
     """Validates the ID field for placements.
 
     Optional on creation (Trafficking Status = 'New').
@@ -56,12 +61,16 @@ def validate_placement_id(row: pd.Series, row_num: int) -> dict[str, Any] | None
         return {
             "row": row_num,
             "field": "Placement ID",
-            "error": "Placement ID is required when Trafficking Status is 'Update'.",
+            "error": (
+                "Placement ID is required when Trafficking Status is 'Update'."
+            ),
         }
     return None
 
 
-def validate_placement_name(row: pd.Series, row_num: int) -> dict[str, Any] | None:
+def validate_placement_name(
+    row: pd.Series, row_num: int
+) -> dict[str, Any] | None:
     """Validates the Name field for placements.
 
     Required on creation (Trafficking Status = 'New') and must be <= 512 chars.
@@ -83,15 +92,17 @@ def validate_placement_name(row: pd.Series, row_num: int) -> dict[str, Any] | No
         return {
             "row": row_num,
             "field": "Placement Name",
-            "error": "Placement Name is required when Trafficking Status is 'New'.",
+            "error": (
+                "Placement Name is required when Trafficking Status is 'New'."
+            ),
         }
-    if (
-        status == "new" and len(str(placement_name)) > 512
-    ):
+    if status == "new" and len(str(placement_name)) > MAX_PLACEMENT_NAME_LENGTH:
         return {
             "row": row_num,
             "field": "Placement Name",
-            "error": ("Placement Name must be less than or equal to 512 characters."),
+            "error": (
+                "Placement Name must be less than or equal to 512 characters."
+            ),
         }
     return None
 
@@ -211,7 +222,9 @@ def validate_site_id(row: pd.Series, row_num: int) -> dict[str, Any] | None:
     return None
 
 
-def validate_payment_source(row: pd.Series, row_num: int) -> dict[str, Any] | None:
+def validate_payment_source(
+    row: pd.Series, row_num: int
+) -> dict[str, Any] | None:
     """Validates the Payment Source field for placements.
 
     Required on creation (Trafficking Status = 'New').
@@ -232,12 +245,16 @@ def validate_payment_source(row: pd.Series, row_num: int) -> dict[str, Any] | No
         return {
             "row": row_num,
             "field": "Payment Source",
-            "error": "Payment Source is required when Trafficking Status is 'New'.",
+            "error": (
+                "Payment Source is required when Trafficking Status is 'New'."
+            ),
         }
     return None
 
 
-def validate_compatibility(row: pd.Series, row_num: int) -> dict[str, Any] | None:
+def validate_compatibility(
+    row: pd.Series, row_num: int
+) -> dict[str, Any] | None:
     """Validates placement compatibility on insertion.
 
     Args:
@@ -257,7 +274,9 @@ def validate_compatibility(row: pd.Series, row_num: int) -> dict[str, Any] | Non
         return {
             "row": row_num,
             "field": "Compatibility",
-            "error": "Compatibility is required when Trafficking Status is 'New'.",
+            "error": (
+                "Compatibility is required when Trafficking Status is 'New'."
+            ),
         }
 
     if status == "new":
@@ -266,20 +285,34 @@ def validate_compatibility(row: pd.Series, row_num: int) -> dict[str, Any] | Non
             return {
                 "row": row_num,
                 "field": "Compatibility",
-                "error": "APP and APP_INTERSTITIAL are no longer allowed. Use DISPLAY or DISPLAY_INTERSTITIAL instead.",
+                "error": (
+                    "APP and APP_INTERSTITIAL are no longer allowed. Use"
+                    " DISPLAY or DISPLAY_INTERSTITIAL instead."
+                ),
             }
 
-        if val not in {"DISPLAY", "DISPLAY_INTERSTITIAL", "IN_STREAM_VIDEO"}:
+        if val not in {
+            "DISPLAY",
+            "DISPLAY_INTERSTITIAL",
+            "IN_STREAM_VIDEO",
+            "IN_STREAM_AUDIO",
+        }:
             return {
                 "row": row_num,
                 "field": "Compatibility",
-                "error": "Invalid compatibility value. Must be DISPLAY, DISPLAY_INTERSTITIAL, or IN_STREAM_VIDEO.",
+                "error": (
+                    "Invalid compatibility value. Must be DISPLAY,"
+                    " DISPLAY_INTERSTITIAL, IN_STREAM_VIDEO, or"
+                    " IN_STREAM_AUDIO."
+                ),
             }
 
     return None
 
 
-def validate_placement_size(row: pd.Series, row_num: int) -> dict[str, Any] | None:
+def validate_placement_size(
+    row: pd.Series, row_num: int
+) -> dict[str, Any] | None:
     """Validates placement size on insertion.
 
     Args:
@@ -297,12 +330,16 @@ def validate_placement_size(row: pd.Series, row_num: int) -> dict[str, Any] | No
         return {
             "row": row_num,
             "field": "Placement Size",
-            "error": "Placement Size is required when Trafficking Status is 'New'.",
+            "error": (
+                "Placement Size is required when Trafficking Status is 'New'."
+            ),
         }
     return None
 
 
-def validate_pricing_schedule(row: pd.Series, row_num: int) -> dict[str, Any] | None:
+def validate_pricing_schedule(
+    row: pd.Series, row_num: int
+) -> dict[str, Any] | None:
     """Validates placement pricing schedule on insertion.
 
     Args:
@@ -356,7 +393,8 @@ def validate_tag_formats(row: pd.Series, row_num: int) -> dict[str, Any] | None:
             "row": row_num,
             "field": "Placement Tag Formats",
             "error": (
-                "Placement Tag Formats is required when Trafficking" " Status is 'New'."
+                "Placement Tag Formats is required when Trafficking"
+                " Status is 'New'."
             ),
         }
 
@@ -380,7 +418,7 @@ def validate_tag_formats(row: pd.Series, row_num: int) -> dict[str, Any] | None:
         }
 
         formats = [
-            x.strip() for x in str(tag_formats_val).split(",") if x.strip() != ""
+            x.strip() for x in str(tag_formats_val).split(",") if x.strip()
         ]
 
         invalid_formats = [f for f in formats if f not in allowed_tag_formats]
@@ -441,9 +479,7 @@ def validate_ad_name(row: pd.Series, row_num: int) -> dict[str, Any] | None:
             "field": "Ad Name",
             "error": "Ad Name is required when Trafficking Status is 'New'.",
         }
-    if (
-        status == "new" and len(str(ad_name)) > 256
-    ):
+    if status == "new" and len(str(ad_name)) > MAX_AD_NAME_LENGTH:
         return {
             "row": row_num,
             "field": "Ad Name",
@@ -452,7 +488,7 @@ def validate_ad_name(row: pd.Series, row_num: int) -> dict[str, Any] | None:
     return None
 
 
-def parse_date(val: Any) -> datetime.date | None:
+def parse_date(val: str | float | None) -> datetime.date | None:
     """Parses a date string safely.
 
     Args:
@@ -465,11 +501,13 @@ def parse_date(val: Any) -> datetime.date | None:
         return None
     try:
         return pd.to_datetime(str(val).strip()).date()
-    except Exception:
+    except (ValueError, TypeError, KeyError):
         return None
 
 
-def validate_ad_start_time(row: pd.Series, row_num: int) -> dict[str, Any] | None:
+def validate_ad_start_time(
+    row: pd.Series, row_num: int
+) -> dict[str, Any] | None:
     """Validates ad start time.
 
     Args:
@@ -487,7 +525,10 @@ def validate_ad_start_time(row: pd.Series, row_num: int) -> dict[str, Any] | Non
         return {
             "row": row_num,
             "field": "Ad Start Date",
-            "error": "Ad Start Date is required when Trafficking Status is 'New' or 'Update'.",
+            "error": (
+                "Ad Start Date is required when Trafficking Status is 'New' or"
+                " 'Update'."
+            ),
         }
 
     if not is_empty:
@@ -498,7 +539,7 @@ def validate_ad_start_time(row: pd.Series, row_num: int) -> dict[str, Any] | Non
                 "field": "Ad Start Date",
                 "error": f"Ad Start Date '{start_val}' is not a valid date.",
             }
-        if start_date < datetime.date.today():
+        if start_date < datetime.date.today():  # ruff: ignore[call-date-today]
             return {
                 "row": row_num,
                 "field": "Ad Start Date",
@@ -526,7 +567,10 @@ def validate_ad_end_time(row: pd.Series, row_num: int) -> dict[str, Any] | None:
         return {
             "row": row_num,
             "field": "Ad End Date",
-            "error": "Ad End Date is required when Trafficking Status is 'New' or 'Update'.",
+            "error": (
+                "Ad End Date is required when Trafficking Status is 'New' or"
+                " 'Update'."
+            ),
         }
 
     if not is_empty:
@@ -598,7 +642,10 @@ def validate_ad_type(row: pd.Series, row_num: int) -> dict[str, Any] | None:
         return {
             "row": row_num,
             "field": "Ad Type",
-            "error": "Ad Type is required when Trafficking Status is 'New' or 'Update'.",
+            "error": (
+                "Ad Type is required when Trafficking Status is 'New' or"
+                " 'Update'."
+            ),
         }
     if status == "new":
         val = str(ad_type).strip().upper()
@@ -606,7 +653,25 @@ def validate_ad_type(row: pd.Series, row_num: int) -> dict[str, Any] | None:
             return {
                 "row": row_num,
                 "field": "Ad Type",
-                "error": "Default ads (AD_SERVING_DEFAULT_AD) cannot be created directly using the API.",
+                "error": (
+                    "Default ads (AD_SERVING_DEFAULT_AD) cannot be created"
+                    " directly using the API."
+                ),
+            }
+        allowed = {
+            "AD_SERVING_STANDARD_AD",
+            "AD_SERVING_CLICK_TRACKER",
+            "AD_SERVING_TRACKING",
+            "AD_SERVING_BRAND_SAFE_AD",
+        }
+        if val not in allowed:
+            return {
+                "row": row_num,
+                "field": "Ad Type",
+                "error": (
+                    f"Invalid Ad Type '{ad_type}'. Must be one of"
+                    f" {sorted(allowed)}."
+                ),
             }
     return None
 
@@ -704,7 +769,9 @@ def validate_ad_dynamic_click_tracker(
     return None
 
 
-def validate_click_tracker_url(row: pd.Series, row_num: int) -> dict[str, Any] | None:
+def validate_click_tracker_url(
+    row: pd.Series, row_num: int
+) -> dict[str, Any] | None:
     """Validates destination URL for click tracker ads.
 
     Args:
@@ -729,7 +796,9 @@ def validate_click_tracker_url(row: pd.Series, row_num: int) -> dict[str, Any] |
     return None
 
 
-def validate_creative_rotation(row: pd.Series, row_num: int) -> dict[str, Any] | None:
+def validate_creative_rotation(
+    row: pd.Series, row_num: int
+) -> dict[str, Any] | None:
     """Validates ad creative rotation assignment.
 
     Args:
@@ -760,13 +829,17 @@ def validate_creative_rotation(row: pd.Series, row_num: int) -> dict[str, Any] |
         return {
             "row": row_num,
             "field": "Final Trafficking URL",
-            "error": "Final Trafficking URL is required for creative assignment.",
+            "error": (
+                "Final Trafficking URL is required for creative assignment."
+            ),
         }
 
     return None
 
 
-def validate_placement_status(row: pd.Series, row_num: int) -> dict[str, Any] | None:
+def validate_placement_status(
+    row: pd.Series, row_num: int
+) -> dict[str, Any] | None:
     """Validates placement status.
 
     Args:
@@ -784,13 +857,17 @@ def validate_placement_status(row: pd.Series, row_num: int) -> dict[str, Any] | 
             "PLACEMENT_STATUS_ACTIVE",
             "PLACEMENT_STATUS_ARCHIVED",
             "PLACEMENT_STATUS_INACTIVE",
+            "PLACEMENT_STATUS_PERMANENTLY_ARCHIVED",
             "PLACEMENT_STATUS_UNKNOWN",
         }
         if val not in allowed:
             return {
                 "row": row_num,
                 "field": "Placement Status",
-                "error": f"Invalid placement status '{status_val}'. Must be one of {sorted(allowed)}.",
+                "error": (
+                    f"Invalid placement status '{status_val}'. Must be one of"
+                    f" {sorted(allowed)}."
+                ),
             }
     return None
 
@@ -810,7 +887,8 @@ VALID_EVENT_TAG_STATUSES = {
 def validate_event_tags(row: pd.Series, row_num: int) -> list[dict[str, Any]]:
     """Validates comma-separated event tag fields in a row.
 
-    Ensures that event tag names, types, and URLs have matching counts and valid values.
+    Ensures that event tag names, types, and URLs have matching counts
+    and valid values.
 
     Args:
         row: A pandas Series representing a row in the trafficking sheet.
@@ -835,138 +913,127 @@ def validate_event_tags(row: pd.Series, row_num: int) -> list[dict[str, Any]]:
         return errors
 
     if not has_names and (has_types or has_urls or has_status):
-        errors.append(
-            {
-                "row": row_num,
-                "field": "Event Tag Names",
-                "error": (
-                    "Event Tag Names is required when Event Tag Types, Urls, or"
-                    " Status are provided. All 4 Event Tags Information columns"
-                    " ('Event Tag Names', 'Event Tag Types', 'Event Tag Urls',"
-                    " 'Event Tag Status') must have matching entries."
-                ),
-            }
-        )
+        errors.append({
+            "row": row_num,
+            "field": "Event Tag Names",
+            "error": (
+                "Event Tag Names is required when Event Tag Types, Urls, or"
+                " Status are provided. All 4 Event Tags Information columns"
+                " ('Event Tag Names', 'Event Tag Types', 'Event Tag Urls',"
+                " 'Event Tag Status') must have matching entries."
+            ),
+        })
         return errors
 
     names = [n.strip() for n in str(names_val).split(",") if n.strip()]
     if not names:
-        errors.append(
-            {
-                "row": row_num,
-                "field": "Event Tag Names",
-                "error": "Event Tag Names cannot be empty.",
-            }
-        )
+        errors.append({
+            "row": row_num,
+            "field": "Event Tag Names",
+            "error": "Event Tag Names cannot be empty.",
+        })
         return errors
 
     if not has_types:
-        errors.append(
+        errors.append({
+            "row": row_num,
+            "field": "Event Tag Types",
+            "error": (
+                "Event Tag Types is required when Event Tag Names is"
+                " provided. All 4 Event Tags Information columns"
+                " ('Event Tag Names', 'Event Tag Types', 'Event Tag Urls',"
+                " 'Event Tag Status') must have the same number of"
+                " comma-separated entries."
+            ),
+        })
+    else:
+        types = [t.strip() for t in str(types_val).split(",") if t.strip()]
+        if len(types) != len(names):
+            errors.append({
+                "row": row_num,
+                "field": "Event Tag Types",
+                "error": (
+                    f"Mismatch in count of Event Tag Names ({len(names)}) and"
+                    f" Event Tag Types ({len(types)}). All 4 Event Tags"
+                    " Information columns ('Event Tag Names',"
+                    " 'Event Tag Types',"
+                    " 'Event Tag Urls', 'Event Tag Status') must have the same"
+                    " number of comma-separated entries."
+                ),
+            })
+        errors.extend([
             {
                 "row": row_num,
                 "field": "Event Tag Types",
                 "error": (
-                    "Event Tag Types is required when Event Tag Names is"
-                    " provided. All 4 Event Tags Information columns"
-                    " ('Event Tag Names', 'Event Tag Types', 'Event Tag Urls',"
-                    " 'Event Tag Status') must have the same number of"
-                    " comma-separated entries."
+                    f"Invalid Event Tag Type '{t}'. Must be one of"
+                    f" {sorted(VALID_EVENT_TAG_TYPES)}."
                 ),
             }
-        )
-    else:
-        types = [t.strip() for t in str(types_val).split(",") if t.strip()]
-        if len(types) != len(names):
-            errors.append(
-                {
-                    "row": row_num,
-                    "field": "Event Tag Types",
-                    "error": (
-                        f"Mismatch in count of Event Tag Names ({len(names)}) and"
-                        f" Event Tag Types ({len(types)}). All 4 Event Tags"
-                        " Information columns ('Event Tag Names', 'Event Tag Types',"
-                        " 'Event Tag Urls', 'Event Tag Status') must have the same"
-                        " number of comma-separated entries."
-                    ),
-                }
-            )
-        for t in types:
-            if t.upper() not in VALID_EVENT_TAG_TYPES:
-                errors.append(
-                    {
-                        "row": row_num,
-                        "field": "Event Tag Types",
-                        "error": (
-                            f"Invalid Event Tag Type '{t}'. Must be one of"
-                            f" {sorted(VALID_EVENT_TAG_TYPES)}."
-                        ),
-                    }
-                )
+            for t in types
+            if t.upper() not in VALID_EVENT_TAG_TYPES
+        ])
 
     if not has_urls:
-        errors.append(
-            {
-                "row": row_num,
-                "field": "Event Tag Urls",
-                "error": (
-                    "Event Tag Urls is required when Event Tag Names is"
-                    " provided. All 4 Event Tags Information columns"
-                    " ('Event Tag Names', 'Event Tag Types', 'Event Tag Urls',"
-                    " 'Event Tag Status') must have the same number of"
-                    " comma-separated entries."
-                ),
-            }
-        )
+        errors.append({
+            "row": row_num,
+            "field": "Event Tag Urls",
+            "error": (
+                "Event Tag Urls is required when Event Tag Names is"
+                " provided. All 4 Event Tags Information columns"
+                " ('Event Tag Names', 'Event Tag Types', 'Event Tag Urls',"
+                " 'Event Tag Status') must have the same number of"
+                " comma-separated entries."
+            ),
+        })
     else:
         urls = [u.strip() for u in str(urls_val).split(",") if u.strip()]
         if len(urls) != len(names):
-            errors.append(
-                {
-                    "row": row_num,
-                    "field": "Event Tag Urls",
-                    "error": (
-                        f"Mismatch in count of Event Tag Names ({len(names)}) and"
-                        f" Event Tag Urls ({len(urls)}). All 4 Event Tags"
-                        " Information columns ('Event Tag Names', 'Event Tag Types',"
-                        " 'Event Tag Urls', 'Event Tag Status') must have the same"
-                        " number of comma-separated entries."
-                    ),
-                }
-            )
+            errors.append({
+                "row": row_num,
+                "field": "Event Tag Urls",
+                "error": (
+                    f"Mismatch in count of Event Tag Names ({len(names)}) and"
+                    f" Event Tag Urls ({len(urls)}). All 4 Event Tags"
+                    " Information columns ('Event Tag Names',"
+                    " 'Event Tag Types',"
+                    " 'Event Tag Urls', 'Event Tag Status') must have the same"
+                    " number of comma-separated entries."
+                ),
+            })
 
     if has_status:
         statuses = [s.strip() for s in str(status_val).split(",") if s.strip()]
         if len(statuses) != len(names):
-            errors.append(
-                {
-                    "row": row_num,
-                    "field": "Event Tag Status",
-                    "error": (
-                        f"Mismatch in count of Event Tag Names ({len(names)}) and"
-                        f" Event Tag Status ({len(statuses)}). All 4 Event Tags"
-                        " Information columns ('Event Tag Names', 'Event Tag Types',"
-                        " 'Event Tag Urls', 'Event Tag Status') must have the same"
-                        " number of comma-separated entries."
-                    ),
-                }
-            )
-        for s in statuses:
-            if s.upper() not in VALID_EVENT_TAG_STATUSES:
-                errors.append(
-                    {
-                        "row": row_num,
-                        "field": "Event Tag Status",
-                        "error": (
-                            f"Invalid Event Tag Status '{s}'. Must be one of"
-                            f" {sorted(VALID_EVENT_TAG_STATUSES)}."
-                        ),
-                    }
-                )
+            errors.append({
+                "row": row_num,
+                "field": "Event Tag Status",
+                "error": (
+                    f"Mismatch in count of Event Tag Names ({len(names)}) and"
+                    f" Event Tag Status ({len(statuses)}). All 4 Event Tags"
+                    " Information columns ('Event Tag Names',"
+                    " 'Event Tag Types',"
+                    " 'Event Tag Urls', 'Event Tag Status') must have the same"
+                    " number of comma-separated entries."
+                ),
+            })
+        errors.extend([
+            {
+                "row": row_num,
+                "field": "Event Tag Status",
+                "error": (
+                    f"Invalid Event Tag Status '{s}'. Must be one of"
+                    f" {sorted(VALID_EVENT_TAG_STATUSES)}."
+                ),
+            }
+            for s in statuses
+            if s.upper() not in VALID_EVENT_TAG_STATUSES
+        ])
 
     return errors
 
 
-def validate_sheet(
+def validate_sheet(  # ruff: ignore[complex-structure, too-many-branches]
     df: pd.DataFrame,
     profile_id: str | None = None,
     advertiser_id: str | None = None,

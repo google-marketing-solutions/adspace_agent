@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Campaign Manager 360 actions for grouping, API listings, and operations building."""
+"""Campaign Manager 360 actions for grouping, listings, and operations."""
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from google.adk.tools.tool_context import ToolContext
 from google.oauth2.credentials import Credentials
@@ -40,9 +40,9 @@ CREDENTIALS_CACHE_KEY: str = "CREDENTIALS_CACHE_KEY"
 
 def _group_placements(
     df: pd.DataFrame,
-    advertiser_id: str | None = None,
+    advertiser_id: str | None = None,  # ruff: ignore[unused-function-argument]
     campaign_id: str | None = None,
-    campaign_name: str | None = None,
+    campaign_name: str | None = None,  # ruff: ignore[unused-function-argument]
 ) -> dict[str, dict[str, Any]]:
     """Groups rows into unique placements keyed by placement name.
 
@@ -61,18 +61,22 @@ def _group_placements(
         site_identifier = extract_site_identifier(row)
 
         placement_start = None
-        if "Placement Start Date" in row and not pd.isna(row["Placement Start Date"]):
+        if "Placement Start Date" in row and not pd.isna(
+            row["Placement Start Date"]
+        ):
             placement_start = row["Placement Start Date"]
 
         placement_end = None
-        if "Placement End Date" in row and not pd.isna(row["Placement End Date"]):
+        if "Placement End Date" in row and not pd.isna(
+            row["Placement End Date"]
+        ):
             placement_end = row["Placement End Date"]
 
         placement_size = row["Placement Size"]
 
         compatibility = ""
         if "Placement Type" in row and not pd.isna(row["Placement Type"]):
-            compatibility = str(row["Placement Type"]).strip().upper()
+            compatibility = str(row["Placement Type"]).strip()
 
         site_id = f"{site_identifier}"
 
@@ -84,9 +88,9 @@ def _group_placements(
         if (
             "Placement Status" in row
             and not pd.isna(row["Placement Status"])
-            and str(row["Placement Status"]).strip() != ""
+            and str(row["Placement Status"]).strip()
         ):
-            active_status = str(row["Placement Status"]).strip().upper()
+            active_status = str(row["Placement Status"]).strip()
 
         tag_formats = []
 
@@ -148,15 +152,69 @@ def _parse_row_event_tags(row: pd.Series) -> list[dict[str, Any]]:
         tag_type = types[i].upper() if i < len(types) else ""
         url = urls[i] if i < len(urls) else ""
         status = statuses[i].upper() if i < len(statuses) else "ENABLED"
-        tags.append(
-            {
-                "name": name,
-                "type": tag_type,
-                "url": url,
-                "status": status,
-            }
-        )
+        tags.append({
+            "name": name,
+            "type": tag_type,
+            "url": url,
+            "status": status,
+        })
     return tags
+
+
+def _parse_creative_type(val: object) -> str:
+    """Returns creative type directly from sheet value.
+
+    Args:
+        val: The raw value from the sheet.
+
+    Returns:
+        Creative type string or empty string.
+    """
+    if pd.isna(val) or not val:
+        return ""
+    return str(val).strip()
+
+
+def _group_creatives(
+    df: pd.DataFrame,
+    advertiser_id: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Groups rows into unique creatives keyed by creative name.
+
+    Args:
+        df: The parsed pandas DataFrame.
+        advertiser_id: Dynamically parsed Advertiser ID.
+
+    Returns:
+        A dictionary mapping unique creative names to their creative details.
+    """
+    creatives = {}
+    for _, row in df.iterrows():
+        if "Creative Name" not in row or pd.isna(row["Creative Name"]):
+            continue
+        creative_name = str(row["Creative Name"]).strip()
+        if not creative_name or creative_name.lower() in {"", "none", "nan"}:
+            continue
+
+        raw_size = row.get("Creative Dimensions")
+        size = parse_size(raw_size)
+        creative_type = _parse_creative_type(row.get("Creative Type"))
+        raw_rotation = str(row.get("Creative Rotation", "100%")).strip()
+        rotation_val = (
+            raw_rotation
+            if raw_rotation and raw_rotation.lower() not in {"", "none", "nan"}
+            else "100%"
+        )
+
+        if creative_name not in creatives:
+            creatives[creative_name] = {
+                "name": creative_name,
+                "advertiserId": advertiser_id,
+                "size": size,
+                "type": creative_type,
+                "rotation": rotation_val,
+            }
+    return creatives
 
 
 def _group_event_tags(
@@ -192,13 +250,13 @@ def _group_event_tags(
     return event_tags
 
 
-def _group_ads(
+def _group_ads(  # ruff: ignore[complex-structure, too-many-branches, too-many-locals, too-many-statements]
     df: pd.DataFrame,
     advertiser_id: str | None = None,
     campaign_id: str | None = None,
-    campaign_name: str | None = None,
+    campaign_name: str | None = None,  # ruff: ignore[unused-function-argument]
 ) -> dict[str, dict[str, Any]]:
-    """Groups rows into unique ads with their associations keyed by unique ad name.
+    """Groups rows into unique ads with their associations keyed by ad name.
 
     Args:
         df: The parsed pandas DataFrame.
@@ -221,7 +279,7 @@ def _group_ads(
         if (
             "Final Trafficking URL" in row
             and not pd.isna(row["Final Trafficking URL"])
-            and str(row["Final Trafficking URL"]).strip() != ""
+            and str(row["Final Trafficking URL"]).strip()
         ):
             creative_url = str(row["Final Trafficking URL"]).strip()
 
@@ -245,9 +303,9 @@ def _group_ads(
         if (
             "Ad Type" in row
             and not pd.isna(row["Ad Type"])
-            and str(row["Ad Type"]).strip() != ""
+            and str(row["Ad Type"]).strip()
         ):
-            ad_type_val = str(row["Ad Type"]).strip().upper()
+            ad_type_val = str(row["Ad Type"]).strip()
 
         if ad_name not in ads:
             ad_payload = {
@@ -273,39 +331,47 @@ def _group_ads(
                 ad_payload["creativeRotation"] = {
                     "creativeAssignments": [],
                 }
-                if ad_type_val in (
-                    "AD_SERVING_STANDARD_AD",
-                    "AD_SERVING_TRACKING",
-                ):
-                    ad_payload["deliverySchedule"] = {
-                        "priority": priority,
-                        "impressionRatio": impression_ratio,
-                    }
+            if ad_type_val in {
+                "AD_SERVING_STANDARD_AD",
+                "AD_SERVING_TRACKING",
+            }:
+                ad_payload["deliverySchedule"] = {
+                    "priority": priority,
+                    "impressionRatio": impression_ratio,
+                }
             ads[ad_name] = ad_payload
 
+        current_ad = ads[ad_name]
         # Associate Placement by placement name
-        ad_placements = [p["placementId"] for p in ads[ad_name]["placementAssignments"]]
+        ad_placements_list = cast(
+            "list[dict[str, Any]]", current_ad["placementAssignments"]
+        )
+        ad_placements = [p["placementId"] for p in ad_placements_list]
         if placement_name not in ad_placements:
-            ads[ad_name]["placementAssignments"].append(
-                {
-                    "placementId": placement_name,
-                    "active": True,
-                }
-            )
+            ad_placements_list.append({
+                "placementId": placement_name,
+                "active": True,
+            })
 
         # Associate Creative by creative name (only for non-click-tracker ads)
         if (
             ad_type_val != "AD_SERVING_CLICK_TRACKER"
-            and "creativeRotation" in ads[ad_name]
+            and "creativeRotation" in current_ad
         ):
-            ad_creatives = [
-                c["creativeId"]
-                for c in ads[ad_name]["creativeRotation"]["creativeAssignments"]
-            ]
+            rotation_map = cast(
+                "dict[str, Any]", current_ad["creativeRotation"]
+            )
+            creative_assignments = cast(
+                "list[dict[str, Any]]",
+                rotation_map["creativeAssignments"],
+            )
+            ad_creatives = [c["creativeId"] for c in creative_assignments]
             if creative_id_val not in ad_creatives:
                 rotation_val = row.get("Creative Rotation")
                 weight_val = (
-                    parse_weight(rotation_val) if not pd.isna(rotation_val) else 100
+                    parse_weight(rotation_val)
+                    if not pd.isna(rotation_val)
+                    else 100
                 )
                 weight_val = max(1, weight_val)
 
@@ -318,24 +384,21 @@ def _group_ads(
                     creative_assignment["clickThroughUrl"] = {
                         "customClickThroughUrl": creative_url,
                     }
-                ads[ad_name]["creativeRotation"]["creativeAssignments"].append(
-                    creative_assignment
-                )
+                creative_assignments.append(creative_assignment)
 
         # Associate Event Tags with Ad overrides
         row_tags = _parse_row_event_tags(row)
-        existing_override_ids = {
-            o["id"] for o in ads[ad_name]["eventTagOverrides"] if "id" in o
-        }
+        overrides_list = cast(
+            "list[dict[str, Any]]", current_ad["eventTagOverrides"]
+        )
+        existing_override_ids = {o["id"] for o in overrides_list if "id" in o}
         for tag in row_tags:
             tag_name = tag["name"]
             if tag_name not in existing_override_ids:
-                ads[ad_name]["eventTagOverrides"].append(
-                    {
-                        "id": tag_name,
-                        "enabled": True,
-                    }
-                )
+                overrides_list.append({
+                    "id": tag_name,
+                    "enabled": True,
+                })
                 existing_override_ids.add(tag_name)
 
     return ads
@@ -349,7 +412,7 @@ def build_operations_list(
 
     Args:
         ads: Grouped ads mapping keyed by unique ad name.
-        event_tags: Optional grouped event tags mapping keyed by unique tag name.
+        event_tags: Optional grouped event tags mapping keyed by tag name.
 
     Returns:
         A list of operation dictionaries with event tags first, followed by ads.
@@ -357,27 +420,25 @@ def build_operations_list(
     operations = []
     if event_tags:
         for tag_name, tag_payload in event_tags.items():
-            operations.append(
-                {
-                    "operation": "dfareporting.eventTags.insert",
-                    "name": tag_name,
-                    "payload": tag_payload,
-                }
-            )
+            operations.append({
+                "operation": "dfareporting.eventTags.insert",
+                "name": tag_name,
+                "payload": tag_payload,
+            })
     if ads:
         for ad_name, ad_payload in ads.items():
-            operations.append(
-                {
-                    "operation": "dfareporting.ads.insert",
-                    "name": ad_name,
-                    "payload": ad_payload,
-                }
-            )
+            operations.append({
+                "operation": "dfareporting.ads.insert",
+                "name": ad_name,
+                "payload": ad_payload,
+            })
     return operations
 
 
-def _get_cm360_service(tool_context: ToolContext | None = None) -> Any:
-    """Builds dfareporting service using credentials stored in tool context state.
+def _get_cm360_service(
+    tool_context: ToolContext | None = None,
+) -> Any:  # ruff: ignore[any-type]
+    """Builds dfareporting service using credentials in tool context state.
 
     Args:
         tool_context: Optional ADK ToolContext containing credentials in state.
@@ -390,25 +451,30 @@ def _get_cm360_service(tool_context: ToolContext | None = None) -> Any:
     """
     logger.info("Initializing CM360 dfareporting service client...")
     if not tool_context or tool_context.state is None:
-        raise ValueError("Tool context and state are required to get CM360 service.")
+        msg = "Tool context and state are required to get CM360 service."
+        raise ValueError(msg)
 
     cached_token_info = tool_context.state.get(CREDENTIALS_CACHE_KEY)
     if not cached_token_info:
-        raise ValueError(
-            f"Credentials not found in tool context state (key: {CREDENTIALS_CACHE_KEY})."
+        msg = (
+            "Credentials not found in tool context state "
+            f"(key: {CREDENTIALS_CACHE_KEY})."
         )
+        raise ValueError(msg)
 
     if isinstance(cached_token_info, Credentials):
         credentials = cached_token_info
     else:
-        credentials = Credentials.from_authorized_user_info(cached_token_info, SCOPES)
+        credentials = Credentials.from_authorized_user_info(
+            cached_token_info, SCOPES
+        )
 
     logger.info(
-        "Valid credentials found in tool_context. Building CM360 service client..."
+        "Valid credentials found in tool_context. Building CM360 service"
+        " client..."
     )
 
-    service = build("dfareporting", "v5", credentials=credentials)
-    return service
+    return build("dfareporting", "v5", credentials=credentials)
 
 
 def list_cm_placements(
@@ -429,8 +495,8 @@ def list_cm_placements(
         A list of placement resource dictionaries.
     """
     logger.info(
-        "Listing active CM360 placements for Profile=%s (Filters: AdvertiserIds=%s,"
-        " CampaignIds=%s)...",
+        "Listing active CM360 placements for Profile=%s (Filters:"
+        " AdvertiserIds=%s, CampaignIds=%s)...",
         profile_id,
         advertiser_ids,
         campaign_ids,
@@ -445,7 +511,10 @@ def list_cm_placements(
             "pageToken": page_token,
             "maxResults": 1000,
             "activeStatus": ["PLACEMENT_STATUS_ACTIVE"],
-            "fields": "nextPageToken,placements(id,name)",
+            "fields": (
+                "nextPageToken,placements(id,name,activeStatus,compatibility,"
+                "pricingSchedule,size,siteId)"
+            ),
         }
         if advertiser_ids:
             kwargs["advertiserIds"] = advertiser_ids
@@ -488,8 +557,8 @@ def list_cm_creatives(
         A list of creative resource dictionaries.
     """
     logger.info(
-        "Listing active CM360 creatives for Profile=%s (Filters: AdvertiserId=%s,"
-        " CampaignId=%s)...",
+        "Listing active CM360 creatives for Profile=%s (Filters:"
+        " AdvertiserId=%s, CampaignId=%s)...",
         profile_id,
         advertiser_id,
         campaign_id,
@@ -505,7 +574,7 @@ def list_cm_creatives(
             "maxResults": 1000,
             "active": True,
             "archived": False,
-            "fields": "nextPageToken,creatives(id,name)",
+            "fields": "nextPageToken,creatives(id,name,size,type,active)",
         }
         if advertiser_id:
             kwargs["advertiserId"] = advertiser_id
@@ -548,8 +617,8 @@ def list_cm_event_tags(
         A list of event tag resource dictionaries.
     """
     logger.info(
-        "Listing active CM360 event tags for Profile=%s (Filters: AdvertiserId=%s,"
-        " CampaignId=%s)...",
+        "Listing active CM360 event tags for Profile=%s (Filters:"
+        " AdvertiserId=%s, CampaignId=%s)...",
         profile_id,
         advertiser_id,
         campaign_id,
@@ -557,7 +626,7 @@ def list_cm_event_tags(
     service = _get_cm360_service(tool_context)
     kwargs: dict[str, Any] = {
         "profileId": profile_id,
-        "fields": "eventTags(id,name,url)",
+        "fields": "eventTags(id,name,url,type,status)",
     }
     if advertiser_id:
         kwargs["advertiserId"] = advertiser_id
@@ -612,7 +681,11 @@ def list_cm_ads(
             "pageToken": page_token,
             "maxResults": 1000,
             "archived": False,
-            "fields": "nextPageToken,ads(id,name,placementAssignments)",
+            "fields": (
+                "nextPageToken,ads(id,name,startTime,endTime,type,"
+                "deliverySchedule,creativeRotation,dynamicClickTracker,"
+                "clickThroughUrl,placementAssignments,eventTagOverrides)"
+            ),
         }
         if advertiser_id:
             kwargs["advertiserId"] = advertiser_id

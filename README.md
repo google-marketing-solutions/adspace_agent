@@ -98,11 +98,38 @@ Example for Google Drive:
 uv run list-tools google --api drive --version v3
 ```
 
+## Configuring Your GCS Bucket for Agent Skills
+
+You can configure the agent to dynamically load custom skills from a Google Cloud Storage (GCS) bucket by setting the `SKILLS_BUCKET_NAME` environment variable (for example, `SKILLS_BUCKET_NAME={YOUR_SKILLS_BUCKET_NAME}`).
+
+### Required Bucket Folder Structure
+
+The agent expects a top-level `skills/` directory in your GCS bucket. Inside `skills/`, each skill must be placed in its own subfolder:
+
+- The **name of the folder** must be the name of the skill in standard skill format (kebab-case, e.g., `cm360-trafficking`).
+- The folder name **must exactly match** the `name` field declared in the YAML frontmatter of the `SKILL.md` file inside that folder.
+
+For example, for the `cm360-trafficking` skill, your bucket structure should look like this:
+
+```text
+gs://{YOUR_SKILLS_BUCKET_NAME}/
+└── skills/
+    └── cm360-trafficking/
+        └── SKILL.md
+```
+
+And the corresponding `SKILL.md` file inside `skills/cm360-trafficking/SKILL.md` must have matching frontmatter:
+
+```yaml
+---
+name: cm360-trafficking
+description: Use this skill ONLY when the user requests something related to trafficking, pushing, or editing campaigns in Campaign Manager 360 (CM360)...
+---
+```
+
 ## Deployment
 
-To deploy the application, you can use the Google Cloud user interface to set
-the environment variables. Refer to the previous section for instructions on how
-to set up the environment variables.
+To deploy the application, you can set your environment variables either through the Google Cloud Console or directly via the `gcloud run deploy` CLI command using `--set-env-vars`. Refer to the [Environment Variables](#environment-variables) section for details on each variable.
 
 You will also need the following APIs enabled:
 
@@ -125,14 +152,24 @@ gcloud services enable \
 
 ### Cloud Run
 
-To deploy to Cloud Run:
+To deploy to Cloud Run and pass the required environment variables:
 
 ```shell
 gcloud run deploy adspace-agent \
   --source . \
+  --region us-central1 \
   --memory 4Gi \
   --cpu 1 \
-  --port 8000
+  --port 8000 \
+  --set-env-vars "\
+GOOGLE_CLOUD_LOCATION=global,\
+GOOGLE_CLOUD_PROJECT={YOUR_GOOGLE_CLOUD_PROJECT},\
+GOOGLE_GENAI_USE_VERTEXAI=TRUE,\
+GOOGLE_ADS_DEVELOPER_TOKEN={YOUR_GOOGLE_ADS_DEVELOPER_TOKEN},\
+GOOGLE_ADS_LOGIN_CUSTOMER_ID={YOUR_GOOGLE_ADS_LOGIN_CUSTOMER_ID},\
+CLIENT_ID={YOUR_CLIENT_ID},\
+CLIENT_SECRET={YOUR_CLIENT_SECRET},\
+SKILLS_BUCKET_NAME={YOUR_SKILLS_BUCKET_NAME}"
 ```
 
 ## Contributing

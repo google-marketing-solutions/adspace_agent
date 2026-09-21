@@ -35,7 +35,7 @@ IMAGEN_MODEL: str = os.environ.get(
 )
 
 genai_client = genai.Client(
-    vertexai=os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "False").upper() == "TRUE",
+    vertexai=os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "True").upper() == "TRUE",
     project=os.environ["GOOGLE_CLOUD_PROJECT"],
     location=os.environ["GOOGLE_CLOUD_LOCATION"],
 )

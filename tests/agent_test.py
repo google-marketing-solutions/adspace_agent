@@ -14,6 +14,8 @@
 """Testing the agent module."""
 
 import importlib
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
 from google.adk.models.google_llm import Gemini
@@ -306,3 +308,12 @@ def test_app_events_compaction_config_env_vars():
         assert config.overlap_size == expected_overlap
         assert config.token_threshold == expected_threshold
         assert config.event_retention_size == expected_retention
+
+
+@pytest.mark.asyncio
+async def test_auto_save_session_to_memory_callback():
+    """Test auto_save_session_to_memory_callback saves session to memory."""
+    mock_context = MagicMock()
+    mock_context.add_session_to_memory = AsyncMock()
+    await agent_module.auto_save_session_to_memory_callback(mock_context)
+    mock_context.add_session_to_memory.assert_awaited_once()

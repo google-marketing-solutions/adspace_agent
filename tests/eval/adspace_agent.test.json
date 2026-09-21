@@ -1,0 +1,83 @@
+{
+  "eval_set_id": "adspace_agent_core_eval_set",
+  "name": "AdSpace Agent Core Evaluation Set",
+  "description": "Evaluates core tool trajectory and response matching for the AdSpace Agent.",
+  "eval_cases": [
+    {
+      "eval_id": "current_date_eval",
+      "conversation": [
+        {
+          "invocation_id": "inv-current-date-1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "What is today's date?"
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Today's date is 2026-09-21."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "get_current_date",
+                "args": {}
+              }
+            ],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "adspace_agent",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "reload_skills_eval",
+      "conversation": [
+        {
+          "invocation_id": "inv-reload-skills-1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Please reload the agent skills from disk."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "I have reloaded the available skills from disk."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "reload_skills",
+                "args": {}
+              }
+            ],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "adspace_agent",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    }
+  ]
+}

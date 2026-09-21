@@ -28,11 +28,9 @@ from google.adk.tools.base_toolset import BaseToolset
 from google.genai import types
 from google.genai.types import Part
 
-MODEL: str = os.environ.get("MODEL", "gemini-3.6-flash")
-VEO_MODEL: str = os.environ.get("VEO_MODEL", "veo-3.1-fast-generate-001")
-IMAGEN_MODEL: str = os.environ.get(
-    "IMAGEN_MODEL", "imagen-4.0-fast-generate-001"
-)
+MODEL: str = os.environ.get("MODEL", "gemini-3.8-flash")
+VIDEO_MODEL: str = os.environ.get("VIDEO_MODEL", "veo-3.1-fast-generate-001")
+IMAGE_MODEL: str = os.environ.get("IMAGE_MODEL", "gemini-3.1-flash-image")
 
 genai_client = genai.Client(
     vertexai=os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "True").upper() == "TRUE",
@@ -99,7 +97,7 @@ async def generate_video(
     prompt: str,
     tool_context: CallbackContext,
 ) -> dict[str, str | Part]:
-    """Generates a video from a prompt using Google GenAI' Veo 3 model.
+    """Generates a video from a prompt using Google GenAI' video model.
 
     This function is optimized for parallel execution.
 
@@ -114,7 +112,7 @@ async def generate_video(
     result: dict[str, str | Part] = {}
     try:
         operation = await genai_client.aio.models.generate_videos(
-            model=VEO_MODEL,
+            model=VIDEO_MODEL,
             source=types.GenerateVideosSource(
                 prompt=prompt,
             ),
@@ -187,7 +185,7 @@ async def generate_image(
     prompt: str,
     tool_context: CallbackContext,
 ) -> dict[str, str | Part]:
-    """Generates an image from a prompt using Google GenAI's Imagen 3 model.
+    """Generates an image from a prompt using Google GenAI's image model.
 
     This function is optimized for parallel execution.
 
@@ -202,7 +200,7 @@ async def generate_image(
     result: dict[str, str | Part] = {}
     try:
         response = await genai_client.aio.models.generate_images(
-            model=IMAGEN_MODEL,
+            model=IMAGE_MODEL,
             prompt=prompt,
             config=types.GenerateImagesConfig(number_of_images=1),
         )

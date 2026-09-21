@@ -76,8 +76,8 @@ def main() -> None:
             "GOOGLE_ADS_LOGIN_CUSTOMER_ID"
         ),
         "MODEL": os.getenv("MODEL"),
-        "VEO_MODEL": os.getenv("VEO_MODEL"),
-        "IMAGEN_MODEL": os.getenv("IMAGEN_MODEL"),
+        "VIDEO_MODEL": os.getenv("VIDEO_MODEL"),
+        "IMAGE_MODEL": os.getenv("IMAGE_MODEL"),
         "ENABLED_TOOLSETS": os.getenv("ENABLED_TOOLSETS"),
         "GOOGLE_ADS_TOOL_FILTER": os.getenv("GOOGLE_ADS_TOOL_FILTER"),
         "SKILLS_BUCKET_NAME": os.getenv("SKILLS_BUCKET_NAME"),

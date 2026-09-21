@@ -50,7 +50,7 @@ from .tools.utilities import UtilitiesToolset
 
 APP_NAME = "adspace_agent"
 
-MODEL: str = os.environ.get("MODEL", "gemini-3.6-flash")
+MODEL: str = os.environ.get("MODEL", "gemini-3.8-flash")
 
 COMPACTION_INTERVAL: int = int(os.environ.get("COMPACTION_INTERVAL", "3"))
 COMPACTION_OVERLAP_SIZE: int = int(

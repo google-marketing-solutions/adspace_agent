@@ -54,19 +54,20 @@ def test_list_tools_fallback(capsys: pytest.CaptureFixture[str]) -> None:
     assert captured.out == "apple\nbanana\n"
 
 
-@patch("adspace_agent.utils.list_tools.DiscoveryConverter")
+@patch("adspace_agent.utils.list_tools.GoogleApiToolset")
 def test_main_google_ads(
-    mock_converter_class: MagicMock, capsys: pytest.CaptureFixture[str]
+    mock_google_class: MagicMock, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Test main with ads subcommand."""
-    mock_converter = MagicMock()
-    mock_converter_class.return_value = mock_converter
-    mock_converter.convert.return_value = {
-        "paths": {
-            "/path1": {"get": {"operationId": "apple"}},
-            "/path2": {"post": {"operationId": "banana"}},
-        }
-    }
+    mock_toolset = MagicMock()
+    mock_google_class.return_value = mock_toolset
+
+    tool1 = MagicMock()
+    tool1.name = "apple"
+    tool2 = MagicMock()
+    tool2.name = "banana"
+
+    mock_toolset.get_tools = AsyncMock(return_value=[tool2, tool1])
 
     with patch.object(sys, "argv", ["list-tools", "google_ads"]):
         main()

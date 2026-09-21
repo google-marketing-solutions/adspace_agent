@@ -34,6 +34,7 @@ class MockGenAIClient:
 
 
 DUMMY_ENV = {
+    "GOOGLE_GENAI_USE_VERTEXAI": "TRUE",
     "GOOGLE_CLOUD_PROJECT": "dummy-project",
     "GOOGLE_CLOUD_LOCATION": "dummy-location",
     "GOOGLE_ADS_DEVELOPER_TOKEN": "dummy-token",

@@ -106,7 +106,7 @@ You can configure the agent to dynamically load custom skills from a Google Clou
 
 The agent expects a top-level `skills/` directory in your GCS bucket. Inside `skills/`, each skill must be placed in its own subfolder:
 
-- The **name of the folder** must be the name of the skill in standard skill format (kebab-case, e.g., `cm360-trafficking`).
+- The **name of the folder** must be the name of the skill in standard skill format (kebab-case, for example, `cm360-trafficking`).
 - The folder name **must exactly match** the `name` field declared in the YAML frontmatter of the `SKILL.md` file inside that folder.
 
 For example, for the `cm360-trafficking` skill, your bucket structure should look like this:
@@ -129,7 +129,7 @@ description: Use this skill ONLY when the user requests something related to tra
 
 ## Deployment
 
-To deploy the application, you can set your environment variables either through the Google Cloud Console or directly via the `gcloud run deploy` CLI command using `--set-env-vars`. Refer to the [Environment Variables](#environment-variables) section for details on each variable.
+To deploy the application, you can set your environment variables either through the Google Cloud Console or directly by way of the `gcloud run deploy` CLI command using `--set-env-vars`. Refer to the [Environment Variables](#environment-variables) section for details on each variable.
 
 You will also need the following APIs enabled:
 

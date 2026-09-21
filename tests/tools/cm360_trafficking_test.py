@@ -52,7 +52,10 @@ class MockSession:
     id: str = "test_session_id"
 
 
-@pytest.fixture(autouse=True)
+pytestmark = pytest.mark.usefixtures("mock_cm360_api_calls")
+
+
+@pytest.fixture
 def mock_cm360_api_calls(monkeypatch):
     """Mock CM360 API calls to return matching mock data."""
     monkeypatch.setenv("SKILLS_BUCKET_NAME", "test-bucket")
@@ -1626,3 +1629,235 @@ def test_diff_placement_aligns_pricing_periods() -> None:
             "rateOrCostNanos": "5000000000",
         }
     ]
+
+
+def test_validate_event_tags_all_branches() -> None:
+    """Tests validations.validate_event_tags across all error paths."""
+    assert validations.validate_event_tags(pd.Series({}), 1) == []
+
+    err = validations.validate_event_tags(
+        pd.Series({"Event Tag Types": "IMPRESSION"}), 1
+    )
+    assert len(err) == 1
+    assert err[0]["field"] == "Event Tag Names"
+
+    err_empty_names = validations.validate_event_tags(
+        pd.Series({"Event Tag Names": " , "}), 1
+    )
+    assert len(err_empty_names) == 1
+    assert "cannot be empty" in err_empty_names[0]["error"]
+
+    err_missing_types_urls = validations.validate_event_tags(
+        pd.Series({"Event Tag Names": "Tag1"}), 1
+    )
+    expected_err_count = 2
+    assert len(err_missing_types_urls) == expected_err_count
+
+    err_mismatch = validations.validate_event_tags(
+        pd.Series({
+            "Event Tag Names": "Tag1, Tag2",
+            "Event Tag Types": "INVALID_TYPE",
+            "Event Tag Urls": "https://a.com",
+            "Event Tag Status": "INVALID_STATUS",
+        }),
+        1,
+    )
+    expected_mismatch_count = 5
+    assert len(err_mismatch) == expected_mismatch_count
+
+    valid = validations.validate_event_tags(
+        pd.Series({
+            "Event Tag Names": "Tag1",
+            "Event Tag Types": "IMPRESSION_IMAGE_EVENT_TAG",
+            "Event Tag Urls": "https://a.com",
+            "Event Tag Status": "ENABLED",
+        }),
+        1,
+    )
+    assert valid == []
+
+
+@pytest.mark.asyncio
+async def test_traffic_campaigns_in_cm360_tool_execution(monkeypatch) -> None:
+    """Tests traffic_campaigns_in_cm360_tool error paths and execution flow."""
+    res_no_ctx = json.loads(
+        await cm360_trafficking.traffic_campaigns_in_cm360_tool(
+            typing.cast("typing.Any", None)
+        )
+    )
+    assert res_no_ctx["status"] == "ERROR"
+
+    ctx = MockToolContext("dummy.csv")
+    ctx.state = {"key": "val"}
+    ctx.session = MockSession(id="")
+    res_no_sess = json.loads(
+        await cm360_trafficking.traffic_campaigns_in_cm360_tool(
+            typing.cast("typing.Any", ctx)
+        )
+    )
+    assert res_no_sess["status"] == "ERROR"
+
+    ctx.session = MockSession(id="sess_1")
+    monkeypatch.delenv("SKILLS_BUCKET_NAME", raising=False)
+    res_no_bucket = json.loads(
+        await cm360_trafficking.traffic_campaigns_in_cm360_tool(
+            typing.cast("typing.Any", ctx)
+        )
+    )
+    assert res_no_bucket["status"] == "ERROR"
+
+    monkeypatch.setenv("SKILLS_BUCKET_NAME", "test-bucket")
+    res_no_path = json.loads(
+        await cm360_trafficking.traffic_campaigns_in_cm360_tool(
+            typing.cast("typing.Any", ctx)
+        )
+    )
+    assert res_no_path["status"] == "ERROR"
+
+    ctx.state["parsed_payload_gcs_url"] = (
+        "gs://test-bucket/cm360_trafficking/sess_1/payloads.json"
+    )
+    payload = {
+        "profile_id": "123",
+        "advertiser_id": "456",
+        "campaign_id": "789",
+        "campaign_name": "Camp",
+        "operations": [
+            {"operation": "dfareporting.placements.patch", "payload": {}},
+            {"operation": "dfareporting.creatives.patch", "payload": {}},
+            {"operation": "dfareporting.eventTags.insert", "payload": {}},
+            {"operation": "dfareporting.ads.insert", "payload": {}},
+        ],
+    }
+    with (
+        mock.patch(
+            "adspace_agent.tools.cm360_trafficking.cm360_trafficking.download_from_gcs",
+            return_value=json.dumps(payload),
+        ),
+        mock.patch(
+            "adspace_agent.tools.cm360_trafficking.cm360_trafficking._get_cm360_service",
+            return_value=mock.MagicMock(),
+        ),
+        mock.patch(
+            "adspace_agent.tools.cm360_trafficking.cm360_trafficking._process_placement_operations",
+            return_value=[{"status": "SUCCESS", "entity_type": "Placement"}],
+        ),
+        mock.patch(
+            "adspace_agent.tools.cm360_trafficking.cm360_trafficking._process_creative_operations",
+            return_value=[{"status": "SUCCESS", "entity_type": "Creative"}],
+        ),
+        mock.patch(
+            "adspace_agent.tools.cm360_trafficking.cm360_trafficking._process_event_tag_operations",
+            return_value=(
+                [{"status": "SUCCESS", "entity_type": "EventTag"}],
+                {},
+                set(),
+            ),
+        ),
+        mock.patch(
+            "adspace_agent.tools.cm360_trafficking.cm360_trafficking._process_ad_operations",
+            return_value=[{"status": "SUCCESS", "entity_type": "Ad"}],
+        ),
+        mock.patch(
+            "adspace_agent.tools.cm360_trafficking.cm360_trafficking._update_trafficking_sheet_status",
+            new_callable=mock.AsyncMock,
+        ),
+    ):
+        res_ok = json.loads(
+            await cm360_trafficking.traffic_campaigns_in_cm360_tool(
+                typing.cast("typing.Any", ctx)
+            )
+        )
+        assert res_ok["status"] == "SUCCESS"
+
+
+def test_cm360_actions_grouping_and_list_helpers() -> None:
+    """Tests grouping and listing helpers in cm360_actions."""
+    df = pd.DataFrame([
+        {
+            "Placement Name": "P1",
+            "Site": "SiteA",
+            "Placement Start Date": "2026-01-01",
+            "Placement End Date": "2026-02-01",
+            "Placement Size": "300x250",
+            "Placement Type": "DISPLAY",
+            "Placement Status": "PLACEMENT_STATUS_ACTIVE",
+            "Creative Name": "C1",
+            "Creative Dimensions": "300x250",
+            "Creative Type": "HTML5_BANNER",
+            "Creative Rotation": "100%",
+            "Event Tag Names": "ET1",
+            "Event Tag Types": "IMPRESSION",
+            "Event Tag Urls": "https://et1.com",
+            "Event Tag Status": "ENABLED",
+        },
+        {
+            "Placement Name": "P1",
+            "Site": "SiteA",
+            "Placement Size": "300x250",
+            "Creative Name": "",
+            "Event Tag Names": "none",
+        },
+    ])
+    placements = cm360_actions._group_placements(  # ruff: ignore[private-member-access]
+        df, advertiser_id="1", campaign_id="2", campaign_name="C"
+    )
+    assert "P1" in placements
+    creatives = cm360_actions._group_creatives(df, advertiser_id="1")  # ruff: ignore[private-member-access]
+    assert "C1" in creatives
+    event_tags = cm360_actions._group_event_tags(  # ruff: ignore[private-member-access]
+        df, advertiser_id="1", campaign_id="2"
+    )
+    assert "ET1" in event_tags
+
+    mock_svc = mock.MagicMock()
+    mock_svc.placements().list().execute.return_value = {
+        "placements": [{"id": "p1"}]
+    }
+    mock_svc.creatives().list().execute.return_value = {
+        "creatives": [{"id": "c1"}]
+    }
+    mock_svc.eventTags().list().execute.return_value = {
+        "eventTags": [{"id": "et1"}]
+    }
+    mock_svc.ads().list().execute.return_value = {"ads": [{"id": "a1"}]}
+
+    with mock.patch(
+        "adspace_agent.tools.cm360_trafficking.cm360_actions._get_cm360_service",
+        return_value=mock_svc,
+    ):
+        assert (
+            len(
+                cm360_actions.list_cm_placements(
+                    "123", advertiser_ids=["1"], campaign_ids=["2"]
+                )
+            )
+            == 1
+        )
+        assert (
+            len(
+                cm360_actions.list_cm_creatives(
+                    "123", advertiser_id="1", campaign_id="2"
+                )
+            )
+            == 1
+        )
+        assert (
+            len(
+                cm360_actions.list_cm_event_tags(
+                    "123", advertiser_id="1", campaign_id="2"
+                )
+            )
+            == 1
+        )
+        assert (
+            len(
+                cm360_actions.list_cm_ads(
+                    "123",
+                    advertiser_id="1",
+                    campaign_ids=["2"],
+                    placement_ids=["3"],
+                )
+            )
+            == 1
+        )

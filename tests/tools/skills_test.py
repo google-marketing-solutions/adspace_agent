@@ -13,6 +13,8 @@
 # limitations under the License.
 """Tests for the skills toolset."""
 
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
 from google.adk.skills import Frontmatter
@@ -167,3 +169,47 @@ async def test_skills_toolset_reload_with_errors(monkeypatch, tmp_path):
         # Verify skill-1 is still there, but bad-skill is not
         assert "skill-1" in toolset.skills_toolset._skills  # ruff:ignore[private-member-access]
         assert "bad-skill" not in toolset.skills_toolset._skills  # ruff:ignore[private-member-access]
+
+
+@pytest.mark.asyncio
+async def test_skills_toolset_gcs_and_local_errors_and_lifecycle(
+    monkeypatch, tmp_path
+):
+    """Tests GCS/local error paths, process_llm_request, and close."""
+    monkeypatch.setenv("SKILLS_BUCKET_NAME", "test-bucket")
+    monkeypatch.setenv("LOCAL_SKILLS_DIR", str(tmp_path))
+
+    with (
+        patch(
+            "adspace_agent.tools.skills.list_skills_in_gcs_dir",
+            side_effect=[
+                RuntimeError("GCS list error"),
+                {"bad-gcs-skill": None},
+            ],
+        ),
+        patch(
+            "adspace_agent.tools.skills.load_skill_from_gcs_dir",
+            side_effect=RuntimeError("GCS load error"),
+        ),
+        patch(
+            "adspace_agent.tools.skills.list_skills_in_dir",
+            side_effect=RuntimeError("Local list error"),
+        ),
+    ):
+        toolset = SkillsToolset()
+        res = toolset.reload_skills()
+        assert "GCS skill 'bad-gcs-skill' failed to load" in res
+        assert "Failed to list local skills" in res
+
+        toolset.skills_toolset.process_llm_request = AsyncMock()
+        toolset.skills_toolset.close = AsyncMock()
+        mock_ctx = MagicMock()
+        mock_req = MagicMock()
+        await toolset.process_llm_request(
+            tool_context=mock_ctx, llm_request=mock_req
+        )
+        toolset.skills_toolset.process_llm_request.assert_awaited_once_with(
+            tool_context=mock_ctx, llm_request=mock_req
+        )
+        await toolset.close()
+        toolset.skills_toolset.close.assert_awaited_once()

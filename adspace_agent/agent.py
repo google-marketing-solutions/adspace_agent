@@ -36,7 +36,6 @@ from google.adk.tools.google_api_tool.googleapi_to_openapi_converter import (
 from google.adk.tools.load_artifacts_tool import LoadArtifactsTool
 from google.adk.tools.openapi_tool import OpenAPIToolset
 from google.adk.tools.preload_memory_tool import PreloadMemoryTool
-from google_ads_adk.toolset import GoogleAdsToolset
 
 from .tools.cm360_trafficking.cm360_trafficking import (
     before_traffic_campaigns_in_cm360_tool_callback,
@@ -48,7 +47,6 @@ from .tools.data_analysis import DataAnalysisToolset
 from .tools.google_genai import GoogleGenAIToolset
 from .tools.skills import SkillsToolset
 from .tools.utilities import UtilitiesToolset
-from .utils import patch_auth  # ruff:ignore[unused-import]
 
 APP_NAME = "adspace_agent"
 
@@ -68,6 +66,7 @@ COMPACTION_EVENT_RETENTION_SIZE: int = int(
 CLIENT_ID: str = os.environ["CLIENT_ID"]
 CLIENT_SECRET: str = os.environ["CLIENT_SECRET"]
 
+GOOGLE_ADS_API_VERSION = "v25"
 GOOGLE_ADS_DEVELOPER_TOKEN: str = os.environ["GOOGLE_ADS_DEVELOPER_TOKEN"]
 GOOGLE_ADS_LOGIN_CUSTOMER_ID: str | None = os.environ.get(
     "GOOGLE_ADS_LOGIN_CUSTOMER_ID"
@@ -380,11 +379,23 @@ def create_agent() -> Agent:  # ruff:ignore[too-many-locals]
         ],
     )
 
-    google_ads_toolset = GoogleAdsToolset(
-        developer_token=GOOGLE_ADS_DEVELOPER_TOKEN,
+    google_ads_toolset = GoogleApiToolset(
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
-        login_customer_id=GOOGLE_ADS_LOGIN_CUSTOMER_ID,
+        api_name="googleads",
+        api_version=GOOGLE_ADS_API_VERSION,
+        discovery_url=(
+            "https://googleads.googleapis.com/$discovery/rest"
+            f"?version={GOOGLE_ADS_API_VERSION}"
+        ),
+        additional_headers={
+            "developer-token": GOOGLE_ADS_DEVELOPER_TOKEN,
+            **(
+                {"login-customer-id": GOOGLE_ADS_LOGIN_CUSTOMER_ID}
+                if GOOGLE_ADS_LOGIN_CUSTOMER_ID
+                else {}
+            ),
+        },
         tool_filter=GOOGLE_ADS_TOOL_FILTER,
     )
 

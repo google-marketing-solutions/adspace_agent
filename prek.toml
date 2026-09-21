@@ -18,86 +18,41 @@
 
 [[repos]]
 repo = "https://github.com/astral-sh/uv-pre-commit"
-rev = "0.12.3"
+rev = "0.12.17"
 hooks = [{ id = "uv-lock" }]
 
 [[repos]]
 repo = "https://github.com/google/pre-commit-tool-hooks"
 rev = "v1.2.5"
-hooks = [
-  {
-    id = "check-copyright",
-    args = [
-      "--custom_format",
-      '\.py$',
-      "",
-      "# ",
-      "",
-      "--custom_format",
-      '\.css$',
-      "/*",
-      " * ",
-      " */",
-      "--skip_pattern",
-      '.*\.md|LICENSE|.*\.toml|\.gitignore|\.git|uv\.lock|\.python-version|.*\.json|.*\.example|.*\.env'
-    ]
-  },
-  { id = "check-google-doc-style" },
-  { id = "check-links" }
-]
+hooks = [{ id = "check-copyright", args = ["--custom_format", '\.py$', "", "# ", "", "--custom_format", '\.css$', "/*", " * ", " */", "--skip_pattern", '.*\.md|LICENSE|.*\.toml|\.gitignore|\.git|uv\.lock|\.python-version|.*\.json|.*\.example|.*\.env'] }, { id = "check-google-doc-style" }, { id = "check-links" }]
 
 [[repos]]
 repo = "https://github.com/pre-commit/pre-commit-hooks"
 rev = "v6.0.0"
-hooks = [
-  { id = "check-executables-have-shebangs" },
-  { id = "check-json" },
-  { id = "check-merge-conflict" },
-  { id = "check-toml" },
-  { id = "check-yaml" },
-  { id = "debug-statements" },
-  { id = "end-of-file-fixer" },
-  { id = "mixed-line-ending" },
-  { id = "trailing-whitespace" }
-]
+hooks = [{ id = "check-executables-have-shebangs" }, { id = "check-json" }, { id = "check-merge-conflict" }, { id = "check-toml" }, { id = "check-yaml" }, { id = "debug-statements" }, { id = "end-of-file-fixer" }, { id = "mixed-line-ending" }, { id = "trailing-whitespace" }]
 
 [[repos]]
 repo = "https://github.com/astral-sh/ruff-pre-commit"
-rev = "v0.16.2"
+rev = "v0.16.8"
 hooks = [{ id = "ruff-check", args = ["--fix"] }, { id = "ruff-format" }]
 
 [[repos]]
 repo = "https://github.com/tombi-toml/tombi-pre-commit"
-rev = "v1.2.10"
-hooks = [{ id = "tombi-format" }, { id = "tombi-lint" }]
+rev = "v1.5.5"
+hooks = [{ id = "tombi-format", exclude = '^uv\.lock$' }, { id = "tombi-lint", exclude = '^uv\.lock$' }]
 
 [[repos]]
 repo = "https://github.com/rvben/rumdl-pre-commit"
-rev = "v0.2.53"
+rev = "v0.2.75"
 hooks = [{ id = "rumdl", args = ["--fail-on=error"] }]
 
 [[repos]]
 repo = "https://github.com/commitizen-tools/commitizen"
-rev = "v4.17.0"
+rev = "v4.18.1"
 hooks = [
   { id = "commitizen" },
 ]
 
 [[repos]]
 repo = "local"
-hooks = [
-  {
-    id = "ty-check",
-    name = "ty check",
-    entry = "uv run ty check",
-    language = "python",
-    pass_filenames = false
-  },
-  {
-    id = "pytest",
-    name = "pytest",
-    entry = "uv run pytest --cov --cov-fail-under=80",
-    language = "python",
-    pass_filenames = false
-  }
-]
+hooks = [{ id = "ty-check", name = "ty check", entry = "uv run ty check", language = "python", pass_filenames = false }, { id = "pytest", name = "pytest", entry = "uv run pytest --cov --cov-fail-under=80", language = "python", pass_filenames = false }]

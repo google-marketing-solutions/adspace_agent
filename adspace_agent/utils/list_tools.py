@@ -20,8 +20,6 @@ from typing import Any
 
 from google.adk.tools.google_api_tool import GoogleApiToolset
 from google.adk.tools.google_api_tool import YoutubeToolset
-from google_ads_adk.discovery_converter import DiscoveryConverter
-from google_ads_adk.toolset import GOOGLE_ADS_API_VERSION
 
 
 def list_tools(tools: list[Any]) -> None:
@@ -72,19 +70,20 @@ def main() -> None:
     client_secret = os.environ.get("CLIENT_SECRET", "dummy_client_secret")
 
     if args.type == "google_ads":
-        converter = DiscoveryConverter(
-            f"https://googleads.googleapis.com/$discovery/rest?version={GOOGLE_ADS_API_VERSION}"
+        from adspace_agent.agent import GOOGLE_ADS_API_VERSION  # ruff: ignore[import-outside-top-level]
+
+        toolset = GoogleApiToolset(
+            client_id=client_id,
+            client_secret=client_secret,
+            api_name="googleads",
+            api_version=GOOGLE_ADS_API_VERSION,
+            discovery_url=(
+                "https://googleads.googleapis.com/$discovery/rest"
+                f"?version={GOOGLE_ADS_API_VERSION}"
+            ),
         )
-        spec = converter.convert()
-        op_ids = []
-        for methods in spec.get("paths", {}).values():
-            for operation in methods.values():
-                op_id = operation.get("operationId")
-                if op_id:
-                    op_ids.append(op_id)
-        op_ids.sort()
-        for op_id in op_ids:
-            print(op_id)
+        tools = asyncio.run(toolset.get_tools())
+        list_tools(tools)
 
     elif args.type == "youtube":
         toolset = YoutubeToolset(

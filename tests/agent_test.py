@@ -113,7 +113,7 @@ def test_agent_tools(agent):
 
 
 def test_create_agent_with_env_vars():
-    """Test create_agent with specific environment variables."""
+    """Test create_agent applies ENABLED_TOOLSETS and GOOGLE_ADS_TOOL_FILTER."""
     with (
         patch.dict(
             "os.environ",
@@ -123,19 +123,35 @@ def test_create_agent_with_env_vars():
                 "GOOGLE_ADS_DEVELOPER_TOKEN": "test_token",
                 "GOOGLE_ADS_LOGIN_CUSTOMER_ID": "test_customer_id",
                 "GOOGLE_ADS_TOOL_FILTER": "tool1,tool2",
-                "ENABLED_TOOLSETS": "bid_manager,bigquery",
+                "ENABLED_TOOLSETS": "bid_manager,bigquery,google_ads",
             },
         ),
         patch(
             "adspace_agent.agent.GoogleApiToOpenApiConverter.convert",
             return_value=DUMMY_OPENAPI,
         ),
+        patch(
+            "adspace_agent.agent._create_campaign_manager_360_toolset",
+        ) as mock_cm360_factory,
     ):
         agent = create_agent()
         assert agent.name == "adspace_agent"
-        # We can't easily check internal variables of create_agent unless we
-        # expose them or check side effects.
-        # But this executes the lines in question.
+        # 5 core non-CM360 built-in tools + 3 enabled Google toolsets = 8 tools
+        expected_tool_count = 8
+        assert len(agent.tools) == expected_tool_count
+        assert agent.before_tool_callback is None
+        mock_cm360_factory.assert_not_called()
+
+        google_api_toolsets = [
+            t
+            for t in agent.tools
+            if isinstance(t, agent_module.GoogleApiToolset)
+        ]
+        expected_google_api_count = 2
+        assert len(google_api_toolsets) == expected_google_api_count
+        assert any(
+            t.tool_filter == ["tool1", "tool2"] for t in google_api_toolsets
+        )
 
 
 def test_create_agent_with_local_skills(tmp_path):

@@ -39,9 +39,9 @@ export GOOGLE_ADS_DEVELOPER_TOKEN=
 export GOOGLE_ADS_LOGIN_CUSTOMER_ID=
 
 # Optionals:
-# export MODEL=gemini-3.6-flash
-# export VEO_MODEL=veo-3.1-fast-generate-001
-# export IMAGEN_MODEL=imagen-4.0-fast-generate-001
+# export MODEL=gemini-3.8-flash
+# export VIDEO_MODEL=veo-3.1-fast-generate-001
+# export IMAGE_MODEL=gemini-3.1-flash-image
 # export ENABLED_TOOLSETS=bid_manager,bigquery,campaign_manager_360,display_video_360,drive,merchant_center_inventories,merchant_center_products,merchant_center_reports,search_ads_360,storage,youtube,google_ads,google_genai
 # export GOOGLE_ADS_TOOL_FILTER=googleads_customers_google_ads_search,googleads_google_ads_fields_search
 # export SKILLS_BUCKET_NAME="adspace-agent"
@@ -100,16 +100,22 @@ uv run list-tools google --api drive --version v3
 
 ## Configuring Your GCS Bucket for Agent Skills
 
-You can configure the agent to dynamically load custom skills from a Google Cloud Storage (GCS) bucket by setting the `SKILLS_BUCKET_NAME` environment variable (for example, `SKILLS_BUCKET_NAME={YOUR_SKILLS_BUCKET_NAME}`).
+You can configure the agent to dynamically load custom skills from a Google
+Cloud Storage (GCS) bucket by setting the `SKILLS_BUCKET_NAME` environment
+variable (for example, `SKILLS_BUCKET_NAME={YOUR_SKILLS_BUCKET_NAME}`).
 
 ### Required Bucket Folder Structure
 
-The agent expects a top-level `skills/` directory in your GCS bucket. Inside `skills/`, each skill must be placed in its own subfolder:
+The agent expects a top-level `skills/` directory in your GCS bucket. Inside
+`skills/`, each skill must be placed in its own subfolder:
 
-- The **name of the folder** must be the name of the skill in standard skill format (kebab-case, for example, `cm360-trafficking`).
-- The folder name **must exactly match** the `name` field declared in the YAML frontmatter of the `SKILL.md` file inside that folder.
+- The **name of the folder** must be the name of the skill in standard skill
+  format (kebab-case, for example, `cm360-trafficking`).
+- The folder name **must exactly match** the `name` field declared in the YAML
+  frontmatter of the `SKILL.md` file inside that folder.
 
-For example, for the `cm360-trafficking` skill, your bucket structure should look like this:
+For example, for the `cm360-trafficking` skill, your bucket structure should
+look like this:
 
 ```text
 gs://{YOUR_SKILLS_BUCKET_NAME}/
@@ -118,7 +124,8 @@ gs://{YOUR_SKILLS_BUCKET_NAME}/
         └── SKILL.md
 ```
 
-And the corresponding `SKILL.md` file inside `skills/cm360-trafficking/SKILL.md` must have matching frontmatter:
+And the corresponding `SKILL.md` file inside `skills/cm360-trafficking/SKILL.md`
+must have matching frontmatter:
 
 ```yaml
 ---
@@ -129,7 +136,11 @@ description: Use this skill ONLY when the user requests something related to tra
 
 ## Deployment
 
-To deploy the application, you can set your environment variables either through the Google Cloud Console or directly by way of the `gcloud run deploy` CLI command using `--set-env-vars`. Refer to the [Environment Variables](#environment-variables) section for details on each variable.
+To deploy the application, you can set your environment variables either through
+the Google Cloud Console or directly by way of the `gcloud run deploy` CLI
+command using `--set-env-vars`. Refer to the
+[Environment Variables](#environment-variables) section for details on each
+variable.
 
 You will also need the following APIs enabled:
 

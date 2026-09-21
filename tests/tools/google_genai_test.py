@@ -119,7 +119,7 @@ async def test_generate_video_success(mock_genai_client: mock.Mock):
     # Verify call arguments
     mock_genai_client.aio.models.generate_videos.assert_called_once()
     _, kwargs = mock_genai_client.aio.models.generate_videos.call_args
-    assert kwargs["model"] == google_genai.VEO_MODEL
+    assert kwargs["model"] == google_genai.VIDEO_MODEL
     assert kwargs["source"].prompt == "test_prompt"
 
     mock_tool_context.save_artifact.assert_called_once()
@@ -428,7 +428,7 @@ async def test_generate_image_success(mock_genai_client: mock.Mock):
     # Verify call arguments
     mock_genai_client.aio.models.generate_images.assert_called_once()
     _, kwargs = mock_genai_client.aio.models.generate_images.call_args
-    assert kwargs["model"] == "imagen-4.0-fast-generate-001"
+    assert kwargs["model"] == "gemini-3.1-flash-image"
     assert kwargs["prompt"] == "test_prompt"
 
     mock_tool_context.save_artifact.assert_called_once()

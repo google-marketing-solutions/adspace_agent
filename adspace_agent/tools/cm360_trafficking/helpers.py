@@ -22,10 +22,10 @@ from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 import pandas as pd
 
-from .cm360_actions import list_cm_ads
-from .cm360_actions import list_cm_creatives
-from .cm360_actions import list_cm_event_tags
-from .cm360_actions import list_cm_placements
+from .actions import list_cm_ads
+from .actions import list_cm_creatives
+from .actions import list_cm_event_tags
+from .actions import list_cm_placements
 from .utilities import format_date
 from .utilities import GLOBAL_METADATA_ROWS_COUNT
 from .utilities import load_raw_dataframe

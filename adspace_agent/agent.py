@@ -13,7 +13,9 @@
 # limitations under the License.
 """The AdSpace Agent main application."""
 
+from collections.abc import Callable
 import os
+import typing
 
 from dotenv import load_dotenv
 from google.adk.agents import Agent
@@ -28,6 +30,7 @@ from google.adk.models.google_llm import Gemini
 from google.adk.plugins.save_files_as_artifacts_plugin import (
     SaveFilesAsArtifactsPlugin,
 )
+from google.adk.tools.base_toolset import BaseToolset
 from google.adk.tools.google_api_tool import GoogleApiToolset
 from google.adk.tools.google_api_tool import YoutubeToolset
 from google.adk.tools.google_api_tool.googleapi_to_openapi_converter import (
@@ -37,73 +40,34 @@ from google.adk.tools.load_artifacts_tool import LoadArtifactsTool
 from google.adk.tools.openapi_tool import OpenAPIToolset
 from google.adk.tools.preload_memory_tool import PreloadMemoryTool
 
-from .tools.cm360_trafficking.cm360_trafficking import (
+from .config import APP_NAME
+from .config import CLIENT_ID
+from .config import CLIENT_SECRET
+from .config import COMPACTION_EVENT_RETENTION_SIZE
+from .config import COMPACTION_INTERVAL
+from .config import COMPACTION_OVERLAP_SIZE
+from .config import COMPACTION_TOKEN_THRESHOLD
+from .config import DISPLAY_VIDEO_360_TOOL_FILTER
+from .config import DRIVE_TOOL_FILTER
+from .config import get_enabled_toolsets
+from .config import get_google_ads_tool_filter
+from .config import GOOGLE_ADS_API_VERSION
+from .config import GOOGLE_ADS_DEVELOPER_TOKEN
+from .config import GOOGLE_ADS_LOGIN_CUSTOMER_ID
+from .config import MODEL
+from .config import STORAGE_TOOL_FILTER
+from .config import YOUTUBE_TOOL_FILTER
+from .tools.cm360_trafficking import (
     before_traffic_campaigns_in_cm360_tool_callback,
 )
-from .tools.cm360_trafficking.cm360_trafficking import (
-    CM360TraffickingParserToolset,
-)
+from .tools.cm360_trafficking import CM360TraffickingParserToolset
 from .tools.data_analysis import DataAnalysisToolset
 from .tools.google_genai import GoogleGenAIToolset
 from .tools.skills import SkillsToolset
 from .tools.utilities import UtilitiesToolset
 
-APP_NAME = "adspace_agent"
-
-MODEL: str = os.environ.get("MODEL", "gemini-3.8-flash")
-
-COMPACTION_INTERVAL: int = int(os.environ.get("COMPACTION_INTERVAL", "3"))
-COMPACTION_OVERLAP_SIZE: int = int(
-    os.environ.get("COMPACTION_OVERLAP_SIZE", "1")
-)
-COMPACTION_TOKEN_THRESHOLD: int = int(
-    os.environ.get("COMPACTION_TOKEN_THRESHOLD", "500000")
-)
-COMPACTION_EVENT_RETENTION_SIZE: int = int(
-    os.environ.get("COMPACTION_EVENT_RETENTION_SIZE", "3")
-)
-
-CLIENT_ID: str = os.environ["CLIENT_ID"]
-CLIENT_SECRET: str = os.environ["CLIENT_SECRET"]
-
-GOOGLE_ADS_API_VERSION = "v25"
-GOOGLE_ADS_DEVELOPER_TOKEN: str = os.environ["GOOGLE_ADS_DEVELOPER_TOKEN"]
-GOOGLE_ADS_LOGIN_CUSTOMER_ID: str | None = os.environ.get(
-    "GOOGLE_ADS_LOGIN_CUSTOMER_ID"
-)
-
-GOOGLE_ADS_TOOL_FILTER_ENV = os.environ.get("GOOGLE_ADS_TOOL_FILTER")
-GOOGLE_ADS_TOOL_FILTER: list[str] = (
-    [t.strip() for t in GOOGLE_ADS_TOOL_FILTER_ENV.split(",") if t.strip()]
-    if GOOGLE_ADS_TOOL_FILTER_ENV
-    else [
-        "googleads_customers_google_ads_search",
-        "googleads_google_ads_fields_search",
-    ]
-)
-
-ALL_GOOGLE_TOOLSETS = [
-    "bid_manager",
-    "bigquery",
-    "campaign_manager_360",
-    "display_video_360",
-    "drive",
-    "google_ads",
-    "google_genai",
-    "merchant_center_inventories",
-    "merchant_center_products",
-    "merchant_center_reports",
-    "search_ads_360",
-    "storage",
-    "youtube",
-]
-
-enabled_toolsets_env = os.environ.get("ENABLED_TOOLSETS")
-ENABLED_TOOLSETS: list[str] = (
-    [t.strip() for t in enabled_toolsets_env.split(",") if t.strip()]
-    if enabled_toolsets_env is not None
-    else ALL_GOOGLE_TOOLSETS
-)
+if typing.TYPE_CHECKING:
+    from google.adk.tools.base_tool import BaseTool
 
 
 async def auto_save_session_to_memory_callback(
@@ -117,38 +81,27 @@ async def auto_save_session_to_memory_callback(
     await callback_context.add_session_to_memory()
 
 
-def create_agent() -> Agent:  # ruff:ignore[too-many-locals]
-    """Creates and configures the AdSpace Agent.
+def _create_campaign_manager_360_toolset(
+    client_id: str,
+    client_secret: str,
+) -> GoogleApiToolset:
+    """Creates the Campaign Manager 360 toolset with patched OAuth scopes.
+
+    Args:
+        client_id: The OAuth client ID.
+        client_secret: The OAuth client secret.
 
     Returns:
-        Agent: The configured AdSpace Agent.
+        The configured Campaign Manager 360 GoogleApiToolset.
     """
-    _ = load_dotenv()
-
-    bid_manager_toolset = GoogleApiToolset(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        api_name="doubleclickbidmanager",
-        api_version="v2",
-    )
-
-    bigquery_toolset = BigQueryToolset(
-        credentials_config=BigQueryCredentialsConfig(
-            client_id=CLIENT_ID,
-            client_secret=CLIENT_SECRET,
-        )
-    )
-
-    campaign_manager_360_toolset = GoogleApiToolset(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
+    toolset = GoogleApiToolset(
+        client_id=client_id,
+        client_secret=client_secret,
         api_name="dfareporting",
         api_version="v5",
     )
-
-    # Overwrite the auto-selected scope for dfareporting to fix 401 error
     spec_dict = GoogleApiToOpenApiConverter("dfareporting", "v5").convert()
-    campaign_manager_360_toolset._openapi_toolset = OpenAPIToolset(  # ruff:ignore[private-member-access]
+    toolset._openapi_toolset = OpenAPIToolset(  # ruff:ignore[private-member-access]
         spec_dict=spec_dict,
         spec_str_type="yaml",
         auth_scheme=OpenIdConnectWithConfig(
@@ -168,274 +121,171 @@ def create_agent() -> Agent:  # ruff:ignore[too-many-locals]
             ],
         ),
     )
+    return toolset
 
-    display_video_360_toolset = GoogleApiToolset(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        api_name="displayvideo",
-        api_version="v4",
-        tool_filter=[
-            "displayvideo_advertisers_audit",
-            "displayvideo_advertisers_list",
-            "displayvideo_advertisers_get",
-            "displayvideo_advertisers_edit_assigned_targeting_options",
-            "displayvideo_advertisers_ad_assets_bulk_create",
-            "displayvideo_advertisers_ad_assets_list",
-            "displayvideo_advertisers_ad_assets_create",
-            "displayvideo_advertisers_ad_assets_get",
-            "displayvideo_advertisers_ad_assets_upload",
-            "displayvideo_advertisers_ad_group_ads_get",
-            "displayvideo_advertisers_ad_group_ads_list",
-            "displayvideo_advertisers_ad_groups_bulk_list_assigned_target",
-            "displayvideo_advertisers_ad_groups_get",
-            "displayvideo_advertisers_ad_groups_list",
-            "displayvideo_advertisers_assets_upload",
-            "displayvideo_advertisers_campaigns_list",
-            "displayvideo_advertisers_campaigns_create",
-            "displayvideo_advertisers_campaigns_get",
-            "displayvideo_advertisers_campaigns_patch",
-            "displayvideo_advertisers_campaigns_list_assigned_targeting_o",
-            "displayvideo_advertisers_channels_list",
-            "displayvideo_advertisers_channels_create",
-            "displayvideo_advertisers_channels_get",
-            "displayvideo_advertisers_channels_patch",
-            "displayvideo_advertisers_channels_sites_bulk_edit",
-            "displayvideo_advertisers_channels_sites_create",
-            "displayvideo_advertisers_channels_sites_list",
-            "displayvideo_advertisers_channels_sites_replace",
-            "displayvideo_advertisers_creatives_list",
-            "displayvideo_advertisers_creatives_create",
-            "displayvideo_advertisers_creatives_get",
-            "displayvideo_advertisers_creatives_patch",
-            "displayvideo_advertisers_insertion_orders_list",
-            "displayvideo_advertisers_insertion_orders_create",
-            "displayvideo_advertisers_insertion_orders_get",
-            "displayvideo_advertisers_insertion_orders_patch",
-            "displayvideo_advertisers_insertion_orders_list_assigned_targ",
-            "displayvideo_advertisers_invoices_list",
-            "displayvideo_advertisers_invoices_lookup_invoice_currency",
-            "displayvideo_advertisers_line_items_bulk_edit_assigned_targe",
-            "displayvideo_advertisers_line_items_bulk_update",
-            "displayvideo_advertisers_line_items_list",
-            "displayvideo_advertisers_line_items_create",
-            "displayvideo_advertisers_line_items_get",
-            "displayvideo_advertisers_line_items_patch",
-            "displayvideo_advertisers_line_items_duplicate",
-            "displayvideo_advertisers_line_items_generate_default",
-            "displayvideo_advertisers_location_lists_list",
-            "displayvideo_advertisers_location_lists_create",
-            "displayvideo_advertisers_location_lists_get",
-            "displayvideo_advertisers_location_lists_patch",
-            "displayvideo_advertisers_negative_keyword_lists_list",
-            "displayvideo_advertisers_negative_keyword_lists_create",
-            "displayvideo_advertisers_negative_keyword_lists_get",
-            "displayvideo_advertisers_negative_keyword_lists_patch",
-            "displayvideo_combined_audiences_get",
-            "displayvideo_combined_audiences_list",
-            "displayvideo_custom_bidding_algorithms_list",
-            "displayvideo_custom_bidding_algorithms_create",
-            "displayvideo_custom_bidding_algorithms_get",
-            "displayvideo_custom_bidding_algorithms_patch",
-            "displayvideo_custom_bidding_algorithms_upload_rules",
-            "displayvideo_custom_bidding_algorithms_upload_script",
-            "displayvideo_custom_bidding_algorithms_rules_list",
-            "displayvideo_custom_bidding_algorithms_rules_create",
-            "displayvideo_custom_bidding_algorithms_rules_get",
-            "displayvideo_custom_bidding_algorithms_scripts_list",
-            "displayvideo_custom_bidding_algorithms_scripts_create",
-            "displayvideo_custom_bidding_algorithms_scripts_get",
-            "displayvideo_custom_lists_get",
-            "displayvideo_custom_lists_list",
-            "displayvideo_first_party_and_partner_audiences_list",
-            "displayvideo_first_party_and_partner_audiences_create",
-            "displayvideo_first_party_and_partner_audiences_edit_customer",
-            "displayvideo_first_party_and_partner_audiences_get",
-            "displayvideo_first_party_and_partner_audiences_patch",
-            "displayvideo_floodlight_groups_get",
-            "displayvideo_floodlight_groups_patch",
-            "displayvideo_floodlight_groups_floodlight_activities_get",
-            "displayvideo_floodlight_groups_floodlight_activities_list",
-            "displayvideo_google_audiences_get",
-            "displayvideo_google_audiences_list",
-            "displayvideo_guaranteed_orders_list",
-            "displayvideo_guaranteed_orders_create",
-            "displayvideo_guaranteed_orders_edit_guaranteed_order_read_ac",
-            "displayvideo_guaranteed_orders_get",
-            "displayvideo_guaranteed_orders_patch",
-            "displayvideo_inventory_source_groups_list",
-            "displayvideo_inventory_source_groups_create",
-            "displayvideo_inventory_source_groups_get",
-            "displayvideo_inventory_source_groups_patch",
-            "displayvideo_inventory_sources_list",
-            "displayvideo_inventory_sources_create",
-            "displayvideo_inventory_sources_get",
-            "displayvideo_inventory_sources_patch",
-            "displayvideo_media_download",
-            "displayvideo_media_upload",
-            "displayvideo_partners_edit_assigned_targeting_options",
-            "displayvideo_partners_get",
-            "displayvideo_partners_list",
-            "displayvideo_partners_channels_list",
-            "displayvideo_partners_channels_create",
-            "displayvideo_partners_channels_get",
-            "displayvideo_partners_channels_patch",
-            "displayvideo_partners_channels_sites_bulk_edit",
-            "displayvideo_partners_channels_sites_create",
-            "displayvideo_partners_channels_sites_list",
-            "displayvideo_sdfdownloadtasks_create",
-            "displayvideo_sdfdownloadtasks_operations_get",
-            "displayvideo_sdfuploadtasks_operations_get",
-            "displayvideo_targeting_types_targeting_options_get",
-            "displayvideo_targeting_types_targeting_options_list",
-            "displayvideo_targeting_types_targeting_options_search",
-            "displayvideo_users_bulk_edit_assigned_user_roles",
-            "displayvideo_users_list",
-            "displayvideo_users_get",
-        ],
-    )
 
-    drive_toolset = GoogleApiToolset(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        api_name="drive",
-        api_version="v3",
-        tool_filter=[
-            "drive_drives_list",
-            "drive_drives_get",
-            "drive_files_list",
-            "drive_files_get",
-            "drive_files_download",
-            "drive_files_export",
-            "drive_permissions_list",
-            "drive_teamdrives_list",
-            "drive_teamdrives_get",
-        ],
-    )
+def _build_toolset_factories(
+    client_id: str,
+    client_secret: str,
+    google_ads_developer_token: str,
+    google_ads_login_customer_id: str | None,
+    google_ads_tool_filter: list[str] | None,
+) -> dict[str, Callable[[], BaseToolset]]:
+    """Builds lazy factory callables for each Google toolset.
 
-    merchant_center_inventories_toolset = GoogleApiToolset(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        api_name="merchantapi",
-        api_version="inventories_v1",
-    )
+    Args:
+        client_id: The OAuth client ID.
+        client_secret: The OAuth client secret.
+        google_ads_developer_token: The developer token for Google Ads API.
+        google_ads_login_customer_id: Optional login customer ID for Google Ads.
+        google_ads_tool_filter: Optional tool filter list for Google Ads.
 
-    merchant_center_products_toolset = GoogleApiToolset(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        api_name="merchantapi",
-        api_version="products_v1",
-    )
-
-    merchant_center_reports_toolset = GoogleApiToolset(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        api_name="merchantapi",
-        api_version="reports_v1",
-    )
-
-    search_ads_360_toolset = GoogleApiToolset(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        api_name="searchads360",
-        api_version="v0",
-    )
-
-    storage_toolset = GoogleApiToolset(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        api_name="storage",
-        api_version="v1",
-        tool_filter=[
-            "storage_buckets_get",
-            "storage_buckets_list",
-            "storage_folders_get",
-            "storage_folders_list",
-            "storage_objects_copy",
-            "storage_objects_get",
-            "storage_objects_list",
-        ],
-    )
-
-    youtube_toolset = YoutubeToolset(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        tool_filter=[
-            "youtube_activities_list",
-            "youtube_captions_list",
-            "youtube_captions_download",
-            "youtube_channels_list",
-            "youtube_comment_threads_list",
-            "youtube_comments_list",
-            "youtube_live_broadcasts_list",
-            "youtube_live_chat_messages_list",
-            "youtube_live_streams_list",
-            "youtube_search_list",
-            "youtube_subscriptions_list",
-            "youtube_super_chat_events_list",
-            "youtube_video_categories_list",
-            "youtube_videos_list",
-            "youtube_videos_get_rating",
-            "youtube_youtube_v3_live_chat_messages_stream",
-        ],
-    )
-
-    google_ads_toolset = GoogleApiToolset(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        api_name="googleads",
-        api_version=GOOGLE_ADS_API_VERSION,
-        discovery_url=(
-            "https://googleads.googleapis.com/$discovery/rest"
-            f"?version={GOOGLE_ADS_API_VERSION}"
+    Returns:
+        A mapping of toolset key to a zero-argument factory callable.
+    """
+    return {
+        "bid_manager": lambda: GoogleApiToolset(
+            client_id=client_id,
+            client_secret=client_secret,
+            api_name="doubleclickbidmanager",
+            api_version="v2",
         ),
-        additional_headers={
-            "developer-token": GOOGLE_ADS_DEVELOPER_TOKEN,
-            **(
-                {"login-customer-id": GOOGLE_ADS_LOGIN_CUSTOMER_ID}
-                if GOOGLE_ADS_LOGIN_CUSTOMER_ID
-                else {}
+        "bigquery": lambda: BigQueryToolset(
+            credentials_config=BigQueryCredentialsConfig(
+                client_id=client_id,
+                client_secret=client_secret,
+            )
+        ),
+        "campaign_manager_360": lambda: _create_campaign_manager_360_toolset(
+            client_id=client_id,
+            client_secret=client_secret,
+        ),
+        "display_video_360": lambda: GoogleApiToolset(
+            client_id=client_id,
+            client_secret=client_secret,
+            api_name="displayvideo",
+            api_version="v4",
+            tool_filter=DISPLAY_VIDEO_360_TOOL_FILTER,
+        ),
+        "drive": lambda: GoogleApiToolset(
+            client_id=client_id,
+            client_secret=client_secret,
+            api_name="drive",
+            api_version="v3",
+            tool_filter=DRIVE_TOOL_FILTER,
+        ),
+        "google_ads": lambda: GoogleApiToolset(
+            client_id=client_id,
+            client_secret=client_secret,
+            api_name="googleads",
+            api_version=GOOGLE_ADS_API_VERSION,
+            discovery_url=(
+                "https://googleads.googleapis.com/$discovery/rest"
+                f"?version={GOOGLE_ADS_API_VERSION}"
             ),
-        },
-        tool_filter=GOOGLE_ADS_TOOL_FILTER,
-    )
-
-    google_genai_toolset = GoogleGenAIToolset()
-
-    tools = []
-    toolset_map = {
-        "bid_manager": bid_manager_toolset,
-        "bigquery": bigquery_toolset,
-        "campaign_manager_360": campaign_manager_360_toolset,
-        "display_video_360": display_video_360_toolset,
-        "drive": drive_toolset,
-        "google_ads": google_ads_toolset,
-        "google_genai": google_genai_toolset,
-        "merchant_center_inventories": merchant_center_inventories_toolset,
-        "merchant_center_products": merchant_center_products_toolset,
-        "merchant_center_reports": merchant_center_reports_toolset,
-        "search_ads_360": search_ads_360_toolset,
-        "storage": storage_toolset,
-        "youtube": youtube_toolset,
+            additional_headers={
+                "developer-token": google_ads_developer_token,
+                **(
+                    {"login-customer-id": google_ads_login_customer_id}
+                    if google_ads_login_customer_id
+                    else {}
+                ),
+            },
+            tool_filter=google_ads_tool_filter,
+        ),
+        "google_genai": GoogleGenAIToolset,
+        "merchant_center_inventories": lambda: GoogleApiToolset(
+            client_id=client_id,
+            client_secret=client_secret,
+            api_name="merchantapi",
+            api_version="inventories_v1",
+        ),
+        "merchant_center_products": lambda: GoogleApiToolset(
+            client_id=client_id,
+            client_secret=client_secret,
+            api_name="merchantapi",
+            api_version="products_v1",
+        ),
+        "merchant_center_reports": lambda: GoogleApiToolset(
+            client_id=client_id,
+            client_secret=client_secret,
+            api_name="merchantapi",
+            api_version="reports_v1",
+        ),
+        "search_ads_360": lambda: GoogleApiToolset(
+            client_id=client_id,
+            client_secret=client_secret,
+            api_name="searchads360",
+            api_version="v0",
+        ),
+        "storage": lambda: GoogleApiToolset(
+            client_id=client_id,
+            client_secret=client_secret,
+            api_name="storage",
+            api_version="v1",
+            tool_filter=STORAGE_TOOL_FILTER,
+        ),
+        "youtube": lambda: YoutubeToolset(
+            client_id=client_id,
+            client_secret=client_secret,
+            tool_filter=YOUTUBE_TOOL_FILTER,
+        ),
     }
 
-    # Add special tools that are not in the map
-    tools.extend([
+
+def create_agent() -> Agent:
+    """Creates and configures the AdSpace Agent.
+
+    Returns:
+        Agent: The configured AdSpace Agent.
+    """
+    _ = load_dotenv()
+
+    client_id = os.environ.get("CLIENT_ID", CLIENT_ID)
+    client_secret = os.environ.get("CLIENT_SECRET", CLIENT_SECRET)
+    google_ads_developer_token = os.environ.get(
+        "GOOGLE_ADS_DEVELOPER_TOKEN", GOOGLE_ADS_DEVELOPER_TOKEN
+    )
+    google_ads_login_customer_id = os.environ.get(
+        "GOOGLE_ADS_LOGIN_CUSTOMER_ID", GOOGLE_ADS_LOGIN_CUSTOMER_ID
+    )
+    model_name = os.environ.get("MODEL", MODEL)
+
+    enabled_toolsets = get_enabled_toolsets()
+    google_ads_tool_filter = get_google_ads_tool_filter()
+
+    toolset_factories = _build_toolset_factories(
+        client_id=client_id,
+        client_secret=client_secret,
+        google_ads_developer_token=google_ads_developer_token,
+        google_ads_login_customer_id=google_ads_login_customer_id,
+        google_ads_tool_filter=google_ads_tool_filter,
+    )
+
+    tools: list[BaseTool | BaseToolset] = [
         DataAnalysisToolset(),
         PreloadMemoryTool(),
         UtilitiesToolset(),
         LoadArtifactsTool(),
-        CM360TraffickingParserToolset(),
         SkillsToolset(),
-    ])
+    ]
+    if "campaign_manager_360" in enabled_toolsets:
+        tools.append(CM360TraffickingParserToolset())
 
-    for key, toolset in toolset_map.items():
-        if key in ENABLED_TOOLSETS:
-            tools.append(toolset)
+    for key, factory in toolset_factories.items():
+        if key in enabled_toolsets:
+            tools.append(factory())
+
+    before_tool_callback = (
+        before_traffic_campaigns_in_cm360_tool_callback
+        if "campaign_manager_360" in enabled_toolsets
+        else None
+    )
 
     return Agent(
         name=APP_NAME,
         model=Gemini(
-            model=MODEL,
+            model=model_name,
         ),
         description=(
             "AdSpace Agent is designed to provide a standardized way to "
@@ -460,7 +310,7 @@ def create_agent() -> Agent:  # ruff:ignore[too-many-locals]
             "for these policies, simply reply with the error message."
         ),
         tools=tools,
-        before_tool_callback=before_traffic_campaigns_in_cm360_tool_callback,
+        before_tool_callback=before_tool_callback,
         after_agent_callback=auto_save_session_to_memory_callback,
     )
 
@@ -477,13 +327,28 @@ app = App(
     ),
     events_compaction_config=EventsCompactionConfig(
         # Trigger compaction every N new invocations.
-        compaction_interval=COMPACTION_INTERVAL,
+        compaction_interval=int(
+            os.environ.get("COMPACTION_INTERVAL", str(COMPACTION_INTERVAL))
+        ),
         # Include N last invocations from the previous window.
-        overlap_size=COMPACTION_OVERLAP_SIZE,
+        overlap_size=int(
+            os.environ.get(
+                "COMPACTION_OVERLAP_SIZE", str(COMPACTION_OVERLAP_SIZE)
+            )
+        ),
         # Trigger compaction when token threshold is reached.
-        token_threshold=COMPACTION_TOKEN_THRESHOLD,
+        token_threshold=int(
+            os.environ.get(
+                "COMPACTION_TOKEN_THRESHOLD", str(COMPACTION_TOKEN_THRESHOLD)
+            )
+        ),
         # Retain N raw events.
-        event_retention_size=COMPACTION_EVENT_RETENTION_SIZE,
+        event_retention_size=int(
+            os.environ.get(
+                "COMPACTION_EVENT_RETENTION_SIZE",
+                str(COMPACTION_EVENT_RETENTION_SIZE),
+            )
+        ),
     ),
     plugins=[SaveFilesAsArtifactsPlugin()],
 )

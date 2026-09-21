@@ -21,6 +21,8 @@ from typing import Any
 from google.adk.tools.google_api_tool import GoogleApiToolset
 from google.adk.tools.google_api_tool import YoutubeToolset
 
+from adspace_agent.config import GOOGLE_ADS_API_VERSION
+
 
 def list_tools(tools: list[Any]) -> None:
     """Helper to sort and print tool names."""
@@ -70,8 +72,6 @@ def main() -> None:
     client_secret = os.environ.get("CLIENT_SECRET", "dummy_client_secret")
 
     if args.type == "google_ads":
-        from adspace_agent.agent import GOOGLE_ADS_API_VERSION  # ruff: ignore[import-outside-top-level]
-
         toolset = GoogleApiToolset(
             client_id=client_id,
             client_secret=client_secret,

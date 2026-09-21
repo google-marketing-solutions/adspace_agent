@@ -18,13 +18,12 @@ import pathlib
 import typing
 
 from dotenv import load_dotenv
+import vertexai
 from vertexai import agent_engines
 
-from adspace_agent.agent import root_agent
+from adspace_agent.agent import create_agent
 
-load_dotenv()
-
-import vertexai  # ruff:ignore[module-import-not-at-top-of-file]
+_ = load_dotenv()
 
 
 def _load_requirements(path: pathlib.Path) -> list[str]:
@@ -50,6 +49,7 @@ def _load_requirements(path: pathlib.Path) -> list[str]:
 
 def main() -> None:
     """Main entry point to deploy the agent to Agent Engine."""
+    _ = load_dotenv()
     vertexai.init(
         project=os.getenv("GOOGLE_CLOUD_PROJECT"),
         location="us-central1",
@@ -57,7 +57,7 @@ def main() -> None:
     )
 
     app = agent_engines.AdkApp(
-        agent=root_agent,
+        agent=create_agent(),
         enable_tracing=True,
         app_name="adspace-agent",
     )

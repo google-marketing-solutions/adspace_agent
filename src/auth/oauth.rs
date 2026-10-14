@@ -29,7 +29,6 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::sync::RwLock;
 
 use super::AccessTokenProvider;
 
@@ -110,11 +109,26 @@ impl OAuthToken {
 
     /// Whether the token covers every requested scope.
     ///
-    /// Tokens whose granted scopes are unknown (empty) are assumed to cover
-    /// everything, matching how pre-seeded refresh tokens behave.
+    /// A granted scope covers itself and its read-only variant (a session
+    /// that granted `drive` is not asked again for `drive.readonly`). Tokens
+    /// whose granted scopes are unknown (empty) are assumed to cover
+    /// everything.
     pub fn covers(&self, scopes: &[String]) -> bool {
-        self.scopes.is_empty() || scopes.iter().all(|s| self.scopes.iter().any(|g| g == s))
+        self.scopes.is_empty()
+            || scopes.iter().all(|needed| {
+                self.scopes
+                    .iter()
+                    .any(|granted| scope_covers(granted, needed))
+            })
     }
+}
+
+/// Whether a granted scope satisfies a needed one.
+fn scope_covers(granted: &str, needed: &str) -> bool {
+    granted == needed
+        || needed
+            .strip_prefix(granted)
+            .is_some_and(|rest| matches!(rest, ".readonly" | ".read_only" | ".read-only"))
 }
 
 /// Raw token endpoint response.
@@ -158,6 +172,8 @@ impl TokenResponse {
 pub struct AuthRequired {
     /// URL the user must open to grant access.
     pub auth_url: String,
+    /// Scopes the link asks for (only what the calling tool needs).
+    pub scopes: Vec<String>,
     /// Human-readable instructions.
     pub message: String,
 }
@@ -169,6 +185,7 @@ impl AuthRequired {
             "status": "AUTH_REQUIRED",
             "pending": true,
             "auth_url": self.auth_url,
+            "scopes": self.scopes,
             "message": self.message,
         })
     }
@@ -334,6 +351,10 @@ impl std::fmt::Display for SessionRef {
 struct StateClaims {
     #[serde(flatten)]
     session: SessionRef,
+    /// Scopes the link asked for (fallback when the token response omits
+    /// `scope`).
+    #[serde(default)]
+    scopes: Vec<String>,
     /// Issued-at (Unix seconds).
     iat: i64,
     /// Random nonce so repeated authorizations of one session differ.
@@ -355,13 +376,15 @@ fn unb64(text: &str) -> anyhow::Result<Vec<u8>> {
 /// credential store. The OAuth `state` parameter is a signed, short-lived
 /// claim naming the session, so the redirect handler can write the exchanged
 /// tokens straight into that session without any server-side pending map.
+///
+/// Authorization is least-privilege: a consent link asks only for the scopes
+/// the calling tool needs. When a later tool needs more, Google's incremental
+/// authorization (`include_granted_scopes=true`) adds the new scope to the
+/// grants the session already has.
 pub struct SessionCredentialManager {
     flow: GoogleOAuthFlow,
     /// HMAC key for the `state` parameter (derived from the client secret).
     state_key: [u8; 32],
-    /// Scopes every authorization asks for (union of all enabled toolsets),
-    /// so one consent covers the whole agent.
-    base_scopes: RwLock<Vec<String>>,
 }
 
 impl std::fmt::Debug for SessionCredentialManager {
@@ -381,28 +404,12 @@ impl SessionCredentialManager {
         Self {
             flow,
             state_key: hasher.finalize().into(),
-            base_scopes: RwLock::new(Vec::new()),
         }
     }
 
     /// The OAuth flow (for building URLs in UIs).
     pub fn flow(&self) -> &GoogleOAuthFlow {
         &self.flow
-    }
-
-    /// Registers scopes that every consent screen should include.
-    pub async fn register_scopes(&self, scopes: &[String]) {
-        let mut base = self.base_scopes.write().await;
-        for scope in scopes {
-            if !base.contains(scope) {
-                base.push(scope.clone());
-            }
-        }
-    }
-
-    /// Scopes requested on every consent screen.
-    pub async fn registered_scopes(&self) -> Vec<String> {
-        self.base_scopes.read().await.clone()
     }
 
     /// The token stored in the session state, if any (no refresh performed).
@@ -459,7 +466,7 @@ impl SessionCredentialManager {
                 tracing::info!(
                     "Credentials of session {session} lack required scopes; requesting re-authorization"
                 );
-                return Err(self.begin_authorization(&session, scopes).await.into());
+                return Err(self.begin_authorization(&session, scopes).into());
             }
             if !token.is_expired() {
                 return Ok(token.access_token);
@@ -479,40 +486,49 @@ impl SessionCredentialManager {
                 }
             }
         }
-        Err(self.begin_authorization(&session, scopes).await.into())
+        Err(self.begin_authorization(&session, scopes).into())
     }
 
-    /// Starts an authorization for `session`, returning the instructions.
-    pub async fn begin_authorization(
-        &self,
-        session: &SessionRef,
-        scopes: &[String],
-    ) -> AuthRequired {
+    /// Starts an authorization for `session` asking for exactly `scopes`
+    /// (least privilege), returning the instructions.
+    pub fn begin_authorization(&self, session: &SessionRef, scopes: &[String]) -> AuthRequired {
+        let unavailable = |message: &str| AuthRequired {
+            auth_url: String::new(),
+            scopes: Vec::new(),
+            message: message.to_string(),
+        };
         if !self.flow.config.is_configured() {
-            return AuthRequired {
-                auth_url: String::new(),
-                message: "Google OAuth is not configured: set CLIENT_ID and CLIENT_SECRET and restart the agent.".to_string(),
-            };
+            return unavailable(
+                "Google OAuth is not configured: set CLIENT_ID and CLIENT_SECRET and restart the agent.",
+            );
         }
         if session.session_id.is_empty() {
-            return AuthRequired {
-                auth_url: String::new(),
-                message: "Google authorization needs an active chat session.".to_string(),
-            };
+            return unavailable("Google authorization needs an active chat session.");
         }
-        let mut all_scopes = self.registered_scopes().await;
+        let mut requested: Vec<String> = Vec::new();
         for scope in scopes {
-            if !all_scopes.contains(scope) {
-                all_scopes.push(scope.clone());
+            if !requested.contains(scope) {
+                requested.push(scope.clone());
             }
+        }
+        if requested.is_empty() {
+            return unavailable(
+                "This tool declares no OAuth scope, so no authorization can be requested for it.",
+            );
         }
         let auth_url = self
             .flow
-            .authorization_url(&all_scopes, &self.sign_state(session));
+            .authorization_url(&requested, &self.sign_state(session, &requested));
+        let names: Vec<&str> = requested
+            .iter()
+            .map(|s| s.rsplit('/').next().unwrap_or(s))
+            .collect();
         AuthRequired {
             auth_url: auth_url.clone(),
+            scopes: requested.clone(),
             message: format!(
-                "Authorization required: ask the user to open this link, sign in with the Google account that has access, grant the requested permissions, and then say \"done\" so the request can be retried: {auth_url}"
+                "Authorization required for this chat session (requested access: {}). Ask the user to open this link, sign in with the Google account that has access, grant the permission, and then say \"done\" so the request can be retried: {auth_url}",
+                names.join(", ")
             ),
         }
     }
@@ -530,10 +546,9 @@ impl SessionCredentialManager {
         state: &str,
         code: &str,
     ) -> anyhow::Result<(SessionRef, OAuthToken)> {
-        let session = self.verify_state(state)?;
-        let scopes = self.registered_scopes().await;
-        let token = self.flow.exchange_code(code, &scopes).await?;
-        Ok((session, token))
+        let claims = self.verify_state(state)?;
+        let token = self.flow.exchange_code(code, &claims.scopes).await?;
+        Ok((claims.session, token))
     }
 
     /// Stores `token` in the state of `session` by appending a state-only
@@ -571,10 +586,11 @@ impl SessionCredentialManager {
         HmacSha256::new_from_slice(&self.state_key).expect("HMAC accepts any key length")
     }
 
-    /// Builds the signed `state` parameter naming `session`.
-    fn sign_state(&self, session: &SessionRef) -> String {
+    /// Builds the signed `state` parameter naming `session` and `scopes`.
+    fn sign_state(&self, session: &SessionRef, scopes: &[String]) -> String {
         let claims = StateClaims {
             session: session.clone(),
+            scopes: scopes.to_vec(),
             iat: Utc::now().timestamp(),
             nonce: uuid::Uuid::new_v4().simple().to_string(),
         };
@@ -584,8 +600,8 @@ impl SessionCredentialManager {
         format!("{payload}.{}", b64(&mac.finalize().into_bytes()))
     }
 
-    /// Validates a `state` parameter and returns the session it names.
-    fn verify_state(&self, state: &str) -> anyhow::Result<SessionRef> {
+    /// Validates a `state` parameter and returns its claims.
+    fn verify_state(&self, state: &str) -> anyhow::Result<StateClaims> {
         let invalid = || {
             anyhow::anyhow!(
                 "Invalid or expired OAuth state parameter; please restart the authorization from the chat."
@@ -602,7 +618,7 @@ impl SessionCredentialManager {
         if age < -60 || age > PENDING_TTL.as_secs() as i64 {
             return Err(invalid());
         }
-        Ok(claims.session)
+        Ok(claims)
     }
 }
 
@@ -830,10 +846,36 @@ mod tests {
     }
 
     #[test]
+    fn a_full_scope_covers_its_read_only_variant_only() {
+        let drive = "https://www.googleapis.com/auth/drive";
+        let token = OAuthToken {
+            access_token: "a".into(),
+            refresh_token: None,
+            expires_at: None,
+            scopes: vec![drive.to_string()],
+        };
+        assert!(token.covers(&[format!("{drive}.readonly")]));
+        assert!(token.covers(&[drive.to_string()]));
+        assert!(
+            !token.covers(&[format!("{drive}.file")]),
+            "narrower, but not read-only"
+        );
+        assert!(!token.covers(&["https://www.googleapis.com/auth/youtube".to_string()]));
+        // The reverse never holds: read-only does not grant writes.
+        let read_only = OAuthToken {
+            scopes: vec![format!("{drive}.readonly")],
+            ..token
+        };
+        assert!(!read_only.covers(&[drive.to_string()]));
+    }
+
+    #[test]
     fn state_parameter_round_trips_and_rejects_tampering() {
         let manager = manager();
-        let state = manager.sign_state(&session());
-        assert_eq!(manager.verify_state(&state).unwrap(), session());
+        let state = manager.sign_state(&session(), &["s1".to_string()]);
+        let claims = manager.verify_state(&state).unwrap();
+        assert_eq!(claims.session, session());
+        assert_eq!(claims.scopes, vec!["s1".to_string()]);
 
         // A different client secret yields a different key.
         let other = SessionCredentialManager::new(GoogleOAuthFlow::new(OAuthClientConfig {
@@ -853,6 +895,7 @@ mod tests {
         // Expired claims are rejected even with a valid signature.
         let old = StateClaims {
             session: session(),
+            scopes: Vec::new(),
             iat: Utc::now().timestamp() - PENDING_TTL.as_secs() as i64 - 1,
             nonce: "n".into(),
         };
@@ -864,28 +907,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn requests_authorization_bound_to_the_session_when_no_token() {
+    async fn requests_only_the_tools_scopes_bound_to_the_session() {
         let manager = manager();
-        manager.register_scopes(&["base-scope".to_string()]).await;
         let ctx = FakeToolContext::with_state(&[]);
         let err = manager
-            .access_token(ctx.as_ref(), &["tool-scope".to_string()])
+            .access_token(
+                ctx.as_ref(),
+                &["tool-scope".to_string(), "tool-scope".to_string()],
+            )
             .await
             .unwrap_err();
         let required = auth_required(&err).expect("AuthRequired error");
-        assert!(required.auth_url.contains("scope=base-scope+tool-scope"));
-        assert_eq!(required.to_tool_response()["status"], "AUTH_REQUIRED");
-        assert_eq!(
-            manager
-                .verify_state(&state_param(&required.auth_url))
-                .unwrap(),
-            session()
-        );
+        // Least privilege: exactly the (deduplicated) scopes of the call.
+        assert!(required.auth_url.contains("&scope=tool-scope&"));
+        assert_eq!(required.scopes, vec!["tool-scope".to_string()]);
+        let response = required.to_tool_response();
+        assert_eq!(response["status"], "AUTH_REQUIRED");
+        assert_eq!(response["scopes"], json!(["tool-scope"]));
+        assert!(required.message.contains("requested access: tool-scope"));
+        let claims = manager
+            .verify_state(&state_param(&required.auth_url))
+            .unwrap();
+        assert_eq!(claims.session, session());
+        assert_eq!(claims.scopes, vec!["tool-scope".to_string()]);
         assert!(
             manager
                 .complete_authorization("nope", "code")
                 .await
                 .is_err()
+        );
+        // A tool without scopes cannot be authorized.
+        let err = manager.access_token(ctx.as_ref(), &[]).await.unwrap_err();
+        assert!(
+            auth_required(&err)
+                .unwrap()
+                .message
+                .contains("declares no OAuth scope")
         );
     }
 

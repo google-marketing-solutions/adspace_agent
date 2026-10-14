@@ -94,12 +94,19 @@ called on behalf of the signed-in user, and the credentials belong to the
 4. The user tells the agent to continue; the tool reads the token from the
    session state (refreshing it when expired) and calls the API.
 
-Add that redirect URI to the OAuth client in the Google Cloud Console. One
-consent covers every enabled toolset (incremental authorization is used when a
-new scope is needed). A new session starts without credentials; tokens are
-persisted with the session (so they survive restarts with
-`SESSION_SERVICE_URI=sqlite://...`) and disappear with it. There is no
-server-side token store.
+Add that redirect URI to the OAuth client in the Google Cloud Console.
+
+Authorization is **least privilege**: a consent link asks only for the scope
+the calling tool needs — each Discovery tool picks the narrowest scope its own
+method accepts (`youtube.readonly` for `youtube_videos_list`,
+`drive.readonly` for `drive_files_get`, `devstorage.read_only` for
+`storage_objects_get`, `dfatrafficking` for CM360 trafficking, ...). When a
+later tool needs more, Google's incremental authorization adds the new scope
+to what the session already granted, so you are only ever asked for the
+difference. `cargo run -- list-tools all --scopes` prints the scope of every
+tool. A new session starts without credentials; tokens are persisted with the
+session (so they survive restarts with `SESSION_SERVICE_URI=sqlite://...`) and
+disappear with it. There is no server-side token store.
 
 ## Exploring Available Tools
 

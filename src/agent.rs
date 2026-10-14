@@ -56,13 +56,6 @@ FILES: files the user uploads are saved as session artifacts; use `list_user_fil
 RESEARCH: use `google_search` for current information from the web, `url_context` to read pages the user links to, and \
 `google_maps` for places, routes and local context.";
 
-/// CM360 OAuth scopes (the Python agent patched the Discovery default).
-pub const CM360_SCOPES: [&str; 3] = [
-    "https://www.googleapis.com/auth/dfareporting",
-    "https://www.googleapis.com/auth/dfatrafficking",
-    "https://www.googleapis.com/auth/ddmconversions",
-];
-
 /// Everything needed to run the agent (console, server or Agent Engine).
 pub struct AgentRuntime {
     /// Resolved settings.
@@ -134,9 +127,11 @@ pub fn google_api_toolset_configs(settings: &Settings) -> Vec<GoogleApiToolsetCo
             "bid_manager" => {
                 GoogleApiToolsetConfig::new("bid_manager", "doubleclickbidmanager", "v2")
             }
+            // No scope override (the Python agent needed one because the ADK
+            // took the API's first scope): each method's own Discovery scope
+            // is used, so trafficking calls ask for `dfatrafficking` only.
             "campaign_manager_360" => {
                 GoogleApiToolsetConfig::new("campaign_manager_360", "dfareporting", "v5")
-                    .with_scopes(CM360_SCOPES)
             }
             "display_video_360" => {
                 GoogleApiToolsetConfig::new("display_video_360", "displayvideo", "v4")
@@ -439,14 +434,10 @@ pub async fn create_agent(
             credentials: credentials.clone(),
             api_override: None,
         })));
-        credentials
-            .register_scopes(&CM360_SCOPES.map(str::to_string))
-            .await;
     }
 
     let mut deferred: Vec<LazyToolsetEntry> = Vec::new();
     for toolset in load_google_api_toolsets(settings, &credentials).await {
-        credentials.register_scopes(toolset.scopes()).await;
         if settings.lazy_toolsets.iter().any(|n| n == toolset.name()) {
             deferred.push(LazyToolsetEntry {
                 name: toolset.name().to_string(),
@@ -665,7 +656,10 @@ mod tests {
             ads.additional_headers
                 .contains(&("login-customer-id".to_string(), "123".to_string()))
         );
-        assert_eq!(configs[2].scopes.as_ref().unwrap().len(), 3);
+        assert!(
+            configs[2].scopes.is_none(),
+            "CM360 tools pick their own least-privilege scope"
+        );
         assert_eq!(
             configs[1].tool_filter.as_ref().unwrap().len(),
             DRIVE_TOOL_FILTER.len()

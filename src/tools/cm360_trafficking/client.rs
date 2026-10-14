@@ -22,11 +22,10 @@ use crate::auth::SharedTokenProvider;
 pub const DFAREPORTING_BASE_URL: &str = "https://dfareporting.googleapis.com/dfareporting/v5";
 
 /// OAuth 2.0 scopes required by the CM360 trafficking tools.
-pub const SCOPES: [&str; 3] = [
-    "https://www.googleapis.com/auth/dfatrafficking",
-    "https://www.googleapis.com/auth/dfareporting",
-    "https://www.googleapis.com/auth/ddmconversions",
-];
+///
+/// Everything the tools touch (placements, creatives, event tags, ads) is a
+/// `dfatrafficking` method, so that is the only scope a session is asked for.
+pub const SCOPES: [&str; 1] = ["https://www.googleapis.com/auth/dfatrafficking"];
 
 /// Page size used for paginated list calls.
 const MAX_RESULTS: &str = "1000";
@@ -1128,6 +1127,6 @@ mod tests {
         let local = client("http://localhost:1/");
         assert_eq!(local.base_url, "http://localhost:1");
         assert!(format!("{local:?}").contains("http://localhost:1"));
-        assert_eq!(SCOPES.len(), 3);
+        assert_eq!(SCOPES, ["https://www.googleapis.com/auth/dfatrafficking"]);
     }
 }

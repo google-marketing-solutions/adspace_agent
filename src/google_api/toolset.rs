@@ -25,8 +25,9 @@ pub struct GoogleApiToolsetConfig {
     pub tool_filter: Option<Vec<String>>,
     /// Extra HTTP headers sent with every request (e.g. `developer-token`).
     pub additional_headers: Vec<(String, String)>,
-    /// OAuth scopes to request. Defaults to the first scope declared by the
-    /// API (the Python ADK behaviour) when `None`.
+    /// OAuth scopes to request for every tool of the toolset. When `None`,
+    /// each tool requests the least-privileged scope its own method accepts
+    /// (see [`least_privilege_scope`]).
     pub scopes: Option<Vec<String>>,
     /// Optional prefix prepended to every tool name.
     pub tool_name_prefix: Option<String>,
@@ -103,8 +104,62 @@ impl GoogleApiToolsetConfig {
 struct ToolShared {
     http: reqwest::Client,
     credentials: Arc<SessionCredentialManager>,
-    scopes: Vec<String>,
     additional_headers: Vec<(String, String)>,
+}
+
+/// Markers that identify a read-only scope (`drive.readonly`,
+/// `devstorage.read_only`, `cloud-platform.read-only`).
+const READ_ONLY_MARKERS: [&str; 3] = [".readonly", ".read_only", ".read-only"];
+
+/// Scopes that are far broader than any single API (or reserved for content
+/// partners) and are only chosen when a method accepts nothing else.
+fn is_umbrella_scope(scope: &str) -> bool {
+    let name = scope.rsplit('/').next().unwrap_or(scope);
+    name.starts_with("cloud-platform")
+        || name.ends_with("full_control")
+        || name.starts_with("youtubepartner")
+}
+
+/// The scope with the read-only marker removed (`drive.readonly` -> `drive`).
+fn scope_stem(scope: &str) -> &str {
+    READ_ONLY_MARKERS
+        .iter()
+        .find_map(|m| scope.strip_suffix(m))
+        .unwrap_or(scope)
+}
+
+/// Picks the least-privileged scope that authorizes a method.
+///
+/// Discovery lists, per method, the scopes any one of which is sufficient.
+/// Preference: a read-only scope whenever the method accepts one; then
+/// anything that is not an umbrella scope; within a group the most general
+/// stem (`drive.readonly` over `drive.metadata.readonly`), Discovery order
+/// breaking ties. Methods that declare no scopes fall back to the API's list.
+pub fn least_privilege_scope(method_scopes: &[String], api_scopes: &[String]) -> Option<String> {
+    let candidates: &[String] = if method_scopes.is_empty() {
+        api_scopes
+    } else {
+        method_scopes
+    };
+    let pick = |group: Vec<&String>| -> Option<String> {
+        let specific: Vec<&String> = group
+            .iter()
+            .copied()
+            .filter(|s| !is_umbrella_scope(s))
+            .collect();
+        let pool = if specific.is_empty() { group } else { specific };
+        pool.into_iter()
+            .min_by_key(|s| scope_stem(s).len())
+            .cloned()
+    };
+    let read_only: Vec<&String> = candidates
+        .iter()
+        .filter(|s| READ_ONLY_MARKERS.iter().any(|m| s.ends_with(m)))
+        .collect();
+    if !read_only.is_empty() {
+        return pick(read_only);
+    }
+    pick(candidates.iter().collect())
 }
 
 /// A single Google API method exposed as a tool.
@@ -112,6 +167,8 @@ pub struct GoogleApiTool {
     name: String,
     description: String,
     spec: Arc<MethodSpec>,
+    /// Scopes this tool asks the session for (least privilege by default).
+    scopes: Vec<String>,
     shared: Arc<ToolShared>,
 }
 
@@ -121,11 +178,16 @@ impl GoogleApiTool {
         &self.spec
     }
 
+    /// OAuth scopes this tool requests.
+    pub fn scopes(&self) -> &[String] {
+        &self.scopes
+    }
+
     async fn call(&self, ctx: &Arc<dyn ToolContext>, args: Value) -> anyhow::Result<Value> {
         let token = self
             .shared
             .credentials
-            .access_token(ctx.as_ref(), &self.shared.scopes)
+            .access_token(ctx.as_ref(), &self.scopes)
             .await?;
         let prepared = self.spec.prepare_request(&args)?;
         let method = reqwest::Method::from_bytes(prepared.method.as_bytes())?;
@@ -213,6 +275,7 @@ pub struct GoogleApiToolset {
     api_name: String,
     api_version: String,
     scopes: Vec<String>,
+    scopes_by_tool: Vec<(String, Vec<String>)>,
     tools: Vec<Arc<dyn Tool>>,
 }
 
@@ -243,18 +306,16 @@ impl GoogleApiToolset {
         config: GoogleApiToolsetConfig,
         credentials: Arc<SessionCredentialManager>,
     ) -> Self {
-        let scopes = config
-            .scopes
-            .clone()
-            .unwrap_or_else(|| doc.oauth_scopes().into_iter().take(1).collect());
+        let api_scopes = doc.oauth_scopes();
         let shared = Arc::new(ToolShared {
             http: reqwest::Client::new(),
             credentials,
-            scopes: scopes.clone(),
             additional_headers: config.additional_headers.clone(),
         });
         let prefix = config.tool_name_prefix.clone().unwrap_or_default();
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+        let mut scopes: Vec<String> = Vec::new();
+        let mut scopes_by_tool: Vec<(String, Vec<String>)> = Vec::new();
         for spec in build_method_specs(doc, &config.spec_options) {
             let name = format!("{prefix}{}", spec.tool_name);
             if let Some(filter) = &config.tool_filter
@@ -270,10 +331,23 @@ impl GoogleApiToolset {
             } else {
                 spec.description.clone()
             };
+            let tool_scopes = match &config.scopes {
+                Some(explicit) => explicit.clone(),
+                None => least_privilege_scope(&spec.scopes, &api_scopes)
+                    .into_iter()
+                    .collect(),
+            };
+            for scope in &tool_scopes {
+                if !scopes.contains(scope) {
+                    scopes.push(scope.clone());
+                }
+            }
+            scopes_by_tool.push((name.clone(), tool_scopes.clone()));
             tools.push(Arc::new(GoogleApiTool {
                 name,
                 description,
                 spec: Arc::new(spec),
+                scopes: tool_scopes,
                 shared: shared.clone(),
             }));
         }
@@ -301,11 +375,20 @@ impl GoogleApiToolset {
             api_name: config.api_name,
             api_version: config.api_version,
             scopes,
+            scopes_by_tool,
             tools,
         }
     }
 
-    /// OAuth scopes this toolset needs.
+    /// The scopes each tool requests, in tool order.
+    pub fn tool_scopes(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.scopes_by_tool
+            .iter()
+            .map(|(name, scopes)| (name.as_str(), scopes.as_slice()))
+    }
+
+    /// Distinct OAuth scopes requested across the toolset's tools (each tool
+    /// only ever asks for its own).
     pub fn scopes(&self) -> &[String] {
         &self.scopes
     }
@@ -357,16 +440,16 @@ mod tests {
             r#"{"name":"drive","version":"v3","rootUrl":"https://www.googleapis.com/","servicePath":"drive/v3/",
             "auth":{"oauth2":{"scopes":{"https://www.googleapis.com/auth/drive":{"description":"full"},"https://www.googleapis.com/auth/drive.readonly":{"description":"ro"}}}},
             "resources":{"files":{"methods":{
-              "list":{"id":"drive.files.list","path":"files","flatPath":"files","httpMethod":"GET","description":"Lists files.","parameters":{"q":{"type":"string","location":"query"}}},
-              "get":{"id":"drive.files.get","path":"files/{fileId}","flatPath":"files/{fileId}","httpMethod":"GET","parameters":{"fileId":{"type":"string","location":"path","required":true}}},
-              "delete":{"id":"drive.files.delete","path":"files/{fileId}","flatPath":"files/{fileId}","httpMethod":"DELETE","parameters":{"fileId":{"type":"string","location":"path","required":true}}}
+              "list":{"id":"drive.files.list","path":"files","flatPath":"files","httpMethod":"GET","description":"Lists files.","parameters":{"q":{"type":"string","location":"query"}},"scopes":["https://www.googleapis.com/auth/drive","https://www.googleapis.com/auth/drive.readonly"]},
+              "get":{"id":"drive.files.get","path":"files/{fileId}","flatPath":"files/{fileId}","httpMethod":"GET","parameters":{"fileId":{"type":"string","location":"path","required":true}},"scopes":["https://www.googleapis.com/auth/drive","https://www.googleapis.com/auth/drive.readonly"]},
+              "delete":{"id":"drive.files.delete","path":"files/{fileId}","flatPath":"files/{fileId}","httpMethod":"DELETE","parameters":{"fileId":{"type":"string","location":"path","required":true}},"scopes":["https://www.googleapis.com/auth/drive"]}
             }}}}"#,
         )
         .unwrap()
     }
 
     #[test]
-    fn builds_filtered_tools_with_default_scope() {
+    fn builds_filtered_tools_with_least_privilege_scopes() {
         let config = GoogleApiToolsetConfig::new("drive", "drive", "v3").with_tool_filter([
             "drive_files_list",
             "drive_files_get",
@@ -377,10 +460,137 @@ mod tests {
             toolset.tool_names(),
             vec!["drive_files_list", "drive_files_get"]
         );
+        // Reads ask for the read-only scope only.
         assert_eq!(
             toolset.scopes(),
-            &["https://www.googleapis.com/auth/drive".to_string()]
+            &["https://www.googleapis.com/auth/drive.readonly".to_string()]
         );
+    }
+
+    #[test]
+    fn each_tool_requests_only_what_its_method_needs() {
+        let toolset = GoogleApiToolset::from_document(
+            &doc(),
+            GoogleApiToolsetConfig::new("drive", "drive", "v3"),
+            credentials(),
+        );
+        let scopes: Vec<(&str, &[String])> = toolset.tool_scopes().collect();
+        assert_eq!(
+            scopes,
+            vec![
+                (
+                    "drive_files_list",
+                    &["https://www.googleapis.com/auth/drive.readonly".to_string()][..]
+                ),
+                (
+                    "drive_files_get",
+                    &["https://www.googleapis.com/auth/drive.readonly".to_string()][..]
+                ),
+                (
+                    "drive_files_delete",
+                    &["https://www.googleapis.com/auth/drive".to_string()][..]
+                ),
+            ]
+        );
+        assert_eq!(toolset.scopes().len(), 2, "distinct union across tools");
+    }
+
+    fn scopes(names: &[&str]) -> Vec<String> {
+        names
+            .iter()
+            .map(|n| format!("https://www.googleapis.com/auth/{n}"))
+            .collect()
+    }
+
+    /// Pinned against the live Discovery documents (October 2026).
+    #[test]
+    fn least_privilege_scope_follows_the_discovery_data() {
+        let pick = |method: &[&str], api: &[&str]| {
+            least_privilege_scope(&scopes(method), &scopes(api))
+                .map(|s| s.rsplit('/').next().unwrap().to_string())
+        };
+        // youtube.videos.list: the read-only scope wins over youtube/force-ssl/partner.
+        assert_eq!(
+            pick(
+                &[
+                    "youtube",
+                    "youtube.force-ssl",
+                    "youtube.readonly",
+                    "youtubepartner"
+                ],
+                &[]
+            )
+            .as_deref(),
+            Some("youtube.readonly")
+        );
+        // youtube.commentThreads.list only accepts force-ssl.
+        assert_eq!(
+            pick(&["youtube.force-ssl"], &[]).as_deref(),
+            Some("youtube.force-ssl")
+        );
+        // youtube.captions.list: partner scopes are a last resort.
+        assert_eq!(
+            pick(&["youtube.force-ssl", "youtubepartner"], &[]).as_deref(),
+            Some("youtube.force-ssl")
+        );
+        // drive.files.get: the general read-only scope, not meet/metadata/photos.
+        assert_eq!(
+            pick(
+                &[
+                    "drive",
+                    "drive.appdata",
+                    "drive.file",
+                    "drive.meet.readonly",
+                    "drive.metadata",
+                    "drive.metadata.readonly",
+                    "drive.photos.readonly",
+                    "drive.readonly"
+                ],
+                &[]
+            )
+            .as_deref(),
+            Some("drive.readonly")
+        );
+        // storage.objects.get: devstorage.read_only, never cloud-platform.
+        assert_eq!(
+            pick(
+                &[
+                    "cloud-platform",
+                    "cloud-platform.read-only",
+                    "devstorage.full_control",
+                    "devstorage.read_only",
+                    "devstorage.read_write"
+                ],
+                &[]
+            )
+            .as_deref(),
+            Some("devstorage.read_only")
+        );
+        // storage.objects.copy (write): read_write over full_control/cloud-platform.
+        assert_eq!(
+            pick(
+                &[
+                    "cloud-platform",
+                    "devstorage.full_control",
+                    "devstorage.read_write"
+                ],
+                &[]
+            )
+            .as_deref(),
+            Some("devstorage.read_write")
+        );
+        // Single-scope APIs and the API-level fallback.
+        assert_eq!(pick(&["adwords"], &[]).as_deref(), Some("adwords"));
+        assert_eq!(
+            pick(&[], &["doubleclickbidmanager", "display-video"]).as_deref(),
+            Some("display-video"),
+            "methods without scopes fall back to the API list"
+        );
+        assert_eq!(
+            pick(&["cloud-platform"], &[]).as_deref(),
+            Some("cloud-platform")
+        );
+        assert_eq!(pick(&[], &[]), None);
     }
 
     #[test]

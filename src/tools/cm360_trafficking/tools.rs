@@ -188,6 +188,7 @@ impl Cm360Services {
                 Some(required) => Err(required.clone()),
                 None => Err(AuthRequired {
                     auth_url: String::new(),
+                    scopes: Vec::new(),
                     message: format!("Google authorization failed: {e:#}"),
                 }),
             },

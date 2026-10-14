@@ -177,9 +177,6 @@ async fn oauth_callback_attaches_tokens_to_the_requesting_session() {
     })
     .with_endpoints(format!("{google}/auth"), format!("{google}/token"));
     let credentials = Arc::new(SessionCredentialManager::new(flow));
-    credentials
-        .register_scopes(&["https://www.googleapis.com/auth/adwords".to_string()])
-        .await;
 
     let sessions: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
     for id in ["s-1", "s-2"] {
@@ -214,6 +211,11 @@ async fn oauth_callback_attaches_tokens_to_the_requesting_session() {
         .unwrap_err();
     let required = auth_required(&err).expect("AUTH_REQUIRED").clone();
     assert!(required.auth_url.starts_with(&format!("{google}/auth?")));
+    // Least privilege: the link asks for the calling tool's scope only.
+    assert_eq!(
+        required.scopes,
+        vec!["https://www.googleapis.com/auth/adwords".to_string()]
+    );
     let state = state_param(&required.auth_url);
 
     // 2./3. Google redirects to our callback with the code and that state.
@@ -281,7 +283,7 @@ async fn oauth_callback_attaches_tokens_to_the_requesting_session() {
         session_id: "nope".into(),
         ..s1
     };
-    let link = credentials.begin_authorization(&ghost, &[]).await;
+    let link = credentials.begin_authorization(&ghost, &["s".to_string()]);
     let page = reqwest::get(format!(
         "{agent}/oauth2/callback?code=the-code&state={}",
         state_param(&link.auth_url)

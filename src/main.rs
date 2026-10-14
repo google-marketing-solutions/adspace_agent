@@ -8,6 +8,7 @@
 //! adspace-agent list-tools youtube
 //! adspace-agent list-tools google --api drive --version v3
 //! adspace-agent list-tools all       # every tool the configured agent exposes
+//! adspace-agent list-tools all --scopes   # ... with the OAuth scope each one requests
 //! ```
 
 use adk_rust::Toolset as _;
@@ -57,6 +58,10 @@ enum Command {
         /// the model on every request (bytes and a rough token estimate).
         #[arg(long, global = true)]
         sizes: bool,
+        /// Also print the OAuth scope each tool asks the session for (least
+        /// privilege: one consent per distinct scope, when first needed).
+        #[arg(long, global = true)]
+        scopes: bool,
         #[command(subcommand)]
         target: ListTarget,
     },
@@ -100,7 +105,7 @@ fn init_tracing() {
     }
 }
 
-async fn list_tools(target: ListTarget, sizes: bool) -> anyhow::Result<()> {
+async fn list_tools(target: ListTarget, sizes: bool, scopes: bool) -> anyhow::Result<()> {
     let settings = Settings::from_env()?;
     let credentials = build_credential_manager(&settings);
     let fetcher = DiscoveryFetcher::new();
@@ -115,8 +120,16 @@ async fn list_tools(target: ListTarget, sizes: bool) -> anyhow::Result<()> {
     };
     let mut names = Vec::new();
     let mut total_bytes = 0usize;
+    let mut scope_lines = Vec::new();
     for config in configs {
         let toolset = GoogleApiToolset::load(config, &fetcher, credentials.clone()).await?;
+        if scopes {
+            scope_lines.extend(
+                toolset
+                    .tool_scopes()
+                    .map(|(name, s)| format!("{name}\t{}", s.join(" "))),
+            );
+        }
         if sizes {
             let (count, bytes) = agent::declaration_size(&toolset).await?;
             total_bytes += bytes;
@@ -140,6 +153,13 @@ async fn list_tools(target: ListTarget, sizes: bool) -> anyhow::Result<()> {
         );
     }
     names.sort();
+    if scopes {
+        scope_lines.sort();
+        for line in scope_lines {
+            println!("{line}");
+        }
+        return Ok(());
+    }
     for name in names {
         println!("{name}");
     }
@@ -174,6 +194,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let runtime = build_runtime().await?;
             server::console(runtime, &host, port).await
         }
-        Command::ListTools { target, sizes } => list_tools(target, sizes).await,
+        Command::ListTools {
+            target,
+            sizes,
+            scopes,
+        } => list_tools(target, sizes, scopes).await,
     }
 }

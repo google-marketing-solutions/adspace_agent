@@ -527,7 +527,7 @@ impl SessionCredentialManager {
             auth_url: auth_url.clone(),
             scopes: requested.clone(),
             message: format!(
-                "Authorization required for this chat session (requested access: {}). Ask the user to open this link, sign in with the Google account that has access, grant the permission, and then say \"done\" so the request can be retried: {auth_url}",
+                "Authorization required for this chat session (requested access: {}). Show the user this link as a markdown link labelled \"Authorize Google access\" and ask them to open it and grant the permission; the conversation resumes automatically once access is granted (if it does not, they can say \"done\"): {auth_url}",
                 names.join(", ")
             ),
         }

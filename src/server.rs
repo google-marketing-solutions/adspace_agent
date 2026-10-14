@@ -4,7 +4,10 @@
 //! console mode is its readline REPL, and the server is its Axum application
 //! with our OAuth redirect route merged in. The redirect handler writes the
 //! exchanged Google tokens into the chat session named by the signed `state`
-//! parameter, so credentials are attached to sessions, never to the server.
+//! parameter, so credentials are attached to sessions, never to the server —
+//! and then resumes that chat with a turn of its own, so the user does not
+//! have to come back and say "done" (the web UI polls the session and shows
+//! the continuation).
 
 use std::sync::Arc;
 
@@ -16,9 +19,9 @@ use axum::extract::{Query, State};
 use axum::response::Html;
 use axum::routing::get;
 
-use crate::agent::AgentRuntime;
-use crate::auth::SessionCredentialManager;
+use crate::agent::{AgentRuntime, TurnRunner};
 use crate::auth::oauth::OAUTH_CALLBACK_PATH;
+use crate::auth::{OAuthToken, SessionCredentialManager, SessionRef};
 use crate::config::APP_NAME;
 
 /// Query parameters Google sends to the OAuth redirect URI.
@@ -39,6 +42,42 @@ pub struct OAuthRoutes {
     pub credentials: Arc<SessionCredentialManager>,
     /// Where the exchanged tokens are written.
     pub sessions: Arc<dyn SessionService>,
+    /// When set, the chat is resumed automatically after a successful
+    /// authorization (see [`resume_message`]).
+    pub resume: Option<Arc<TurnRunner>>,
+}
+
+/// The user-role message that resumes a chat after Google access was granted.
+pub fn resume_message(token: &OAuthToken) -> String {
+    let granted: Vec<&str> = token
+        .scopes
+        .iter()
+        .map(|s| s.rsplit('/').next().unwrap_or(s))
+        .collect();
+    if granted.is_empty() {
+        "Google access has been granted for this chat. Continue with the request that needed it."
+            .to_string()
+    } else {
+        format!(
+            "Google access has been granted for this chat ({}). Continue with the request that needed it.",
+            granted.join(", ")
+        )
+    }
+}
+
+/// Resumes `session` in the background after an authorization.
+fn spawn_resume(runner: Arc<TurnRunner>, session: SessionRef, token: &OAuthToken) {
+    let message = resume_message(token);
+    tokio::spawn(async move {
+        match runner.run_text(&session, &message).await {
+            Ok(events) => tracing::info!(
+                "Resumed session {session} after Google authorization ({events} events)"
+            ),
+            Err(e) => {
+                tracing::warn!("Could not resume session {session} after authorization: {e:#}")
+            }
+        }
+    });
 }
 
 fn html_page(title: &str, body: &str) -> Html<String> {
@@ -90,10 +129,19 @@ pub async fn oauth_callback(
         .persist(routes.sessions.as_ref(), &session, &token)
         .await
     {
-        Ok(()) => html_page(
-            "Authorization complete",
-            "<p>Google access was granted to this chat session. You can close this window, return to the chat and tell the agent to continue.</p>",
-        ),
+        Ok(()) => match &routes.resume {
+            Some(runner) => {
+                spawn_resume(runner.clone(), session, &token);
+                html_page(
+                    "Authorization complete",
+                    "<p>Google access was granted to this chat session and the agent is continuing where it left off. You can close this window and return to the chat.</p>",
+                )
+            }
+            None => html_page(
+                "Authorization complete",
+                "<p>Google access was granted to this chat session. You can close this window, return to the chat and tell the agent to continue.</p>",
+            ),
+        },
         Err(e) => {
             tracing::error!("{e:#}");
             html_page(
@@ -112,10 +160,11 @@ pub fn oauth_router(routes: OAuthRoutes) -> Router {
 }
 
 impl AgentRuntime {
-    fn oauth_routes(&self) -> OAuthRoutes {
+    fn oauth_routes(&self, resume: bool) -> OAuthRoutes {
         OAuthRoutes {
             credentials: self.credentials.clone(),
             sessions: self.session_service.clone(),
+            resume: resume.then(|| Arc::new(self.turn_runner())),
         }
     }
 
@@ -158,7 +207,7 @@ fn launcher(runtime: &AgentRuntime) -> Launcher {
 pub async fn serve(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Result<()> {
     let app = launcher(&runtime)
         .build_app()?
-        .merge(oauth_router(runtime.oauth_routes()));
+        .merge(oauth_router(runtime.oauth_routes(true)));
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     tracing::info!(
         "AdSpace Agent listening on http://{host}:{port}  (web UI: http://{host}:{port}/ui/)"
@@ -186,7 +235,10 @@ pub async fn console(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Re
         Ok(listener) => {
             tracing::info!("OAuth callback listening on http://{host}:{port}{OAUTH_CALLBACK_PATH}");
             runtime.log_redirect_uri();
-            tokio::spawn(axum::serve(listener, oauth_router(runtime.oauth_routes())).into_future());
+            // No automatic resume here: the REPL only prints its own turns.
+            tokio::spawn(
+                axum::serve(listener, oauth_router(runtime.oauth_routes(false))).into_future(),
+            );
         }
         Err(e) => tracing::warn!(
             "Cannot bind {host}:{port} for the OAuth callback ({e}); Google authorizations will not complete in this console"

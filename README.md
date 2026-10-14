@@ -91,8 +91,11 @@ called on behalf of the signed-in user, and the credentials belong to the
    `${PUBLIC_BASE_URL}/oauth2/callback`, which exchanges the code and writes
    the tokens into the session's state (`CREDENTIALS_CACHE_KEY`, the same key
    the Python agent used).
-4. The user tells the agent to continue; the tool reads the token from the
-   session state (refreshing it when expired) and calls the API.
+4. The server then resumes that chat on its own (a user-role turn "Google
+   access has been granted … continue"), so there is no "done" step: the web
+   UI polls the session and shows the agent carrying on, and the tool reads
+   the token from the session state (refreshing it when expired). In console
+   mode the REPL only prints its own turns, so there you say "done".
 
 Add that redirect URI to the OAuth client in the Google Cloud Console.
 

@@ -12,15 +12,17 @@ use adk_rust::tool::BasicToolset;
 use adk_rust::tool::bigquery::BigQueryToolset;
 use adk_rust::tool::memory::PreloadMemoryTool;
 use adk_rust::{
-    Agent, BeforeAgentCallback, CallbackContext, Content, ContextCacheConfig, EventStream,
-    EventsCompactionConfig, InvocationContext, Part, Result as AdkResult, Tool,
-    ToolExecutionStrategy, Toolset,
+    Agent, BeforeAgentCallback, CacheCapable, CallbackContext, Content, ContextCacheConfig,
+    EventStream, EventsCompactionConfig, InvocationContext, Part, Result as AdkResult, SessionId,
+    Tool, ToolExecutionStrategy, Toolset, UserId,
 };
 use anyhow::Context;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use crate::auth::{AdcTokenProvider, GoogleOAuthFlow, OAuthClientConfig, SessionCredentialManager};
+use crate::auth::{
+    AdcTokenProvider, GoogleOAuthFlow, OAuthClientConfig, SessionCredentialManager, SessionRef,
+};
 use crate::config::{
     self, APP_NAME, DISPLAY_VIDEO_360_TOOL_FILTER, DRIVE_TOOL_FILTER, GOOGLE_ADS_API_VERSION,
     STORAGE_TOOL_FILTER, Settings, YOUTUBE_TOOL_FILTER,
@@ -101,6 +103,112 @@ impl AgentRuntime {
             APP_NAME,
             user_id,
         ))
+    }
+
+    /// A [`TurnRunner`] configured like the server's request runner.
+    pub fn turn_runner(&self) -> TurnRunner {
+        TurnRunner::new(
+            self.agent.clone(),
+            self.session_service.clone(),
+            self.artifact_service.clone(),
+            self.memory_service.clone(),
+        )
+        .with_compaction(self.compaction_config())
+        .with_context_cache(
+            self.context_cache_config(),
+            self.model.clone() as Arc<dyn CacheCapable>,
+        )
+    }
+}
+
+/// Runs agent turns outside of an HTTP request — e.g. to resume a chat after
+/// the user granted Google access — with the same services and settings the
+/// server's request runner uses, so the events land in the session exactly as
+/// if the user had typed the message.
+#[derive(Clone)]
+pub struct TurnRunner {
+    agent: Arc<dyn Agent>,
+    session_service: Arc<dyn SessionService>,
+    artifact_service: Arc<dyn ArtifactService>,
+    memory_service: Arc<dyn MemoryService>,
+    compaction: Option<EventsCompactionConfig>,
+    context_cache: Option<(ContextCacheConfig, Arc<dyn CacheCapable>)>,
+}
+
+impl TurnRunner {
+    /// Creates a runner over the given agent and services.
+    pub fn new(
+        agent: Arc<dyn Agent>,
+        session_service: Arc<dyn SessionService>,
+        artifact_service: Arc<dyn ArtifactService>,
+        memory_service: Arc<dyn MemoryService>,
+    ) -> Self {
+        Self {
+            agent,
+            session_service,
+            artifact_service,
+            memory_service,
+            compaction: None,
+            context_cache: None,
+        }
+    }
+
+    /// Enables events compaction.
+    pub fn with_compaction(mut self, config: EventsCompactionConfig) -> Self {
+        self.compaction = Some(config);
+        self
+    }
+
+    /// Enables context caching.
+    pub fn with_context_cache(
+        mut self,
+        config: ContextCacheConfig,
+        model: Arc<dyn CacheCapable>,
+    ) -> Self {
+        self.context_cache = Some((config, model));
+        self
+    }
+
+    /// Runs one user turn with `text` in `session` to completion and returns
+    /// the number of events the agent produced.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session identity is invalid, the runner
+    /// cannot start, or the turn fails.
+    pub async fn run_text(&self, session: &SessionRef, text: &str) -> anyhow::Result<usize> {
+        let mut builder = adk_rust::runner::Runner::builder()
+            .app_name(session.app_name.clone())
+            .agent(self.agent.clone())
+            .session_service(self.session_service.clone())
+            .artifact_service(self.artifact_service.clone())
+            .memory_service(Arc::new(MemoryServiceAdapter::new(
+                self.memory_service.clone(),
+                session.app_name.clone(),
+                session.user_id.clone(),
+            )));
+        if let Some(compaction) = &self.compaction {
+            builder = builder.compaction_config(compaction.clone());
+        }
+        if let Some((config, model)) = &self.context_cache {
+            builder = builder
+                .context_cache_config(config.clone())
+                .cache_capable(model.clone());
+        }
+        let runner = builder.build()?;
+        let mut events = runner
+            .run(
+                UserId::new(session.user_id.clone())?,
+                SessionId::new(session.session_id.clone())?,
+                Content::new("user").with_text(text),
+            )
+            .await?;
+        let mut count = 0usize;
+        while let Some(event) = events.next().await {
+            event?;
+            count += 1;
+        }
+        Ok(count)
     }
 }
 

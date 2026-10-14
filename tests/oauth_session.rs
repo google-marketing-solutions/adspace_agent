@@ -3,24 +3,29 @@
 //! 1. a tool context of session `s-1` asks for credentials and gets an
 //!    `AUTH_REQUIRED` link whose `state` names that session;
 //! 2. Google (mocked) redirects to `/oauth2/callback?code&state`;
-//! 3. the handler exchanges the code and writes the tokens into session `s-1`;
+//! 3. the handler exchanges the code, writes the tokens into session `s-1`
+//!    and resumes that chat with a turn of its own (no "done" needed);
 //! 4. a later tool call of `s-1` finds a valid token in its state, while
 //!    another session still has none.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use adk_rust::agent::LlmAgentBuilder;
+use adk_rust::artifact::InMemoryArtifactService;
+use adk_rust::memory::InMemoryMemoryService;
 use adk_rust::session::{CreateRequest, GetRequest, InMemorySessionService, SessionService};
 use adk_rust::tool::SimpleToolContext;
 use adk_rust::{
-    Artifacts, CallbackContext, Content, EventActions, MemoryEntry, ReadonlyContext, Session,
-    State, ToolContext,
+    Artifacts, CallbackContext, Content, EventActions, Llm, LlmRequest, LlmResponse,
+    LlmResponseStream, MemoryEntry, ReadonlyContext, Session, State, ToolContext,
 };
+use adspace_agent::agent::TurnRunner;
 use adspace_agent::auth::{
     CREDENTIALS_STATE_KEY, GoogleOAuthFlow, OAuthClientConfig, OAuthToken,
     SessionCredentialManager, SessionRef, auth_required,
 };
-use adspace_agent::server::{OAuthRoutes, oauth_router};
+use adspace_agent::server::{OAuthRoutes, oauth_router, resume_message};
 use async_trait::async_trait;
 use axum::Router;
 use axum::routing::post;
@@ -40,6 +45,28 @@ async fn mock_token_endpoint(body: String) -> axum::Json<Value> {
         "scope": "https://www.googleapis.com/auth/adwords",
         "token_type": "Bearer",
     }))
+}
+
+/// Model that answers every call with a fixed text and records the requests.
+struct EchoLlm {
+    requests: Mutex<Vec<LlmRequest>>,
+}
+
+#[async_trait]
+impl Llm for EchoLlm {
+    fn name(&self) -> &str {
+        "echo"
+    }
+
+    async fn generate_content(
+        &self,
+        req: LlmRequest,
+        _stream: bool,
+    ) -> adk_rust::Result<LlmResponseStream> {
+        self.requests.lock().unwrap().push(req);
+        let response = LlmResponse::new(Content::new("model").with_text("Resuming the Ads query."));
+        Ok(Box::pin(futures::stream::once(async move { Ok(response) })))
+    }
 }
 
 async fn spawn(router: Router) -> String {
@@ -218,10 +245,28 @@ async fn oauth_callback_attaches_tokens_to_the_requesting_session() {
     );
     let state = state_param(&required.auth_url);
 
-    // 2./3. Google redirects to our callback with the code and that state.
+    // 2./3. Google redirects to our callback with the code and that state. The
+    // route is wired with a TurnRunner over a scripted model, as `serve` does.
+    let llm = Arc::new(EchoLlm {
+        requests: Mutex::new(Vec::new()),
+    });
+    let chat_agent = Arc::new(
+        LlmAgentBuilder::new("adspace_agent")
+            .model(llm.clone())
+            .instruction("test agent")
+            .build()
+            .unwrap(),
+    );
+    let resume = TurnRunner::new(
+        chat_agent,
+        sessions.clone(),
+        Arc::new(InMemoryArtifactService::new()),
+        Arc::new(InMemoryMemoryService::new()),
+    );
     let agent = spawn(oauth_router(OAuthRoutes {
         credentials: credentials.clone(),
         sessions: sessions.clone(),
+        resume: Some(Arc::new(resume)),
     }))
     .await;
     let page = reqwest::get(format!(
@@ -233,6 +278,58 @@ async fn oauth_callback_attaches_tokens_to_the_requesting_session() {
     .await
     .unwrap();
     assert!(page.contains("Authorization complete"), "{page}");
+    assert!(page.contains("continuing where it left off"), "{page}");
+
+    // The chat was resumed in the background: wait for the model's answer to
+    // land in the session.
+    let resumed = async {
+        loop {
+            let loaded = sessions
+                .get(GetRequest {
+                    app_name: "adspace_agent".into(),
+                    user_id: "local-user".into(),
+                    session_id: "s-1".into(),
+                    num_recent_events: None,
+                    after: None,
+                })
+                .await
+                .unwrap();
+            let texts: Vec<String> = loaded
+                .events()
+                .all()
+                .iter()
+                .filter_map(|e| e.content().map(|c| (e.author.clone(), c.clone())))
+                .flat_map(|(author, c)| {
+                    c.parts.into_iter().filter_map(move |p| match p {
+                        adk_rust::Part::Text { text } => Some(format!("{author}: {text}")),
+                        _ => None,
+                    })
+                })
+                .collect();
+            if texts.iter().any(|t| t.contains("Resuming the Ads query.")) {
+                break texts;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    };
+    let texts = tokio::time::timeout(std::time::Duration::from_secs(5), resumed)
+        .await
+        .expect("the session is resumed after the callback");
+    let expected_user_turn = resume_message(&OAuthToken {
+        access_token: String::new(),
+        refresh_token: None,
+        expires_at: None,
+        scopes: vec!["https://www.googleapis.com/auth/adwords".to_string()],
+    });
+    assert!(expected_user_turn.contains("(adwords)"));
+    assert_eq!(
+        texts,
+        vec![
+            format!("user: {expected_user_turn}"),
+            "adspace_agent: Resuming the Ads query.".to_string(),
+        ]
+    );
+    assert_eq!(llm.requests.lock().unwrap().len(), 1, "one background turn");
 
     // The tokens are now in session s-1's state ...
     let loaded = sessions

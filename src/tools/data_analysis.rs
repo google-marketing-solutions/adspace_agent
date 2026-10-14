@@ -67,8 +67,9 @@ impl FromStr for PythonExecutorKind {
             "monty" => Ok(Self::Monty),
             "docker" | "container" => Ok(Self::Docker),
             "vertex" | "vertex_sandbox" | "agent_engine" => Ok(Self::Vertex),
+            "gemini" | "builtin" | "code_execution" => Ok(Self::Gemini),
             other => anyhow::bail!(
-                "Unknown PYTHON_EXECUTOR '{other}'. Valid values are: host, monty, docker, vertex"
+                "Unknown PYTHON_EXECUTOR '{other}'. Valid values are: host, gemini, docker, vertex, monty"
             ),
         }
     }
@@ -400,6 +401,10 @@ mod tests {
             "vertex".parse::<PythonExecutorKind>().unwrap(),
             PythonExecutorKind::Vertex
         );
+        assert_eq!(
+            "gemini".parse::<PythonExecutorKind>().unwrap(),
+            PythonExecutorKind::Gemini
+        );
         assert!("nope".parse::<PythonExecutorKind>().is_err());
     }
 
@@ -414,6 +419,12 @@ mod tests {
                 .unwrap()
                 .name(),
             "python_code"
+        );
+        assert_eq!(
+            build_python_tool(PythonExecutorKind::Gemini)
+                .unwrap()
+                .name(),
+            "gemini_code_execution"
         );
         #[cfg(feature = "monty")]
         assert_eq!(

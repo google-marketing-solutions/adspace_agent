@@ -1,0 +1,6 @@
+target
+.git
+.env
+sessions.db*
+.credentials
+.artifacts

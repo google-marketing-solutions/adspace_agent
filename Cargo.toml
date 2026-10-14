@@ -1,0 +1,73 @@
+[package]
+name = "adspace-agent"
+version = "0.13.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "AdSpace Agent is designed to provide a standardized way to integrate an LLM with Google Ads, YouTube, Google Cloud, and Google Search to form a more comprehensive campaign and marketing plan for agencies."
+authors = ["Tony Coconate <coconate@google.com>", "Brian Craft <bcraft@google.com>"]
+readme = "README.md"
+publish = false
+
+[lib]
+name = "adspace_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "adspace-agent"
+path = "src/main.rs"
+
+[dependencies]
+adk-rust = { version = "2.3.0", default-features = false, features = [
+    "minimal",
+    "gemini-vertex",
+    "tools",
+    "bigquery",
+    "memory",
+    "memory-tools",
+    "artifacts",
+    "gcs-artifacts",
+    "plugin",
+    "server",
+    "skills",
+    "skills-progressive-disclosure",
+    "telemetry",
+    "code-tools",
+    "vertex-sandbox",
+    "cli",
+] }
+axum = "0.8"
+adk-session = { version = "2.3.0", features = ["sqlite"] }
+adk-gemini = { version = "2.3.0", features = ["vertex"] }
+
+anyhow = "1.0"
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+tokio = { version = "1.40", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+google-cloud-auth = { version = "1", default-features = false, features = ["default-rustls-provider"] }
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+csv = "1.3"
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive", "env"] }
+url = "2"
+base64 = "0.22"
+sha2 = "0.10"
+indexmap = { version = "2", features = ["serde"] }
+
+[features]
+default = []
+# Opt-in: adk-rust's in-process Monty Python interpreter as a `PYTHON_EXECUTOR=monty`
+# backend. Off by default because its dependency chain (monty → jiter → pyo3)
+# does not currently resolve against crates.io.
+monty = ["adk-rust/code-embedded-python"]
+
+[dev-dependencies]
+tempfile = "3"

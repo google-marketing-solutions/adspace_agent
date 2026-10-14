@@ -1,0 +1,10 @@
+/target
+.env
+.DS_Store
+sessions.db
+sessions.db-*
+*.db-journal
+.credentials/
+.artifacts/
+.adk/
+google-ads.yaml

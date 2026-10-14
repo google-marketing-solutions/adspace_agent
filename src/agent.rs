@@ -8,6 +8,7 @@ use adk_rust::artifact::ArtifactService;
 use adk_rust::memory::{MemoryService, MemoryServiceAdapter};
 use adk_rust::model::GeminiModel;
 use adk_rust::session::SessionService;
+use adk_rust::tool::BasicToolset;
 use adk_rust::tool::bigquery::BigQueryToolset;
 use adk_rust::tool::memory::PreloadMemoryTool;
 use adk_rust::{
@@ -34,6 +35,7 @@ use crate::services;
 use crate::tools::cm360_trafficking::{Cm360Services, Cm360TraffickingToolset};
 use crate::tools::data_analysis::data_analysis_toolset;
 use crate::tools::genai::google_genai_toolset;
+use crate::tools::lazy::{EnableToolsetsTool, LazyToolset, LazyToolsetEntry};
 use crate::tools::skills::{SkillSources, SkillsToolset};
 use crate::tools::utilities::utilities_toolset;
 
@@ -129,13 +131,7 @@ pub async fn build_credential_manager(settings: &Settings) -> Arc<UserCredential
 /// Builds the Discovery-based Google API toolset configs for the enabled
 /// toolsets (the counterpart of `_build_toolset_factories`).
 pub fn google_api_toolset_configs(settings: &Settings) -> Vec<GoogleApiToolsetConfig> {
-    let depth = config::env_u64_or(
-        "GOOGLE_API_SCHEMA_MAX_DEPTH",
-        SpecOptions::default().max_schema_depth as u64,
-    ) as usize;
-    let options = SpecOptions {
-        max_schema_depth: depth.max(1),
-    };
+    let options = SpecOptions::from_env();
     let mut configs = Vec::new();
     for key in &settings.enabled_toolsets {
         let config = match key.as_str() {
@@ -442,9 +438,33 @@ pub async fn create_agent(
             .await;
     }
 
+    let mut deferred: Vec<LazyToolsetEntry> = Vec::new();
     for toolset in load_google_api_toolsets(settings, &credentials).await {
         credentials.register_scopes(toolset.scopes()).await;
-        toolsets.push(toolset);
+        if settings.lazy_toolsets.iter().any(|n| n == toolset.name()) {
+            deferred.push(LazyToolsetEntry {
+                name: toolset.name().to_string(),
+                summary: config::toolset_summary(toolset.name()).to_string(),
+                tool_count: toolset.tool_names().len(),
+            });
+            toolsets.push(Arc::new(LazyToolset::new(toolset)));
+        } else {
+            toolsets.push(toolset);
+        }
+    }
+    if !deferred.is_empty() {
+        tracing::info!(
+            "Deferred toolsets (loaded on demand via enable_toolsets): {}",
+            deferred
+                .iter()
+                .map(|d| format!("{} ({} tools)", d.name, d.tool_count))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        toolsets.push(Arc::new(BasicToolset::new(
+            "lazy_toolsets",
+            vec![Arc::new(EnableToolsetsTool::new(deferred))],
+        )));
     }
 
     if settings.is_toolset_enabled("bigquery") {
@@ -546,6 +566,24 @@ pub async fn list_tool_names(toolset: &dyn Toolset) -> anyhow::Result<Vec<String
         .collect())
 }
 
+/// Number of tools and the serialized size of their declarations (what is
+/// sent to the model on every request).
+pub async fn declaration_size(toolset: &dyn Toolset) -> anyhow::Result<(usize, usize)> {
+    let ctx: Arc<dyn adk_rust::ReadonlyContext> = Arc::new(ListingContext {
+        content: Content::new("user"),
+    });
+    let tools = toolset.tools(ctx).await?;
+    let bytes = tools
+        .iter()
+        .map(|t| {
+            serde_json::to_string(&t.declaration())
+                .map(|s| s.len())
+                .unwrap_or(0)
+        })
+        .sum();
+    Ok((tools.len(), bytes))
+}
+
 /// Minimal context used only to enumerate toolset contents.
 struct ListingContext {
     content: Content,
@@ -600,6 +638,7 @@ mod tests {
                 "campaign_manager_360".into(),
             ],
             google_ads_tool_filter: Some(vec!["googleads_customers_google_ads_search".into()]),
+            lazy_toolsets: vec![],
             skills_bucket_name: None,
             local_skills_dir: "./skills".into(),
             compaction: config::CompactionSettings::from_env(),

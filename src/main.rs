@@ -10,6 +10,7 @@
 //! adspace-agent list-tools all       # every tool the configured agent exposes
 //! ```
 
+use adk_rust::Toolset as _;
 use adspace_agent::agent::{
     self, build_credential_manager, build_runtime, google_api_toolset_configs,
 };
@@ -48,6 +49,10 @@ enum Command {
     },
     /// List the tools of a Google API toolset.
     ListTools {
+        /// Also print, per toolset, the size of the tool declarations sent to
+        /// the model on every request (bytes and a rough token estimate).
+        #[arg(long, global = true)]
+        sizes: bool,
         #[command(subcommand)]
         target: ListTarget,
     },
@@ -82,7 +87,7 @@ fn init_tracing() {
         .init();
 }
 
-async fn list_tools(target: ListTarget) -> anyhow::Result<()> {
+async fn list_tools(target: ListTarget, sizes: bool) -> anyhow::Result<()> {
     let settings = Settings::from_env()?;
     let credentials = build_credential_manager(&settings).await;
     let fetcher = DiscoveryFetcher::new();
@@ -96,9 +101,30 @@ async fn list_tools(target: ListTarget) -> anyhow::Result<()> {
         ListTarget::All => google_api_toolset_configs(&settings),
     };
     let mut names = Vec::new();
+    let mut total_bytes = 0usize;
     for config in configs {
         let toolset = GoogleApiToolset::load(config, &fetcher, credentials.clone()).await?;
+        if sizes {
+            let (count, bytes) = agent::declaration_size(&toolset).await?;
+            total_bytes += bytes;
+            eprintln!(
+                "{:<32} {:>5} tools  {:>9} bytes  (~{} tokens per model request)",
+                toolset.name(),
+                count,
+                bytes,
+                bytes / 4
+            );
+        }
         names.extend(agent::list_tool_names(&toolset).await?);
+    }
+    if sizes {
+        eprintln!(
+            "{:<32} {:>5} tools  {:>9} bytes  (~{} tokens per model request)",
+            "TOTAL",
+            names.len(),
+            total_bytes,
+            total_bytes / 4
+        );
     }
     names.sort();
     for name in names {
@@ -129,6 +155,6 @@ async fn main() -> anyhow::Result<()> {
             let runtime = build_runtime().await?;
             server::console(runtime, &user).await
         }
-        Command::ListTools { target } => list_tools(target).await,
+        Command::ListTools { target, sizes } => list_tools(target, sizes).await,
     }
 }

@@ -68,6 +68,7 @@ fn settings() -> Settings {
         // local toolset so it is included to exercise its instruction hook.
         enabled_toolsets: vec!["campaign_manager_360".into()],
         google_ads_tool_filter: None,
+        lazy_toolsets: vec![],
         skills_bucket_name: None,
         local_skills_dir: "./does-not-exist".into(),
         compaction: CompactionSettings {

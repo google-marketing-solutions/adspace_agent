@@ -128,6 +128,31 @@ characters), so the existing `*_TOOL_FILTER` lists work unchanged.
 | `vertex` | `vertex_sandbox_code_execution` | adk-rust's Vertex AI Agent Engine managed sandbox (`VERTEX_SANDBOX_NAME` or `VERTEX_AGENT_ENGINE`). |
 | `monty` | `monty_python_code` | adk-rust's in-process Monty interpreter (Python subset, no third-party packages). Requires `cargo build --features monty`. |
 
+## Performance: deferred toolsets and schema size
+
+Everything the model can call is re-sent as tool declarations on every model
+request, so the size of that list drives latency and cost. Two controls keep
+it small:
+
+- **Deferred toolsets** (`LAZY_TOOLSETS`, default
+  `campaign_manager_360,display_video_360,merchant_center_products`): their
+  tools are hidden behind a single `enable_toolsets` tool. The model enables a
+  collection when a request needs it; the choice is stored in session state so
+  the tools stay available for the rest of the session. Set `LAZY_TOOLSETS=none`
+  to always expose everything (the Python agent's behaviour) or `all` to defer
+  every Discovery-based toolset.
+- **Schema trimming**: `GOOGLE_API_SCHEMA_MAX_DEPTH` (default 4) caps how deep
+  request-body schemas are expanded, `GOOGLE_API_SCHEMA_ENUM_DESCRIPTIONS`
+  (default `false`) controls verbose per-enum-value descriptions and
+  `GOOGLE_API_SCHEMA_NESTED_DESCRIPTIONS` (default `true`) controls descriptions
+  on nested properties.
+
+Measure the effect with `cargo run -- list-tools --sizes all`. With the
+defaults the always-on declarations are ~170 KB (~40k tokens) instead of
+~1.9 MB (~470k tokens) for the full, fully-expanded tool list. Context caching
+(`CONTEXT_CACHE_*`) and parallel execution of read-only tools are enabled on
+top of that.
+
 ## Configuring Your GCS Bucket for Agent Skills
 
 Custom skills can be loaded from a local directory (`LOCAL_SKILLS_DIR`,

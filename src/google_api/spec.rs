@@ -16,7 +16,7 @@ use super::discovery::{DiscoveryDocument, DiscoveryMethod, DiscoveryParameter};
 use super::naming::{dedupe_names, parameter_name, tool_name_for_method_id};
 
 /// Default maximum nesting depth for resolved request schemas.
-pub const DEFAULT_MAX_SCHEMA_DEPTH: usize = 6;
+pub const DEFAULT_MAX_SCHEMA_DEPTH: usize = 4;
 
 /// Where a parameter is sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,12 +78,55 @@ pub struct SpecOptions {
     /// Maximum nesting depth when resolving request schemas; deeper objects
     /// are summarised as an untyped object to keep declarations compact.
     pub max_schema_depth: usize,
+    /// Append per-value `enumDescriptions` to enum fields. Off by default:
+    /// Google APIs document every enum value verbosely, which multiplies the
+    /// declaration size the model must read on each request.
+    pub include_enum_descriptions: bool,
+    /// Keep descriptions on nested request-body properties (top-level
+    /// parameters always keep theirs).
+    pub include_nested_descriptions: bool,
 }
 
 impl Default for SpecOptions {
     fn default() -> Self {
         Self {
             max_schema_depth: DEFAULT_MAX_SCHEMA_DEPTH,
+            include_enum_descriptions: false,
+            include_nested_descriptions: true,
+        }
+    }
+}
+
+impl SpecOptions {
+    /// Reads `GOOGLE_API_SCHEMA_MAX_DEPTH`, `GOOGLE_API_SCHEMA_ENUM_DESCRIPTIONS`
+    /// and `GOOGLE_API_SCHEMA_NESTED_DESCRIPTIONS` from the environment.
+    pub fn from_env() -> Self {
+        let defaults = Self::default();
+        let flag = |name: &str, default: bool| {
+            std::env::var(name)
+                .ok()
+                .map(|v| {
+                    matches!(
+                        v.trim().to_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                })
+                .unwrap_or(default)
+        };
+        Self {
+            max_schema_depth: std::env::var("GOOGLE_API_SCHEMA_MAX_DEPTH")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .map(|d| d.max(1))
+                .unwrap_or(defaults.max_schema_depth),
+            include_enum_descriptions: flag(
+                "GOOGLE_API_SCHEMA_ENUM_DESCRIPTIONS",
+                defaults.include_enum_descriptions,
+            ),
+            include_nested_descriptions: flag(
+                "GOOGLE_API_SCHEMA_NESTED_DESCRIPTIONS",
+                defaults.include_nested_descriptions,
+            ),
         }
     }
 }
@@ -130,7 +173,7 @@ pub struct MethodSpec {
 pub fn build_method_specs(doc: &DiscoveryDocument, options: &SpecOptions) -> Vec<MethodSpec> {
     let resolver = SchemaResolver {
         schemas: &doc.schemas,
-        max_depth: options.max_schema_depth,
+        options: *options,
     };
     doc.all_methods()
         .into_iter()
@@ -161,7 +204,10 @@ fn build_method_spec(
     // 1. Path parameters, in template order.
     for (name, reserved) in &template_params {
         let declared = method.parameters.get(name.as_str());
-        let mut schema = declared.map_or_else(|| json!({"type": "string"}), parameter_schema);
+        let mut schema = declared.map_or_else(
+            || json!({"type": "string"}),
+            |p| parameter_schema(p, &resolver.options),
+        );
         if let Some(obj) = schema.as_object_mut() {
             obj.remove("items");
             obj.insert("type".to_string(), Value::String("string".to_string()));
@@ -193,7 +239,7 @@ fn build_method_spec(
             original_name: name.clone(),
             name: parameter_name(name, location.as_str()),
             location,
-            schema: parameter_schema(param),
+            schema: parameter_schema(param, &resolver.options),
             required: param.required,
             reserved_expansion: false,
         });
@@ -320,7 +366,7 @@ fn keep_format(json_type: &str, format: &str) -> bool {
 }
 
 /// Builds the JSON schema for a query/path parameter.
-fn parameter_schema(param: &DiscoveryParameter) -> Value {
+fn parameter_schema(param: &DiscoveryParameter, options: &SpecOptions) -> Value {
     let json_type = param.type_.as_deref().unwrap_or("string");
     let json_type = if json_type == "any" {
         "string"
@@ -329,10 +375,15 @@ fn parameter_schema(param: &DiscoveryParameter) -> Value {
     };
     let mut schema = Map::new();
     schema.insert("type".to_string(), Value::String(json_type.to_string()));
+    let enum_descriptions = if options.include_enum_descriptions {
+        param.enum_descriptions.as_deref()
+    } else {
+        None
+    };
     let description = describe(
         &param.description,
         param.enum_values.as_deref(),
-        param.enum_descriptions.as_deref(),
+        enum_descriptions,
     );
     if !description.is_empty() {
         schema.insert("description".to_string(), Value::String(description));
@@ -397,7 +448,7 @@ fn describe(
 /// Resolves Discovery schemas into self-contained JSON schemas.
 struct SchemaResolver<'a> {
     schemas: &'a IndexMap<String, Value>,
-    max_depth: usize,
+    options: SpecOptions,
 }
 
 impl SchemaResolver<'_> {
@@ -426,7 +477,7 @@ impl SchemaResolver<'_> {
                 .trim_start_matches('/')
                 .to_string();
             let name = name.rsplit('/').next().unwrap_or(&name).to_string();
-            if stack.contains(&name) || depth >= self.max_depth {
+            if stack.contains(&name) || depth >= self.options.max_schema_depth {
                 return Self::summary(&name, description);
             }
             let Some(target) = self.schemas.get(&name) else {
@@ -448,6 +499,14 @@ impl SchemaResolver<'_> {
         }
 
         let json_type = obj.get("type").and_then(Value::as_str).unwrap_or("object");
+        // The request schema itself sits at depth 1 and its top-level
+        // properties at depth 2; anything deeper is "nested" and its
+        // descriptions are optional.
+        let description = if depth > 2 && !self.options.include_nested_descriptions {
+            ""
+        } else {
+            description
+        };
         let mut out = Map::new();
         match json_type {
             "object" => {
@@ -459,7 +518,7 @@ impl SchemaResolver<'_> {
                     );
                 }
                 if let Some(props) = obj.get("properties").and_then(Value::as_object) {
-                    if depth >= self.max_depth {
+                    if depth >= self.options.max_schema_depth {
                         let mut text = description.trim().to_string();
                         if !text.is_empty() {
                             text.push(' ');
@@ -525,15 +584,18 @@ impl SchemaResolver<'_> {
                             .map(str::to_string)
                             .collect()
                     });
-                let enum_descs: Option<Vec<String>> = obj
-                    .get("enumDescriptions")
-                    .and_then(Value::as_array)
-                    .map(|v| {
-                        v.iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_string)
-                            .collect()
-                    });
+                let enum_descs: Option<Vec<String>> = if self.options.include_enum_descriptions {
+                    obj.get("enumDescriptions")
+                        .and_then(Value::as_array)
+                        .map(|v| {
+                            v.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect()
+                        })
+                } else {
+                    None
+                };
                 let text = describe(description, enum_values.as_deref(), enum_descs.as_deref());
                 if !text.is_empty() {
                     out.insert("description".to_string(), Value::String(text));
@@ -765,7 +827,11 @@ mod tests {
 
     #[test]
     fn builds_spec_with_flattened_body_and_dedupe() {
-        let specs = build_method_specs(&doc(), &SpecOptions::default());
+        let options = SpecOptions {
+            include_enum_descriptions: true,
+            ..SpecOptions::default()
+        };
+        let specs = build_method_specs(&doc(), &options);
         assert_eq!(specs.len(), 1);
         let spec = &specs[0];
         assert_eq!(spec.tool_name, "googleads_customers_google_ads_search");
@@ -899,6 +965,33 @@ mod tests {
     }
 
     #[test]
+    fn enum_descriptions_are_opt_in() {
+        let specs = build_method_specs(&doc(), &SpecOptions::default());
+        let mode = &specs[0].parameter("settings").unwrap().schema["properties"]["mode"];
+        assert_eq!(mode["enum"], json!(["A", "B"]));
+        assert!(
+            mode.get("description").is_none(),
+            "no enum descriptions by default"
+        );
+    }
+
+    #[test]
+    fn nested_descriptions_can_be_dropped() {
+        let options = SpecOptions {
+            include_nested_descriptions: false,
+            ..SpecOptions::default()
+        };
+        let specs = build_method_specs(&doc(), &options);
+        let query = &specs[0].parameter("query").unwrap().schema;
+        assert_eq!(
+            query["description"], "GAQL query.",
+            "top-level params keep descriptions"
+        );
+        let settings = &specs[0].parameter("settings").unwrap().schema;
+        assert!(settings["properties"]["mode"].get("description").is_none());
+    }
+
+    #[test]
     fn depth_limit_summarises_deep_objects() {
         // Depth 2 expands the request body's own properties but summarises
         // the nested `Settings` object.
@@ -906,6 +999,7 @@ mod tests {
             &doc(),
             &SpecOptions {
                 max_schema_depth: 2,
+                ..SpecOptions::default()
             },
         );
         let settings = &specs[0].parameter("settings").unwrap().schema;
@@ -917,6 +1011,7 @@ mod tests {
             &doc(),
             &SpecOptions {
                 max_schema_depth: 1,
+                ..SpecOptions::default()
             },
         );
         assert_eq!(specs[0].body_kind, BodyKind::Whole);

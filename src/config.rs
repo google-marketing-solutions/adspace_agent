@@ -219,6 +219,74 @@ pub const YOUTUBE_TOOL_FILTER: &[&str] = &[
     "youtube_youtube_v3_live_chat_messages_stream",
 ];
 
+/// Google toolsets whose tools are loaded on demand (`enable_toolsets`)
+/// when `LAZY_TOOLSETS` is unset: the ones large enough to dominate the
+/// per-request token budget.
+pub const DEFAULT_LAZY_TOOLSETS: &[&str] = &[
+    "campaign_manager_360",
+    "display_video_360",
+    "merchant_center_products",
+];
+
+/// Short descriptions of the Google toolsets, shown to the model by
+/// `enable_toolsets` for deferred toolsets.
+pub fn toolset_summary(name: &str) -> &'static str {
+    match name {
+        "bid_manager" => "Bid Manager API (DV360 reporting queries and reports).",
+        "bigquery" => "BigQuery datasets, tables, schemas and SQL queries.",
+        "campaign_manager_360" => {
+            "Campaign Manager 360 (dfareporting v5): campaigns, placements, ads, creatives, event tags, sites, advertisers, reports and more."
+        }
+        "display_video_360" => {
+            "Display & Video 360: advertisers, campaigns, insertion orders, line items, creatives, audiences, targeting, SDF tasks."
+        }
+        "drive" => "Google Drive: list, get, download and export files; shared drives.",
+        "google_ads" => {
+            "Google Ads: GAQL search, field metadata, audience/keyword/reach insights and planning."
+        }
+        "google_genai" => {
+            "Gemini media tools: ask about YouTube videos, generate images and videos."
+        }
+        "merchant_center_inventories" => "Merchant Center local and regional product inventories.",
+        "merchant_center_products" => "Merchant Center products and product inputs.",
+        "merchant_center_reports" => "Merchant Center reporting (reports.search).",
+        "search_ads_360" => "Search Ads 360: search queries, custom columns, accessible customers.",
+        "storage" => "Google Cloud Storage buckets, folders and objects (read-only).",
+        "youtube" => "YouTube Data API: videos, channels, captions, comments, search, live chat.",
+        _ => "Google API tools.",
+    }
+}
+
+/// Resolves which toolsets are deferred from a raw `LAZY_TOOLSETS` value
+/// (`none` disables deferral, `all` defers every Discovery toolset).
+pub fn parse_lazy_toolsets(raw: Option<&str>, enabled: &[String]) -> Vec<String> {
+    let default = || {
+        DEFAULT_LAZY_TOOLSETS
+            .iter()
+            .map(|s| s.to_string())
+            .filter(|s| enabled.contains(s))
+            .collect()
+    };
+    let Some(raw) = raw else {
+        return default();
+    };
+    let parsed = split_csv_env(raw);
+    if parsed.is_empty() {
+        return default();
+    }
+    if is_none_marker(&parsed) {
+        return Vec::new();
+    }
+    if is_wildcard(&parsed) {
+        return enabled
+            .iter()
+            .filter(|s| !matches!(s.as_str(), "bigquery" | "google_genai"))
+            .cloned()
+            .collect();
+    }
+    parsed.into_iter().filter(|s| enabled.contains(s)).collect()
+}
+
 /// Errors raised while resolving configuration from the environment.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigError {
@@ -426,6 +494,8 @@ pub struct Settings {
     pub enabled_toolsets: Vec<String>,
     /// Google Ads tool filter (`GOOGLE_ADS_TOOL_FILTER`); `None` means all.
     pub google_ads_tool_filter: Option<Vec<String>>,
+    /// Toolsets loaded on demand through `enable_toolsets` (`LAZY_TOOLSETS`).
+    pub lazy_toolsets: Vec<String>,
     /// GCS bucket holding skills and CM360 payloads (`SKILLS_BUCKET_NAME`).
     pub skills_bucket_name: Option<String>,
     /// Local skills directory (`LOCAL_SKILLS_DIR`, defaults to `./skills`).
@@ -441,6 +511,9 @@ impl Settings {
     ///
     /// Returns [`ConfigError`] when `ENABLED_TOOLSETS` is invalid.
     pub fn from_env() -> Result<Self, ConfigError> {
+        let enabled_toolsets = get_enabled_toolsets()?;
+        let lazy_toolsets =
+            parse_lazy_toolsets(env::var("LAZY_TOOLSETS").ok().as_deref(), &enabled_toolsets);
         Ok(Self {
             model: env_or("MODEL", DEFAULT_MODEL),
             video_model: env_or("VIDEO_MODEL", DEFAULT_VIDEO_MODEL),
@@ -453,8 +526,9 @@ impl Settings {
             client_secret: env_or("CLIENT_SECRET", ""),
             google_ads_developer_token: env_or("GOOGLE_ADS_DEVELOPER_TOKEN", ""),
             google_ads_login_customer_id: env_opt("GOOGLE_ADS_LOGIN_CUSTOMER_ID"),
-            enabled_toolsets: get_enabled_toolsets()?,
+            enabled_toolsets,
             google_ads_tool_filter: get_google_ads_tool_filter(),
+            lazy_toolsets,
             skills_bucket_name: env_opt("SKILLS_BUCKET_NAME"),
             local_skills_dir: env_or("LOCAL_SKILLS_DIR", "./skills"),
             compaction: CompactionSettings::from_env(),
@@ -519,6 +593,32 @@ mod tests {
             err.to_string()
                 .starts_with("Unknown toolset(s) in ENABLED_TOOLSETS: dv360, google-ads."),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn lazy_toolsets_variants() {
+        let enabled = strs(&[
+            "google_ads",
+            "campaign_manager_360",
+            "display_video_360",
+            "bigquery",
+        ]);
+        assert_eq!(
+            parse_lazy_toolsets(None, &enabled),
+            strs(&["campaign_manager_360", "display_video_360"])
+        );
+        assert_eq!(
+            parse_lazy_toolsets(Some("none"), &enabled),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_lazy_toolsets(Some("all"), &enabled),
+            strs(&["google_ads", "campaign_manager_360", "display_video_360"])
+        );
+        assert_eq!(
+            parse_lazy_toolsets(Some("google_ads, nope"), &enabled),
+            strs(&["google_ads"])
         );
     }
 

@@ -49,7 +49,7 @@ Apply these instructions ONLY when the user asks about trafficking, pushing, or 
 ## 2. Parse the Trafficking Sheet (`parse_sheet_tool`)
 
 - Call **`parse_sheet_tool`** first to validate and parse the `.csv` artifact.
-- **Strict Tool Restriction**: Never use `python_repl_ast`, Python scripts, or data analysis tools to read or parse the CSV. Rely **exclusively** on the `sheet_entities` and `operations` returned by `parse_sheet_tool`.
+- **Strict Tool Restriction**: Never use code execution or data analysis tools (`gemini_code_execution`, `python_code`, `vertex_sandbox_code_execution`, ...) to read or parse the CSV. Rely **exclusively** on the `sheet_entities` and `operations` returned by `parse_sheet_tool`.
 - If `parse_sheet_tool` returns `status: "AUTH_REQUIRED"`, show the user the authorization link, ask them to complete it, and call the tool again afterwards.
 - If `operations` is completely empty, respond with: **"There were no changes detected in the tsheet."** and do not request approval.
 - **Do NOT** call `traffic_campaigns_in_cm360_tool` without explicit user approval.
@@ -268,7 +268,7 @@ impl Tool for ParseSheetTool {
          this session), validates all required fields, groups placements, creatives, event tags and ads, \
          resolves existing CM360 placement/creative IDs, generates the create/update operations and \
          stages them for execution. Always call this BEFORE traffic_campaigns_in_cm360_tool. Never parse \
-         the CSV with python_repl_ast or other tools; rely exclusively on this tool's `sheet_entities` \
+         the CSV with code execution or other tools; rely exclusively on this tool's `sheet_entities` \
          and `operations`. Returns status AUTH_REQUIRED with an authorization URL when the user must \
          first grant CM360 access."
     }

@@ -20,13 +20,11 @@ COPY src ./src
 RUN cargo build --release --locked
 
 # ---- runtime stage ---------------------------------------------------------
-FROM python:3.12-slim-bookworm
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
+# Python code runs server-side in Gemini (PYTHON_EXECUTOR=gemini, the default),
+# so the runtime image needs nothing beyond the binary and CA certificates.
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-# Scientific Python stack for the `python_repl_ast` data-analysis tool
-# (same libraries the Python agent shipped).
-COPY requirements-python.txt /tmp/requirements-python.txt
-RUN pip install --no-cache-dir -r /tmp/requirements-python.txt
 WORKDIR /app
 COPY --from=builder /app/target/release/adspace-agent /usr/local/bin/adspace-agent
 COPY assets ./assets

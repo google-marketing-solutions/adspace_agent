@@ -425,10 +425,11 @@ pub async fn create_agent(
         Err(e) => tracing::warn!("Data analysis toolset disabled: {e:#}"),
     }
     // Gemini server-side tools (search, URL context, maps, code execution).
-    // Code execution is skipped here when it is already the Python backend.
+    // Code execution is skipped here when it is already the Python backend
+    // (`PYTHON_EXECUTOR=gemini`, the default).
     let exclude = match PythonExecutorKind::from_env() {
-        Ok(PythonExecutorKind::Gemini) => vec![GeminiBuiltinTool::CodeExecution],
-        _ => vec![],
+        Ok(PythonExecutorKind::Gemini) | Err(_) => vec![GeminiBuiltinTool::CodeExecution],
+        Ok(_) => vec![],
     };
     match gemini_builtin_toolset(&exclude) {
         Ok(Some(ts)) => toolsets.push(Arc::new(ts)),

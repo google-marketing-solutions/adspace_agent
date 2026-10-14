@@ -20,8 +20,6 @@ built on [adk-rust](https://github.com/zavora-ai/adk-rust) 2.3.0.
 ### Prerequisites
 
 - Rust 1.95+ (`rustup`)
-- Python 3 on the `PATH` for the `python_repl_ast` data-analysis tool
-  (`pip install -r requirements-python.txt` for the full scientific stack)
 - `gcloud auth application-default login` (Vertex AI, Cloud Storage, BigQuery)
 
 ### Environment Variables
@@ -115,44 +113,19 @@ characters), so the existing `*_TOOL_FILTER` lists work unchanged.
 | `bigquery` | adk-rust `BigQueryToolset` (Application Default Credentials, read-only by default; `BIGQUERY_READ_ONLY=false` to allow DML) |
 | `google_genai` | `get_info_about_youtube_video` and `generate_image` through adk-rust's Gemini client (Imagen via `:predict`), `generate_video` (Veo long-running operation) — results are saved as session artifacts |
 | always on | Python execution (see below), `list_user_files`, adk-rust's built-in `load_artifacts` and `preload_memory`, adk-rust's progressive skills (`list_skills`, `load_skill`, `load_skill_resource`) plus `reload_skills` |
-| Gemini built-ins (`GEMINI_BUILTIN_TOOLS`) | `google_search`, `url_context`, `google_maps` by default; `all` adds `gemini_code_execution`. These run server-side inside Gemini. |
+| Gemini built-ins (`GEMINI_BUILTIN_TOOLS`) | `google_search`, `url_context`, `google_maps` by default (`none` disables). These run server-side inside Gemini, as does the default `gemini_code_execution`. |
 
 ### Python data analysis
 
-`PYTHON_EXECUTOR` selects the backend for model-written Python:
+Model-written Python runs through adk-rust built-ins only; `PYTHON_EXECUTOR`
+selects which:
 
 | Value | Tool | Notes |
 |---|---|---|
-| `host` (default) | `python_repl_ast` | Persistent `python3` REPL per session (variables survive between calls) using the host interpreter and installed packages — the closest match to the original `PythonAstREPLTool`. |
-| `gemini` | `gemini_code_execution` | adk-rust's built-in Gemini code execution: the model writes and runs Python server-side (pandas, numpy, matplotlib, ... available). No infrastructure, stateless per turn. |
-| `docker` | `python_code` | adk-rust's container-backed CPython tool (`PYTHON_DOCKER_IMAGE`). Needs a Docker daemon. |
-| `vertex` | `vertex_sandbox_code_execution` | adk-rust's Vertex AI Agent Engine managed sandbox (`VERTEX_SANDBOX_NAME` or `VERTEX_AGENT_ENGINE`). |
-| `monty` | `monty_python_code` | adk-rust's in-process Monty interpreter (Python subset, no third-party packages). Requires `cargo build --features monty`. |
-
-## Performance: deferred toolsets and schema size
-
-Everything the model can call is re-sent as tool declarations on every model
-request, so the size of that list drives latency and cost. Two controls keep
-it small:
-
-- **Deferred toolsets** (`LAZY_TOOLSETS`, default
-  `campaign_manager_360,display_video_360,merchant_center_products`): their
-  tools are hidden behind a single `enable_toolsets` tool. The model enables a
-  collection when a request needs it; the choice is stored in session state so
-  the tools stay available for the rest of the session. Set `LAZY_TOOLSETS=none`
-  to always expose everything (the Python agent's behaviour) or `all` to defer
-  every Discovery-based toolset.
-- **Schema trimming**: `GOOGLE_API_SCHEMA_MAX_DEPTH` (default 4) caps how deep
-  request-body schemas are expanded, `GOOGLE_API_SCHEMA_ENUM_DESCRIPTIONS`
-  (default `false`) controls verbose per-enum-value descriptions and
-  `GOOGLE_API_SCHEMA_NESTED_DESCRIPTIONS` (default `true`) controls descriptions
-  on nested properties.
-
-Measure the effect with `cargo run -- list-tools --sizes all`. With the
-defaults the always-on declarations are ~170 KB (~40k tokens) instead of
-~1.9 MB (~470k tokens) for the full, fully-expanded tool list. Context caching
-(`CONTEXT_CACHE_*`) and parallel execution of read-only tools are enabled on
-top of that.
+| `gemini` (default) | `gemini_code_execution` | Gemini writes and runs the code server-side (numpy, pandas, matplotlib, scikit-learn, … available). No infrastructure; stateless per turn. |
+| `vertex` | `vertex_sandbox_code_execution` | Vertex AI Agent Engine managed sandbox (`VERTEX_SANDBOX_NAME` or `VERTEX_AGENT_ENGINE`). Stateful per session. |
+| `docker` | `python_code` | Container-backed CPython (`PYTHON_DOCKER_IMAGE`). Needs a Docker daemon. |
+| `monty` | `monty_python_code` | In-process Monty interpreter (Python subset, no third-party packages). Requires `cargo build --features monty`. |
 
 ## Configuring Your GCS Bucket for Agent Skills
 
@@ -220,9 +193,9 @@ SKILLS_BUCKET_NAME={YOUR_SKILLS_BUCKET_NAME},\
 ARTIFACT_SERVICE_URI=gs://{YOUR_ARTIFACT_BUCKET}"
 ```
 
-The [Dockerfile](Dockerfile) builds a static release binary and ships it on a
-`python:3.12-slim` image with the data-science packages installed for the
-`python_repl_ast` tool.
+The [Dockerfile](Dockerfile) builds a release binary and ships it on a
+`debian:bookworm-slim` image — no Python runtime is needed because code
+execution happens server-side in Gemini.
 
 ## Differences from the Python agent
 

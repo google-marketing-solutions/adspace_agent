@@ -85,7 +85,7 @@ async fn agent_runs_a_tool_turn_and_persists_artifacts_and_memory() {
     // SAFETY: tests in this file run on a single thread per process start;
     // the variables only steer backend selection.
     unsafe {
-        std::env::set_var("PYTHON_EXECUTOR", "host");
+        std::env::remove_var("PYTHON_EXECUTOR");
         std::env::set_var("LOCAL_SKILLS_DIR", "./does-not-exist");
         std::env::remove_var("SKILLS_BUCKET_NAME");
     }
@@ -232,7 +232,7 @@ async fn agent_runs_a_tool_turn_and_persists_artifacts_and_memory() {
         "load_artifacts",
         "parse_sheet_tool",
         "traffic_campaigns_in_cm360_tool",
-        "python_repl_ast",
+        "gemini_code_execution",
         "reload_skills",
         "google_search",
         "url_context",

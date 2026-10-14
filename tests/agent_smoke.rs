@@ -234,6 +234,9 @@ async fn agent_runs_a_tool_turn_and_persists_artifacts_and_memory() {
         "traffic_campaigns_in_cm360_tool",
         "python_repl_ast",
         "reload_skills",
+        "google_search",
+        "url_context",
+        "google_maps",
     ] {
         assert!(
             first.tools.contains_key(expected),

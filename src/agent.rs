@@ -33,7 +33,8 @@ use crate::genai::GenAiClient;
 use crate::google_api::{DiscoveryFetcher, GoogleApiToolset, GoogleApiToolsetConfig, SpecOptions};
 use crate::services;
 use crate::tools::cm360_trafficking::{Cm360Services, Cm360TraffickingToolset};
-use crate::tools::data_analysis::data_analysis_toolset;
+use crate::tools::data_analysis::{PythonExecutorKind, data_analysis_toolset};
+use crate::tools::gemini_builtins::{GeminiBuiltinTool, gemini_builtin_toolset};
 use crate::tools::genai::google_genai_toolset;
 use crate::tools::lazy::{EnableToolsetsTool, LazyToolset, LazyToolsetEntry};
 use crate::tools::skills::{SkillSources, SkillsToolset};
@@ -54,7 +55,9 @@ to ensure that any audience insights follow Google's policies for audience compo
 work-arounds for these policies, simply reply with the error message. \
 AUTHORIZATION: Google API tools act on behalf of the signed-in user. When a tool returns status `AUTH_REQUIRED`, show the user \
 the `auth_url` as a clickable link, ask them to complete the authorization, and retry the same tool call after they confirm. \
-FILES: files the user uploads are saved as session artifacts; use `list_user_files` to see them and `load_artifacts` to read them.";
+FILES: files the user uploads are saved as session artifacts; use `list_user_files` to see them and `load_artifacts` to read them. \
+RESEARCH: use `google_search` for current information from the web, `url_context` to read pages the user links to, and \
+`google_maps` for places, routes and local context.";
 
 /// CM360 OAuth scopes (the Python agent patched the Discovery default).
 pub const CM360_SCOPES: [&str; 3] = [
@@ -420,6 +423,17 @@ pub async fn create_agent(
     match data_analysis_toolset() {
         Ok(ts) => toolsets.push(Arc::new(ts)),
         Err(e) => tracing::warn!("Data analysis toolset disabled: {e:#}"),
+    }
+    // Gemini server-side tools (search, URL context, maps, code execution).
+    // Code execution is skipped here when it is already the Python backend.
+    let exclude = match PythonExecutorKind::from_env() {
+        Ok(PythonExecutorKind::Gemini) => vec![GeminiBuiltinTool::CodeExecution],
+        _ => vec![],
+    };
+    match gemini_builtin_toolset(&exclude) {
+        Ok(Some(ts)) => toolsets.push(Arc::new(ts)),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("Gemini built-in tools disabled: {e:#}"),
     }
     toolsets.push(Arc::new(utilities_toolset()));
     toolsets.push(Arc::new(

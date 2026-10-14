@@ -406,8 +406,16 @@ impl SessionCredentialManager {
     }
 
     /// The token stored in the session state, if any (no refresh performed).
-    pub fn stored_token(ctx: &dyn ReadonlyContext) -> Option<OAuthToken> {
-        let value = ctx.state()?.get(CREDENTIALS_STATE_KEY)?;
+    ///
+    /// The runner's tool context exposes the live session through
+    /// [`ToolContext::session`] (its [`ReadonlyContext::state`] is `None`),
+    /// so that is consulted first; `state()` is the fallback for contexts
+    /// that only implement the read-only view.
+    pub fn stored_token(ctx: &dyn ToolContext) -> Option<OAuthToken> {
+        let value = ctx
+            .session()
+            .and_then(|s| s.state().get(CREDENTIALS_STATE_KEY))
+            .or_else(|| ctx.state().and_then(|s| s.get(CREDENTIALS_STATE_KEY)))?;
         if value.is_null() {
             return None;
         }
@@ -642,7 +650,9 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use adk_rust::session::{CreateRequest, GetRequest, InMemorySessionService};
-    use adk_rust::{Artifacts, CallbackContext, Content, EventActions, MemoryEntry, State};
+    use adk_rust::{
+        Artifacts, CallbackContext, Content, EventActions, MemoryEntry, Session, State,
+    };
     use serde_json::{Value, json};
 
     use super::*;
@@ -667,7 +677,9 @@ mod tests {
         }
     }
 
-    /// Tool context with a real session state and action accumulation.
+    /// Tool context shaped like the runner's: the session (and its state) is
+    /// reachable through `ToolContext::session()`, while
+    /// `ReadonlyContext::state()` stays at its default `None`.
     struct FakeToolContext {
         state: StdMutex<HashMap<String, Value>>,
         actions: StdMutex<EventActions>,
@@ -723,8 +735,23 @@ mod tests {
         fn user_content(&self) -> &Content {
             &self.content
         }
-        fn state(&self) -> Option<&dyn State> {
-            Some(self)
+    }
+
+    impl Session for FakeToolContext {
+        fn id(&self) -> &str {
+            "s-1"
+        }
+        fn app_name(&self) -> &str {
+            "adspace_agent"
+        }
+        fn user_id(&self) -> &str {
+            "local-user"
+        }
+        fn state(&self) -> &dyn State {
+            self
+        }
+        fn conversation_history(&self) -> Vec<Content> {
+            Vec::new()
         }
     }
 
@@ -748,6 +775,9 @@ mod tests {
         }
         async fn search_memory(&self, _query: &str) -> adk_rust::Result<Vec<MemoryEntry>> {
             Ok(vec![])
+        }
+        fn session(&self) -> Option<&dyn Session> {
+            Some(self)
         }
     }
 

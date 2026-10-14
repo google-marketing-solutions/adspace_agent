@@ -13,8 +13,8 @@ use std::sync::Arc;
 use adk_rust::session::{CreateRequest, GetRequest, InMemorySessionService, SessionService};
 use adk_rust::tool::SimpleToolContext;
 use adk_rust::{
-    Artifacts, CallbackContext, Content, EventActions, MemoryEntry, ReadonlyContext, State,
-    ToolContext,
+    Artifacts, CallbackContext, Content, EventActions, MemoryEntry, ReadonlyContext, Session,
+    State, ToolContext,
 };
 use adspace_agent::auth::{
     CREDENTIALS_STATE_KEY, GoogleOAuthFlow, OAuthClientConfig, OAuthToken,
@@ -49,8 +49,9 @@ async fn spawn(router: Router) -> String {
     format!("http://{addr}")
 }
 
-/// Tool context backed by the session's persisted state (what the runner
-/// provides to tools during a turn).
+/// Tool context backed by the session's persisted state, shaped like the
+/// runner's `AgentToolContext`: the session is reachable through
+/// `ToolContext::session()` and `ReadonlyContext::state()` is `None`.
 struct SessionToolContext {
     session: SessionRef,
     state: HashMap<String, Value>,
@@ -92,8 +93,23 @@ impl ReadonlyContext for SessionToolContext {
     fn user_content(&self) -> &Content {
         &self.content
     }
-    fn state(&self) -> Option<&dyn State> {
-        Some(self)
+}
+
+impl Session for SessionToolContext {
+    fn id(&self) -> &str {
+        &self.session.session_id
+    }
+    fn app_name(&self) -> &str {
+        &self.session.app_name
+    }
+    fn user_id(&self) -> &str {
+        &self.session.user_id
+    }
+    fn state(&self) -> &dyn State {
+        self
+    }
+    fn conversation_history(&self) -> Vec<Content> {
+        Vec::new()
     }
 }
 
@@ -117,6 +133,9 @@ impl ToolContext for SessionToolContext {
     }
     async fn search_memory(&self, _query: &str) -> adk_rust::Result<Vec<MemoryEntry>> {
         Ok(vec![])
+    }
+    fn session(&self) -> Option<&dyn Session> {
+        Some(self)
     }
 }
 

@@ -2,29 +2,38 @@
 //!
 //! The agent needs the *user's* Google credentials (not the service's) to
 //! call Google Ads, Campaign Manager 360, Display & Video 360, Drive, YouTube
-//! and friends. This module implements the pieces the Python ADK provided
-//! through its `request_credential` flow:
+//! and friends. Credentials belong to the chat session, exactly like the
+//! Python agent's `CREDENTIALS_CACHE_KEY` state entry:
 //!
-//! 1. A tool that needs a token asks the [`UserCredentialManager`].
+//! 1. A tool that needs a token asks the [`SessionCredentialManager`], which
+//!    reads the token from the session state (refreshing it when expired).
 //! 2. If no usable token exists, the manager returns an [`AuthRequired`]
-//!    error carrying an authorization URL. The tool surfaces that URL to the
-//!    user through the LLM.
+//!    error carrying an authorization URL whose `state` parameter is a signed
+//!    claim naming the session. The tool surfaces that URL to the user
+//!    through the LLM.
 //! 3. The user authorizes; Google redirects to our `/oauth2/callback` route,
-//!    which calls [`UserCredentialManager::complete_authorization`].
-//! 4. The next tool call finds the stored token (refreshing it when expired).
+//!    which calls [`SessionCredentialManager::complete_authorization`] and
+//!    [`SessionCredentialManager::persist`] to write the tokens into that
+//!    session's state.
+//! 4. The next tool call of the session finds the stored token.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use adk_rust::session::{AppendEventRequest, SessionService};
+use adk_rust::{AdkIdentity, AppName, Event, ReadonlyContext, SessionId, ToolContext, UserId};
 use async_trait::async_trait;
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 use super::AccessTokenProvider;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Google's OAuth 2.0 authorization endpoint.
 pub const GOOGLE_AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -34,13 +43,13 @@ pub const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 pub const GOOGLE_REVOKE_ENDPOINT: &str = "https://oauth2.googleapis.com/revoke";
 /// Path of the OAuth redirect handler served by the agent.
 pub const OAUTH_CALLBACK_PATH: &str = "/oauth2/callback";
-/// Session-state key under which the user's Google credentials are mirrored
-/// (same name the Python agent used).
+/// Session-state key holding the session's Google credentials (same name the
+/// Python agent used).
 pub const CREDENTIALS_STATE_KEY: &str = "CREDENTIALS_CACHE_KEY";
 
 /// How long before expiry a token is treated as expired.
 const EXPIRY_SKEW: Duration = Duration::from_secs(60);
-/// Pending authorizations older than this are dropped.
+/// Authorization links older than this are rejected by the callback.
 const PENDING_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// OAuth client configuration.
@@ -279,158 +288,101 @@ impl GoogleOAuthFlow {
     }
 }
 
-/// Persistent storage for per-user tokens.
-#[async_trait]
-pub trait CredentialStore: Send + Sync {
-    /// Loads the token for a user.
-    async fn get(&self, user_id: &str) -> Option<OAuthToken>;
-    /// Stores the token for a user.
-    async fn put(&self, user_id: &str, token: OAuthToken);
-    /// Deletes the token for a user.
-    async fn remove(&self, user_id: &str);
+/// Identity of the chat session a credential belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRef {
+    /// ADK app name.
+    pub app_name: String,
+    /// User id of the session owner.
+    pub user_id: String,
+    /// Session id.
+    pub session_id: String,
 }
 
-/// Process-local token store.
-#[derive(Debug, Default)]
-pub struct InMemoryCredentialStore {
-    tokens: RwLock<HashMap<String, OAuthToken>>,
-}
-
-#[async_trait]
-impl CredentialStore for InMemoryCredentialStore {
-    async fn get(&self, user_id: &str) -> Option<OAuthToken> {
-        self.tokens.read().await.get(user_id).cloned()
-    }
-
-    async fn put(&self, user_id: &str, token: OAuthToken) {
-        self.tokens.write().await.insert(user_id.to_string(), token);
-    }
-
-    async fn remove(&self, user_id: &str) {
-        self.tokens.write().await.remove(user_id);
-    }
-}
-
-/// JSON-file token store (one file holding every user's tokens).
-///
-/// Suitable for local development; the file is created with mode `0600` on
-/// Unix.
-#[derive(Debug)]
-pub struct FileCredentialStore {
-    path: PathBuf,
-    inner: InMemoryCredentialStore,
-    io: Mutex<()>,
-}
-
-impl FileCredentialStore {
-    /// Opens (or creates) the store at `path`, loading existing tokens.
-    pub async fn open(path: impl Into<PathBuf>) -> Self {
-        let path = path.into();
-        let inner = InMemoryCredentialStore::default();
-        if let Ok(text) = tokio::fs::read_to_string(&path).await
-            && let Ok(map) = serde_json::from_str::<HashMap<String, OAuthToken>>(&text)
-        {
-            *inner.tokens.write().await = map;
-        }
+impl SessionRef {
+    /// The session of the current invocation.
+    pub fn from_context(ctx: &dyn ReadonlyContext) -> Self {
         Self {
-            path,
-            inner,
-            io: Mutex::new(()),
+            app_name: ctx.app_name().to_string(),
+            user_id: ctx.user_id().to_string(),
+            session_id: ctx.session_id().to_string(),
         }
     }
 
-    async fn flush(&self) {
-        let _guard = self.io.lock().await;
-        let snapshot = self.inner.tokens.read().await.clone();
-        let Ok(text) = serde_json::to_string_pretty(&snapshot) else {
-            return;
-        };
-        if let Some(parent) = self.path.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-        if let Err(e) = tokio::fs::write(&self.path, text).await {
-            tracing::warn!(
-                "Failed to persist credentials to {}: {e}",
-                self.path.display()
-            );
-            return;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
-        }
+    /// Typed identity triple used by the session service.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when one of the identifiers is invalid.
+    pub fn identity(&self) -> anyhow::Result<AdkIdentity> {
+        Ok(AdkIdentity::new(
+            AppName::new(self.app_name.clone())?,
+            UserId::new(self.user_id.clone())?,
+            SessionId::new(self.session_id.clone())?,
+        ))
     }
 }
 
-#[async_trait]
-impl CredentialStore for FileCredentialStore {
-    async fn get(&self, user_id: &str) -> Option<OAuthToken> {
-        self.inner.get(user_id).await
-    }
-
-    async fn put(&self, user_id: &str, token: OAuthToken) {
-        self.inner.put(user_id, token).await;
-        self.flush().await;
-    }
-
-    async fn remove(&self, user_id: &str) {
-        self.inner.remove(user_id).await;
-        self.flush().await;
+impl std::fmt::Display for SessionRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}/{}", self.app_name, self.user_id, self.session_id)
     }
 }
 
-#[derive(Debug, Clone)]
-struct PendingAuthorization {
-    user_id: String,
-    scopes: Vec<String>,
-    created_at: DateTime<Utc>,
+/// Claims carried by the signed OAuth `state` parameter.
+#[derive(Debug, Serialize, Deserialize)]
+struct StateClaims {
+    #[serde(flatten)]
+    session: SessionRef,
+    /// Issued-at (Unix seconds).
+    iat: i64,
+    /// Random nonce so repeated authorizations of one session differ.
+    nonce: String,
 }
 
-/// Coordinates per-user Google credentials for the whole agent process.
-pub struct UserCredentialManager {
+fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn unb64(text: &str) -> anyhow::Result<Vec<u8>> {
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(text)?)
+}
+
+/// Google credentials attached to the chat session.
+///
+/// Tokens are stored in the session state (key [`CREDENTIALS_STATE_KEY`]) and
+/// nowhere else: every session authorizes on its own, and the server keeps no
+/// credential store. The OAuth `state` parameter is a signed, short-lived
+/// claim naming the session, so the redirect handler can write the exchanged
+/// tokens straight into that session without any server-side pending map.
+pub struct SessionCredentialManager {
     flow: GoogleOAuthFlow,
-    store: Arc<dyn CredentialStore>,
-    pending: Mutex<HashMap<String, PendingAuthorization>>,
+    /// HMAC key for the `state` parameter (derived from the client secret).
+    state_key: [u8; 32],
     /// Scopes every authorization asks for (union of all enabled toolsets),
     /// so one consent covers the whole agent.
     base_scopes: RwLock<Vec<String>>,
-    /// Optional pre-seeded token shared by every user (single-tenant setups).
-    seeded: Option<OAuthToken>,
 }
 
-impl std::fmt::Debug for UserCredentialManager {
+impl std::fmt::Debug for SessionCredentialManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UserCredentialManager")
+        f.debug_struct("SessionCredentialManager")
             .field("redirect_uri", &self.flow.config.redirect_uri)
             .finish()
     }
 }
 
-impl UserCredentialManager {
-    /// Creates a manager.
-    pub fn new(flow: GoogleOAuthFlow, store: Arc<dyn CredentialStore>) -> Self {
+impl SessionCredentialManager {
+    /// Creates a manager for the given flow.
+    pub fn new(flow: GoogleOAuthFlow) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"adspace-agent/oauth-state:");
+        hasher.update(flow.config.client_secret.as_bytes());
         Self {
             flow,
-            store,
-            pending: Mutex::new(HashMap::new()),
+            state_key: hasher.finalize().into(),
             base_scopes: RwLock::new(Vec::new()),
-            seeded: None,
         }
-    }
-
-    /// Seeds a refresh token (from `GOOGLE_OAUTH_REFRESH_TOKEN`) used for any
-    /// user that has not authorized interactively.
-    pub fn with_seeded_refresh_token(mut self, refresh_token: Option<String>) -> Self {
-        self.seeded = refresh_token
-            .filter(|t| !t.is_empty())
-            .map(|refresh_token| OAuthToken {
-                access_token: String::new(),
-                refresh_token: Some(refresh_token),
-                expires_at: Some(DateTime::<Utc>::MIN_UTC),
-                scopes: Vec::new(),
-            });
-        self
     }
 
     /// The OAuth flow (for building URLs in UIs).
@@ -453,24 +405,53 @@ impl UserCredentialManager {
         self.base_scopes.read().await.clone()
     }
 
-    /// Returns a valid access token for `user_id` covering `scopes`.
+    /// The token stored in the session state, if any (no refresh performed).
+    pub fn stored_token(ctx: &dyn ReadonlyContext) -> Option<OAuthToken> {
+        let value = ctx.state()?.get(CREDENTIALS_STATE_KEY)?;
+        if value.is_null() {
+            return None;
+        }
+        match serde_json::from_value(value) {
+            Ok(token) => Some(token),
+            Err(e) => {
+                tracing::warn!("Ignoring unreadable credentials in session state: {e}");
+                None
+            }
+        }
+    }
+
+    /// Writes (or, with `None`, clears) the token in the session state through
+    /// the tool's event actions.
+    pub fn store_token(ctx: &dyn ToolContext, token: Option<&OAuthToken>) {
+        let value = token
+            .and_then(|t| serde_json::to_value(t).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let mut actions = ctx.actions();
+        actions
+            .state_delta
+            .insert(CREDENTIALS_STATE_KEY.to_string(), value);
+        ctx.set_actions(actions);
+    }
+
+    /// Returns a valid access token for the invocation's session covering
+    /// `scopes`, refreshing (and re-storing) it when expired.
     ///
     /// # Errors
     ///
     /// Returns [`AuthRequired`] (wrapped in `anyhow`) when the user must
-    /// authorize first, or another error when a refresh fails.
-    pub async fn access_token(&self, user_id: &str, scopes: &[String]) -> anyhow::Result<String> {
-        let stored = match self.store.get(user_id).await {
-            Some(token) => Some(token),
-            None => self.seeded.clone(),
-        };
-
-        if let Some(token) = stored {
+    /// authorize this session first.
+    pub async fn access_token(
+        &self,
+        ctx: &dyn ToolContext,
+        scopes: &[String],
+    ) -> anyhow::Result<String> {
+        let session = SessionRef::from_context(ctx);
+        if let Some(token) = Self::stored_token(ctx) {
             if !token.covers(scopes) {
                 tracing::info!(
-                    "Stored credentials for {user_id} lack required scopes; requesting re-authorization"
+                    "Credentials of session {session} lack required scopes; requesting re-authorization"
                 );
-                return Err(self.begin_authorization(user_id, scopes).await.into());
+                return Err(self.begin_authorization(&session, scopes).await.into());
             }
             if !token.is_expired() {
                 return Ok(token.access_token);
@@ -478,25 +459,37 @@ impl UserCredentialManager {
             if token.refresh_token.is_some() {
                 match self.flow.refresh(&token).await {
                     Ok(refreshed) => {
-                        self.store.put(user_id, refreshed.clone()).await;
+                        Self::store_token(ctx, Some(&refreshed));
                         return Ok(refreshed.access_token);
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to refresh Google credentials for {user_id}: {e}");
-                        self.store.remove(user_id).await;
+                        tracing::warn!(
+                            "Failed to refresh Google credentials of session {session}: {e}"
+                        );
+                        Self::store_token(ctx, None);
                     }
                 }
             }
         }
-        Err(self.begin_authorization(user_id, scopes).await.into())
+        Err(self.begin_authorization(&session, scopes).await.into())
     }
 
-    /// Starts an authorization for `user_id`, returning the instructions.
-    pub async fn begin_authorization(&self, user_id: &str, scopes: &[String]) -> AuthRequired {
+    /// Starts an authorization for `session`, returning the instructions.
+    pub async fn begin_authorization(
+        &self,
+        session: &SessionRef,
+        scopes: &[String],
+    ) -> AuthRequired {
         if !self.flow.config.is_configured() {
             return AuthRequired {
                 auth_url: String::new(),
-                message: "Google OAuth is not configured: set CLIENT_ID and CLIENT_SECRET (or GOOGLE_OAUTH_REFRESH_TOKEN) and restart the agent.".to_string(),
+                message: "Google OAuth is not configured: set CLIENT_ID and CLIENT_SECRET and restart the agent.".to_string(),
+            };
+        }
+        if session.session_id.is_empty() {
+            return AuthRequired {
+                auth_url: String::new(),
+                message: "Google authorization needs an active chat session.".to_string(),
             };
         }
         let mut all_scopes = self.registered_scopes().await;
@@ -505,24 +498,9 @@ impl UserCredentialManager {
                 all_scopes.push(scope.clone());
             }
         }
-        let state = uuid::Uuid::new_v4().simple().to_string();
-        let auth_url = self.flow.authorization_url(&all_scopes, &state);
-        let mut pending = self.pending.lock().await;
-        let now = Utc::now();
-        pending.retain(|_, p| {
-            now.signed_duration_since(p.created_at)
-                .to_std()
-                .unwrap_or_default()
-                < PENDING_TTL
-        });
-        pending.insert(
-            state,
-            PendingAuthorization {
-                user_id: user_id.to_string(),
-                scopes: all_scopes,
-                created_at: now,
-            },
-        );
+        let auth_url = self
+            .flow
+            .authorization_url(&all_scopes, &self.sign_state(session));
         AuthRequired {
             auth_url: auth_url.clone(),
             message: format!(
@@ -531,63 +509,125 @@ impl UserCredentialManager {
         }
     }
 
-    /// Completes an authorization from the redirect handler.
+    /// Completes an authorization from the redirect handler: validates the
+    /// `state`, exchanges the code and returns the session the tokens belong
+    /// to together with the tokens (see [`Self::persist`]).
     ///
     /// # Errors
     ///
-    /// Returns an error when `state` is unknown/expired or the code exchange
+    /// Returns an error when `state` is invalid/expired or the code exchange
     /// fails.
-    pub async fn complete_authorization(&self, state: &str, code: &str) -> anyhow::Result<String> {
-        let pending = self.pending.lock().await.remove(state);
-        let Some(pending) = pending else {
-            anyhow::bail!(
-                "Unknown or expired OAuth state parameter; please restart the authorization from the chat."
-            );
+    pub async fn complete_authorization(
+        &self,
+        state: &str,
+        code: &str,
+    ) -> anyhow::Result<(SessionRef, OAuthToken)> {
+        let session = self.verify_state(state)?;
+        let scopes = self.registered_scopes().await;
+        let token = self.flow.exchange_code(code, &scopes).await?;
+        Ok((session, token))
+    }
+
+    /// Stores `token` in the state of `session` by appending a state-only
+    /// event, so the next turn of that chat finds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session does not exist or the write fails.
+    pub async fn persist(
+        &self,
+        sessions: &dyn SessionService,
+        session: &SessionRef,
+        token: &OAuthToken,
+    ) -> anyhow::Result<()> {
+        let mut event = Event::new(format!("oauth2-{}", uuid::Uuid::new_v4().simple()));
+        event.author = "system".to_string();
+        event.actions.state_delta.insert(
+            CREDENTIALS_STATE_KEY.to_string(),
+            serde_json::to_value(token)?,
+        );
+        sessions
+            .append_event_for_identity(AppendEventRequest {
+                identity: session.identity()?,
+                event,
+            })
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("failed to store credentials in session {session}: {e}")
+            })?;
+        tracing::info!("Stored Google credentials in session {session}");
+        Ok(())
+    }
+
+    fn mac(&self) -> HmacSha256 {
+        HmacSha256::new_from_slice(&self.state_key).expect("HMAC accepts any key length")
+    }
+
+    /// Builds the signed `state` parameter naming `session`.
+    fn sign_state(&self, session: &SessionRef) -> String {
+        let claims = StateClaims {
+            session: session.clone(),
+            iat: Utc::now().timestamp(),
+            nonce: uuid::Uuid::new_v4().simple().to_string(),
         };
-        let token = self.flow.exchange_code(code, &pending.scopes).await?;
-        self.store.put(&pending.user_id, token).await;
-        tracing::info!("Stored Google credentials for user {}", pending.user_id);
-        Ok(pending.user_id)
+        let payload = b64(&serde_json::to_vec(&claims).expect("claims serialize"));
+        let mut mac = self.mac();
+        mac.update(payload.as_bytes());
+        format!("{payload}.{}", b64(&mac.finalize().into_bytes()))
     }
 
-    /// Forgets the stored credentials of a user.
-    pub async fn revoke(&self, user_id: &str) {
-        self.store.remove(user_id).await;
-    }
-
-    /// The stored token for a user, if any (no refresh performed).
-    pub async fn stored_token(&self, user_id: &str) -> Option<OAuthToken> {
-        self.store.get(user_id).await
+    /// Validates a `state` parameter and returns the session it names.
+    fn verify_state(&self, state: &str) -> anyhow::Result<SessionRef> {
+        let invalid = || {
+            anyhow::anyhow!(
+                "Invalid or expired OAuth state parameter; please restart the authorization from the chat."
+            )
+        };
+        let (payload, signature) = state.split_once('.').ok_or_else(invalid)?;
+        let signature = unb64(signature).map_err(|_| invalid())?;
+        let mut mac = self.mac();
+        mac.update(payload.as_bytes());
+        mac.verify_slice(&signature).map_err(|_| invalid())?;
+        let claims: StateClaims = serde_json::from_slice(&unb64(payload).map_err(|_| invalid())?)
+            .map_err(|_| invalid())?;
+        let age = Utc::now().timestamp() - claims.iat;
+        if age < -60 || age > PENDING_TTL.as_secs() as i64 {
+            return Err(invalid());
+        }
+        Ok(claims.session)
     }
 }
 
-/// [`AccessTokenProvider`] bound to one user and a set of scopes.
+/// [`AccessTokenProvider`] bound to one tool invocation (hence one session)
+/// and a set of scopes.
 #[derive(Clone)]
-pub struct UserTokenProvider {
-    manager: Arc<UserCredentialManager>,
-    user_id: String,
+pub struct SessionTokenProvider {
+    manager: Arc<SessionCredentialManager>,
+    ctx: Arc<dyn ToolContext>,
     scopes: Vec<String>,
 }
 
-impl UserTokenProvider {
-    /// Creates a provider for `user_id` needing `scopes`.
+impl SessionTokenProvider {
+    /// Creates a provider for the session of `ctx` needing `scopes`.
     pub fn new(
-        manager: Arc<UserCredentialManager>,
-        user_id: impl Into<String>,
+        manager: Arc<SessionCredentialManager>,
+        ctx: Arc<dyn ToolContext>,
         scopes: Vec<String>,
     ) -> Self {
         Self {
             manager,
-            user_id: user_id.into(),
+            ctx,
             scopes,
         }
     }
 }
 
 #[async_trait]
-impl AccessTokenProvider for UserTokenProvider {
+impl AccessTokenProvider for SessionTokenProvider {
     async fn access_token(&self) -> anyhow::Result<String> {
-        self.manager.access_token(&self.user_id, &self.scopes).await
+        self.manager
+            .access_token(self.ctx.as_ref(), &self.scopes)
+            .await
     }
 }
 
@@ -598,6 +638,13 @@ pub fn auth_required(err: &anyhow::Error) -> Option<&AuthRequired> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+
+    use adk_rust::session::{CreateRequest, GetRequest, InMemorySessionService};
+    use adk_rust::{Artifacts, CallbackContext, Content, EventActions, MemoryEntry, State};
+    use serde_json::{Value, json};
+
     use super::*;
 
     fn config() -> OAuthClientConfig {
@@ -606,6 +653,111 @@ mod tests {
             client_secret: "secret".into(),
             redirect_uri: "http://localhost:8000/oauth2/callback".into(),
         }
+    }
+
+    fn manager() -> SessionCredentialManager {
+        SessionCredentialManager::new(GoogleOAuthFlow::new(config()))
+    }
+
+    fn session() -> SessionRef {
+        SessionRef {
+            app_name: "adspace_agent".into(),
+            user_id: "local-user".into(),
+            session_id: "s-1".into(),
+        }
+    }
+
+    /// Tool context with a real session state and action accumulation.
+    struct FakeToolContext {
+        state: StdMutex<HashMap<String, Value>>,
+        actions: StdMutex<EventActions>,
+        content: Content,
+    }
+
+    impl FakeToolContext {
+        fn with_state(entries: &[(&str, Value)]) -> Arc<dyn ToolContext> {
+            Arc::new(Self {
+                state: StdMutex::new(
+                    entries
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.clone()))
+                        .collect(),
+                ),
+                actions: StdMutex::new(EventActions::default()),
+                content: Content::new("user"),
+            })
+        }
+    }
+
+    impl State for FakeToolContext {
+        fn get(&self, key: &str) -> Option<Value> {
+            self.state.lock().unwrap().get(key).cloned()
+        }
+        fn set(&mut self, key: String, value: Value) {
+            self.state.lock().unwrap().insert(key, value);
+        }
+        fn all(&self) -> HashMap<String, Value> {
+            self.state.lock().unwrap().clone()
+        }
+    }
+
+    impl ReadonlyContext for FakeToolContext {
+        fn invocation_id(&self) -> &str {
+            "inv"
+        }
+        fn agent_name(&self) -> &str {
+            "adspace_agent"
+        }
+        fn user_id(&self) -> &str {
+            "local-user"
+        }
+        fn app_name(&self) -> &str {
+            "adspace_agent"
+        }
+        fn session_id(&self) -> &str {
+            "s-1"
+        }
+        fn branch(&self) -> &str {
+            ""
+        }
+        fn user_content(&self) -> &Content {
+            &self.content
+        }
+        fn state(&self) -> Option<&dyn State> {
+            Some(self)
+        }
+    }
+
+    #[async_trait]
+    impl CallbackContext for FakeToolContext {
+        fn artifacts(&self) -> Option<Arc<dyn Artifacts>> {
+            None
+        }
+    }
+
+    #[async_trait]
+    impl ToolContext for FakeToolContext {
+        fn function_call_id(&self) -> &str {
+            "call"
+        }
+        fn actions(&self) -> EventActions {
+            self.actions.lock().unwrap().clone()
+        }
+        fn set_actions(&self, actions: EventActions) {
+            *self.actions.lock().unwrap() = actions;
+        }
+        async fn search_memory(&self, _query: &str) -> adk_rust::Result<Vec<MemoryEntry>> {
+            Ok(vec![])
+        }
+    }
+
+    fn state_param(url: &str) -> String {
+        url::Url::parse(url)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.to_string())
+            .unwrap()
     }
 
     #[test]
@@ -647,29 +799,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn state_parameter_round_trips_and_rejects_tampering() {
+        let manager = manager();
+        let state = manager.sign_state(&session());
+        assert_eq!(manager.verify_state(&state).unwrap(), session());
+
+        // A different client secret yields a different key.
+        let other = SessionCredentialManager::new(GoogleOAuthFlow::new(OAuthClientConfig {
+            client_secret: "other".into(),
+            ..config()
+        }));
+        assert!(other.verify_state(&state).is_err());
+
+        // Tampered payload (another session id) fails the signature check.
+        let (payload, sig) = state.split_once('.').unwrap();
+        let mut claims: Value = serde_json::from_slice(&unb64(payload).unwrap()).unwrap();
+        claims["session_id"] = json!("s-2");
+        let forged = format!("{}.{sig}", b64(&serde_json::to_vec(&claims).unwrap()));
+        assert!(manager.verify_state(&forged).is_err());
+        assert!(manager.verify_state("garbage").is_err());
+
+        // Expired claims are rejected even with a valid signature.
+        let old = StateClaims {
+            session: session(),
+            iat: Utc::now().timestamp() - PENDING_TTL.as_secs() as i64 - 1,
+            nonce: "n".into(),
+        };
+        let payload = b64(&serde_json::to_vec(&old).unwrap());
+        let mut mac = manager.mac();
+        mac.update(payload.as_bytes());
+        let expired = format!("{payload}.{}", b64(&mac.finalize().into_bytes()));
+        assert!(manager.verify_state(&expired).is_err());
+    }
+
     #[tokio::test]
-    async fn manager_requests_authorization_when_no_token() {
-        let manager = UserCredentialManager::new(
-            GoogleOAuthFlow::new(config()),
-            Arc::new(InMemoryCredentialStore::default()),
-        );
+    async fn requests_authorization_bound_to_the_session_when_no_token() {
+        let manager = manager();
         manager.register_scopes(&["base-scope".to_string()]).await;
+        let ctx = FakeToolContext::with_state(&[]);
         let err = manager
-            .access_token("u1", &["tool-scope".to_string()])
+            .access_token(ctx.as_ref(), &["tool-scope".to_string()])
             .await
             .unwrap_err();
         let required = auth_required(&err).expect("AuthRequired error");
         assert!(required.auth_url.contains("scope=base-scope+tool-scope"));
         assert_eq!(required.to_tool_response()["status"], "AUTH_REQUIRED");
-        // the pending state is registered under the url's state param
-        let state = url::Url::parse(&required.auth_url)
-            .unwrap()
-            .query_pairs()
-            .find(|(k, _)| k == "state")
-            .map(|(_, v)| v.to_string())
-            .unwrap();
-        assert!(manager.pending.lock().await.contains_key(&state));
-        // unknown state is rejected
+        assert_eq!(
+            manager
+                .verify_state(&state_param(&required.auth_url))
+                .unwrap(),
+            session()
+        );
         assert!(
             manager
                 .complete_authorization("nope", "code")
@@ -679,60 +860,156 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manager_returns_valid_stored_token() {
-        let store = Arc::new(InMemoryCredentialStore::default());
-        store
-            .put(
-                "u1",
-                OAuthToken {
-                    access_token: "tok".into(),
-                    refresh_token: None,
-                    expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
-                    scopes: vec![],
-                },
-            )
-            .await;
-        let manager = UserCredentialManager::new(GoogleOAuthFlow::new(config()), store);
+    async fn uses_valid_token_from_session_state() {
+        let token = OAuthToken {
+            access_token: "tok".into(),
+            refresh_token: None,
+            expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+            scopes: vec![],
+        };
+        let ctx = FakeToolContext::with_state(&[(
+            CREDENTIALS_STATE_KEY,
+            serde_json::to_value(&token).unwrap(),
+        )]);
         assert_eq!(
-            manager
-                .access_token("u1", &["s".to_string()])
+            manager()
+                .access_token(ctx.as_ref(), &["s".to_string()])
                 .await
                 .unwrap(),
             "tok"
         );
-    }
-
-    #[tokio::test]
-    async fn unconfigured_client_gives_actionable_message() {
-        let manager = UserCredentialManager::new(
-            GoogleOAuthFlow::new(OAuthClientConfig {
-                client_id: String::new(),
-                client_secret: String::new(),
-                redirect_uri: String::new(),
-            }),
-            Arc::new(InMemoryCredentialStore::default()),
+        assert!(
+            ctx.actions().state_delta.is_empty(),
+            "no write when nothing changed"
         );
-        let err = manager.access_token("u", &[]).await.unwrap_err();
-        assert!(auth_required(&err).unwrap().message.contains("CLIENT_ID"));
+
+        // Missing scopes trigger a new authorization for this session.
+        let narrow = OAuthToken {
+            scopes: vec!["other".into()],
+            ..token
+        };
+        let ctx = FakeToolContext::with_state(&[(
+            CREDENTIALS_STATE_KEY,
+            serde_json::to_value(&narrow).unwrap(),
+        )]);
+        let err = manager()
+            .access_token(ctx.as_ref(), &["s".to_string()])
+            .await
+            .unwrap_err();
+        assert!(auth_required(&err).is_some());
     }
 
     #[tokio::test]
-    async fn file_store_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("creds.json");
+    async fn expired_token_without_refresh_token_requires_authorization() {
+        let token = OAuthToken {
+            access_token: "old".into(),
+            refresh_token: None,
+            expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
+            scopes: vec![],
+        };
+        let ctx = FakeToolContext::with_state(&[(
+            CREDENTIALS_STATE_KEY,
+            serde_json::to_value(&token).unwrap(),
+        )]);
+        let err = manager().access_token(ctx.as_ref(), &[]).await.unwrap_err();
+        assert!(auth_required(&err).is_some());
+        // Null and garbage values are treated as "no credentials".
+        let ctx = FakeToolContext::with_state(&[(CREDENTIALS_STATE_KEY, Value::Null)]);
+        assert!(SessionCredentialManager::stored_token(ctx.as_ref()).is_none());
+        let ctx = FakeToolContext::with_state(&[(CREDENTIALS_STATE_KEY, json!("nope"))]);
+        assert!(SessionCredentialManager::stored_token(ctx.as_ref()).is_none());
+    }
+
+    #[tokio::test]
+    async fn store_token_writes_and_clears_through_actions() {
+        let ctx = FakeToolContext::with_state(&[]);
         let token = OAuthToken {
             access_token: "a".into(),
             refresh_token: Some("r".into()),
             expires_at: None,
             scopes: vec!["s".into()],
         };
-        {
-            let store = FileCredentialStore::open(&path).await;
-            store.put("u1", token.clone()).await;
-        }
-        let reopened = FileCredentialStore::open(&path).await;
-        assert_eq!(reopened.get("u1").await, Some(token));
-        reopened.remove("u1").await;
-        assert_eq!(FileCredentialStore::open(&path).await.get("u1").await, None);
+        SessionCredentialManager::store_token(ctx.as_ref(), Some(&token));
+        assert_eq!(
+            ctx.actions().state_delta[CREDENTIALS_STATE_KEY],
+            serde_json::to_value(&token).unwrap()
+        );
+        SessionCredentialManager::store_token(ctx.as_ref(), None);
+        assert_eq!(
+            ctx.actions().state_delta[CREDENTIALS_STATE_KEY],
+            Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn unconfigured_client_gives_actionable_message() {
+        let manager = SessionCredentialManager::new(GoogleOAuthFlow::new(OAuthClientConfig {
+            client_id: String::new(),
+            client_secret: String::new(),
+            redirect_uri: String::new(),
+        }));
+        let ctx = FakeToolContext::with_state(&[]);
+        let err = manager.access_token(ctx.as_ref(), &[]).await.unwrap_err();
+        assert!(auth_required(&err).unwrap().message.contains("CLIENT_ID"));
+    }
+
+    #[tokio::test]
+    async fn persist_writes_token_into_the_session_state() {
+        let sessions = InMemorySessionService::new();
+        let created = sessions
+            .create(CreateRequest {
+                app_name: "adspace_agent".into(),
+                user_id: "local-user".into(),
+                session_id: Some("s-1".into()),
+                state: HashMap::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.id(), "s-1");
+        let token = OAuthToken {
+            access_token: "a".into(),
+            refresh_token: Some("r".into()),
+            expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+            scopes: vec!["s".into()],
+        };
+        manager()
+            .persist(&sessions, &session(), &token)
+            .await
+            .unwrap();
+        let loaded = sessions
+            .get(GetRequest {
+                app_name: "adspace_agent".into(),
+                user_id: "local-user".into(),
+                session_id: "s-1".into(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            loaded.state().get(CREDENTIALS_STATE_KEY),
+            Some(serde_json::to_value(&token).unwrap())
+        );
+        // The event carries no content, so it never reaches the model.
+        assert_eq!(loaded.events().len(), 1);
+        assert!(
+            loaded
+                .events()
+                .all()
+                .iter()
+                .all(|e| e.llm_response.content.is_none())
+        );
+
+        // Unknown sessions are reported.
+        let missing = SessionRef {
+            session_id: "nope".into(),
+            ..session()
+        };
+        assert!(
+            manager()
+                .persist(&sessions, &missing, &token)
+                .await
+                .is_err()
+        );
     }
 }

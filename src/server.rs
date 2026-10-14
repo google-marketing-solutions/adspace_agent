@@ -2,11 +2,14 @@
 //!
 //! Both modes are built on adk-rust's [`Launcher`] (from `adk-cli`): the
 //! console mode is its readline REPL, and the server is its Axum application
-//! with our OAuth redirect route merged in.
+//! with our OAuth redirect route merged in. The redirect handler writes the
+//! exchanged Google tokens into the chat session named by the signed `state`
+//! parameter, so credentials are attached to sessions, never to the server.
 
 use std::sync::Arc;
 
 use adk_rust::server::shutdown_signal;
+use adk_rust::session::SessionService;
 use adk_rust::{CacheCapable, Launcher};
 use axum::Router;
 use axum::extract::{Query, State};
@@ -14,7 +17,7 @@ use axum::response::Html;
 use axum::routing::get;
 
 use crate::agent::AgentRuntime;
-use crate::auth::UserCredentialManager;
+use crate::auth::SessionCredentialManager;
 use crate::auth::oauth::OAUTH_CALLBACK_PATH;
 use crate::config::APP_NAME;
 
@@ -23,10 +26,19 @@ use crate::config::APP_NAME;
 pub struct OAuthCallbackQuery {
     /// Authorization code.
     pub code: Option<String>,
-    /// Opaque state we generated when starting the flow.
+    /// Signed state we generated when starting the flow.
     pub state: Option<String>,
     /// Error code when the user denied access.
     pub error: Option<String>,
+}
+
+/// Shared state of the OAuth routes.
+#[derive(Clone)]
+pub struct OAuthRoutes {
+    /// OAuth client + state signing.
+    pub credentials: Arc<SessionCredentialManager>,
+    /// Where the exchanged tokens are written.
+    pub sessions: Arc<dyn SessionService>,
 }
 
 fn html_page(title: &str, body: &str) -> Html<String> {
@@ -38,9 +50,10 @@ fn html_page(title: &str, body: &str) -> Html<String> {
     ))
 }
 
-/// Handles the Google OAuth redirect.
+/// Handles the Google OAuth redirect: exchanges the code and stores the
+/// tokens in the chat session that started the authorization.
 pub async fn oauth_callback(
-    State(credentials): State<Arc<UserCredentialManager>>,
+    State(routes): State<OAuthRoutes>,
     Query(query): Query<OAuthCallbackQuery>,
 ) -> Html<String> {
     if let Some(error) = query.error {
@@ -57,27 +70,61 @@ pub async fn oauth_callback(
             "<p>Missing <code>code</code> or <code>state</code> parameter.</p>",
         );
     };
-    match credentials.complete_authorization(&state, &code).await {
-        Ok(user) => html_page(
+    let (session, token) = match routes
+        .credentials
+        .complete_authorization(&state, &code)
+        .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            return html_page(
+                "Authorization failed",
+                &format!(
+                    "<p>{e}</p><p>Return to the chat and ask the agent to start the authorization again.</p>"
+                ),
+            );
+        }
+    };
+    match routes
+        .credentials
+        .persist(routes.sessions.as_ref(), &session, &token)
+        .await
+    {
+        Ok(()) => html_page(
             "Authorization complete",
-            &format!(
-                "<p>Google access was granted for user <code>{user}</code>. You can close this window, return to the chat and tell the agent to continue.</p>"
-            ),
+            "<p>Google access was granted to this chat session. You can close this window, return to the chat and tell the agent to continue.</p>",
         ),
-        Err(e) => html_page(
-            "Authorization failed",
-            &format!(
-                "<p>{e}</p><p>Return to the chat and ask the agent to start the authorization again.</p>"
-            ),
-        ),
+        Err(e) => {
+            tracing::error!("{e:#}");
+            html_page(
+                "Authorization failed",
+                "<p>The chat session that requested access could not be found. Return to the chat and ask the agent to start the authorization again.</p>",
+            )
+        }
     }
 }
 
 /// Builds the router for the OAuth endpoints.
-pub fn oauth_router(credentials: Arc<UserCredentialManager>) -> Router {
+pub fn oauth_router(routes: OAuthRoutes) -> Router {
     Router::new()
         .route(OAUTH_CALLBACK_PATH, get(oauth_callback))
-        .with_state(credentials)
+        .with_state(routes)
+}
+
+impl AgentRuntime {
+    fn oauth_routes(&self) -> OAuthRoutes {
+        OAuthRoutes {
+            credentials: self.credentials.clone(),
+            sessions: self.session_service.clone(),
+        }
+    }
+
+    fn log_redirect_uri(&self) {
+        let redirect = &self.credentials.flow().config().redirect_uri;
+        tracing::info!(
+            "OAuth redirect URI: {redirect} — register it on the OAuth client in Google Cloud Console"
+        );
+    }
 }
 
 /// User id of the runner-level memory binding and of the console session
@@ -111,15 +158,12 @@ fn launcher(runtime: &AgentRuntime) -> Launcher {
 pub async fn serve(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Result<()> {
     let app = launcher(&runtime)
         .build_app()?
-        .merge(oauth_router(runtime.credentials.clone()));
+        .merge(oauth_router(runtime.oauth_routes()));
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
-    let redirect = runtime.credentials.flow().config().redirect_uri.clone();
     tracing::info!(
         "AdSpace Agent listening on http://{host}:{port}  (web UI: http://{host}:{port}/ui/)"
     );
-    tracing::info!(
-        "OAuth redirect URI: {redirect} — register it on the OAuth client in Google Cloud Console"
-    );
+    runtime.log_redirect_uri();
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
@@ -130,10 +174,24 @@ pub async fn serve(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Resu
 /// streaming output, think-block rendering). The session belongs to user
 /// [`DEFAULT_USER_ID`]; adk-cli does not expose a user-id setting.
 ///
+/// The OAuth redirect handler is served on `host:port` in the background so
+/// Google authorizations started from the console can complete into the
+/// console's session.
+///
 /// # Errors
 ///
 /// Returns an error when the REPL cannot start or a turn fails.
-pub async fn console(runtime: AgentRuntime) -> anyhow::Result<()> {
+pub async fn console(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Result<()> {
+    match tokio::net::TcpListener::bind((host, port)).await {
+        Ok(listener) => {
+            tracing::info!("OAuth callback listening on http://{host}:{port}{OAUTH_CALLBACK_PATH}");
+            runtime.log_redirect_uri();
+            tokio::spawn(axum::serve(listener, oauth_router(runtime.oauth_routes())).into_future());
+        }
+        Err(e) => tracing::warn!(
+            "Cannot bind {host}:{port} for the OAuth callback ({e}); Google authorizations will not complete in this console"
+        ),
+    }
     launcher(&runtime).run_console_directly().await?;
     Ok(())
 }

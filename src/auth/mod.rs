@@ -4,7 +4,8 @@
 //!
 //! - **User OAuth 2.0 credentials** (authorization-code flow with the
 //!   configured `CLIENT_ID` / `CLIENT_SECRET`) for Google Ads, Campaign
-//!   Manager 360, Display & Video 360, Drive, YouTube, etc.
+//!   Manager 360, Display & Video 360, Drive, YouTube, etc. They are attached
+//!   to the chat session (stored in its state), never to the server.
 //! - **Application Default Credentials** (ADC) for Google Cloud services such
 //!   as Vertex AI and Cloud Storage.
 //!
@@ -20,8 +21,8 @@ pub mod oauth;
 
 pub use adc::AdcTokenProvider;
 pub use oauth::{
-    AuthRequired, CredentialStore, FileCredentialStore, GoogleOAuthFlow, InMemoryCredentialStore,
-    OAuthClientConfig, OAuthToken, UserCredentialManager, UserTokenProvider, auth_required,
+    AuthRequired, CREDENTIALS_STATE_KEY, GoogleOAuthFlow, OAuthClientConfig, OAuthToken,
+    SessionCredentialManager, SessionRef, SessionTokenProvider, auth_required,
 };
 
 /// Something that can produce a valid OAuth 2.0 bearer access token.

@@ -42,7 +42,15 @@ enum Command {
         port: u16,
     },
     /// Chat with the agent in the terminal (adk-cli console; user id `user`).
-    Console,
+    /// The OAuth callback is served on `host:port` so authorizations complete.
+    Console {
+        /// Interface to bind the OAuth callback to.
+        #[arg(long, env = "HOST", default_value = "0.0.0.0")]
+        host: String,
+        /// Port of the OAuth callback (must match `PUBLIC_BASE_URL`).
+        #[arg(long, env = "PORT", default_value_t = 8000)]
+        port: u16,
+    },
     /// List the tools of a Google API toolset.
     ListTools {
         /// Also print, per toolset, the size of the tool declarations sent to
@@ -94,7 +102,7 @@ fn init_tracing() {
 
 async fn list_tools(target: ListTarget, sizes: bool) -> anyhow::Result<()> {
     let settings = Settings::from_env()?;
-    let credentials = build_credential_manager(&settings).await;
+    let credentials = build_credential_manager(&settings);
     let fetcher = DiscoveryFetcher::new();
     let configs: Vec<GoogleApiToolsetConfig> = match target {
         ListTarget::GoogleAds => vec![
@@ -162,9 +170,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let runtime = build_runtime().await?;
             server::serve(runtime, &host, port).await
         }
-        Command::Console => {
+        Command::Console { host, port } => {
             let runtime = build_runtime().await?;
-            server::console(runtime).await
+            server::console(runtime, &host, port).await
         }
         Command::ListTools { target, sizes } => list_tools(target, sizes).await,
     }

@@ -90,7 +90,7 @@ async fn agent_runs_a_tool_turn_and_persists_artifacts_and_memory() {
         std::env::remove_var("SKILLS_BUCKET_NAME");
     }
     let settings = settings();
-    let credentials = build_credential_manager(&settings).await;
+    let credentials = build_credential_manager(&settings);
     let memory: Arc<InMemoryMemoryService> = Arc::new(InMemoryMemoryService::new());
     let memory_service: Arc<dyn MemoryService> = memory.clone();
 

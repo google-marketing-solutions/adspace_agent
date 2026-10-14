@@ -20,10 +20,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use crate::auth::{
-    AdcTokenProvider, FileCredentialStore, GoogleOAuthFlow, InMemoryCredentialStore,
-    OAuthClientConfig, UserCredentialManager,
-};
+use crate::auth::{AdcTokenProvider, GoogleOAuthFlow, OAuthClientConfig, SessionCredentialManager};
 use crate::config::{
     self, APP_NAME, DISPLAY_VIDEO_360_TOOL_FILTER, DRIVE_TOOL_FILTER, GOOGLE_ADS_API_VERSION,
     STORAGE_TOOL_FILTER, Settings, YOUTUBE_TOOL_FILTER,
@@ -74,8 +71,8 @@ pub struct AgentRuntime {
     pub agent: Arc<dyn Agent>,
     /// Gemini model (also used for compaction summaries and context caching).
     pub model: Arc<GeminiModel>,
-    /// Per-user Google credentials.
-    pub credentials: Arc<UserCredentialManager>,
+    /// Session-bound Google credentials (OAuth client + state signing).
+    pub credentials: Arc<SessionCredentialManager>,
     /// Session service.
     pub session_service: Arc<dyn SessionService>,
     /// Artifact service.
@@ -114,21 +111,17 @@ impl AgentRuntime {
     }
 }
 
-/// Builds the per-user credential manager from the environment.
-pub async fn build_credential_manager(settings: &Settings) -> Arc<UserCredentialManager> {
+/// Builds the session-credential manager from the environment.
+///
+/// Credentials themselves live in each chat session's state; the manager only
+/// holds the OAuth client configuration.
+pub fn build_credential_manager(settings: &Settings) -> Arc<SessionCredentialManager> {
     let config = OAuthClientConfig {
         client_id: settings.client_id.clone(),
         client_secret: settings.client_secret.clone(),
         ..OAuthClientConfig::from_env()
     };
-    let store: Arc<dyn crate::auth::CredentialStore> = match config::env_opt("CREDENTIALS_FILE") {
-        Some(path) => Arc::new(FileCredentialStore::open(path).await),
-        None => Arc::new(InMemoryCredentialStore::default()),
-    };
-    Arc::new(
-        UserCredentialManager::new(GoogleOAuthFlow::new(config), store)
-            .with_seeded_refresh_token(config::env_opt("GOOGLE_OAUTH_REFRESH_TOKEN")),
-    )
+    Arc::new(SessionCredentialManager::new(GoogleOAuthFlow::new(config)))
 }
 
 /// Builds the Discovery-based Google API toolset configs for the enabled
@@ -191,7 +184,7 @@ pub fn google_api_toolset_configs(settings: &Settings) -> Vec<GoogleApiToolsetCo
 /// Discovery document cannot be fetched are skipped with a warning.
 async fn load_google_api_toolsets(
     settings: &Settings,
-    credentials: &Arc<UserCredentialManager>,
+    credentials: &Arc<SessionCredentialManager>,
 ) -> Vec<Arc<GoogleApiToolset>> {
     let fetcher = DiscoveryFetcher::new();
     let futures = google_api_toolset_configs(settings)
@@ -410,7 +403,7 @@ impl Agent for MemorySavingAgent {
 pub async fn create_agent(
     settings: &Settings,
     model: Arc<dyn adk_rust::Llm>,
-    credentials: Arc<UserCredentialManager>,
+    credentials: Arc<SessionCredentialManager>,
     memory_service: Arc<dyn MemoryService>,
 ) -> anyhow::Result<Arc<dyn Agent>> {
     let adc = Arc::new(AdcTokenProvider::new(&[]).ok());
@@ -544,7 +537,7 @@ pub fn build_model(settings: &Settings) -> anyhow::Result<Arc<GeminiModel>> {
 pub async fn build_runtime() -> anyhow::Result<AgentRuntime> {
     let settings = Settings::from_env()?;
     let model = build_model(&settings)?;
-    let credentials = build_credential_manager(&settings).await;
+    let credentials = build_credential_manager(&settings);
     let session_service = services::build_session_service().await?;
     let artifact_service = services::build_artifact_service()?;
     let memory_service = services::build_memory_service()?;

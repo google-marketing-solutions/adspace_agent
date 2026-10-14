@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use super::discovery::{DiscoveryDocument, DiscoveryFetcher};
 use super::spec::{MethodSpec, SpecOptions, build_method_specs};
-use crate::auth::{UserCredentialManager, auth_required};
+use crate::auth::{SessionCredentialManager, auth_required};
 
 /// Configuration of a [`GoogleApiToolset`].
 #[derive(Debug, Clone)]
@@ -102,7 +102,7 @@ impl GoogleApiToolsetConfig {
 /// Shared pieces every tool of a toolset needs.
 struct ToolShared {
     http: reqwest::Client,
-    credentials: Arc<UserCredentialManager>,
+    credentials: Arc<SessionCredentialManager>,
     scopes: Vec<String>,
     additional_headers: Vec<(String, String)>,
 }
@@ -125,7 +125,7 @@ impl GoogleApiTool {
         let token = self
             .shared
             .credentials
-            .access_token(ctx.user_id(), &self.shared.scopes)
+            .access_token(ctx.as_ref(), &self.shared.scopes)
             .await?;
         let prepared = self.spec.prepare_request(&args)?;
         let method = reqwest::Method::from_bytes(prepared.method.as_bytes())?;
@@ -225,7 +225,7 @@ impl GoogleApiToolset {
     pub async fn load(
         config: GoogleApiToolsetConfig,
         fetcher: &DiscoveryFetcher,
-        credentials: Arc<UserCredentialManager>,
+        credentials: Arc<SessionCredentialManager>,
     ) -> anyhow::Result<Self> {
         let doc = fetcher
             .fetch(
@@ -241,7 +241,7 @@ impl GoogleApiToolset {
     pub fn from_document(
         doc: &DiscoveryDocument,
         config: GoogleApiToolsetConfig,
-        credentials: Arc<UserCredentialManager>,
+        credentials: Arc<SessionCredentialManager>,
     ) -> Self {
         let scopes = config
             .scopes
@@ -340,17 +340,16 @@ impl Toolset for GoogleApiToolset {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{GoogleOAuthFlow, InMemoryCredentialStore, OAuthClientConfig};
+    use crate::auth::{GoogleOAuthFlow, OAuthClientConfig};
 
-    fn credentials() -> Arc<UserCredentialManager> {
-        Arc::new(UserCredentialManager::new(
-            GoogleOAuthFlow::new(OAuthClientConfig {
+    fn credentials() -> Arc<SessionCredentialManager> {
+        Arc::new(SessionCredentialManager::new(GoogleOAuthFlow::new(
+            OAuthClientConfig {
                 client_id: "id".into(),
                 client_secret: "secret".into(),
                 redirect_uri: "http://localhost/oauth2/callback".into(),
-            }),
-            Arc::new(InMemoryCredentialStore::default()),
-        ))
+            },
+        )))
     }
 
     fn doc() -> DiscoveryDocument {

@@ -4,7 +4,6 @@
 sessions.db
 sessions.db-*
 *.db-journal
-.credentials/
 .artifacts/
 .adk/
 google-ads.yaml

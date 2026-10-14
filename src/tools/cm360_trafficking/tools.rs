@@ -23,7 +23,7 @@ use super::execute::{
 use super::grouping::{group_ads, group_creatives, group_event_tags, group_placements};
 use super::sheet::{RawSheet, apply_trafficked_status, parse_csv, prepare_data, to_csv};
 use super::validations::validate_sheet;
-use crate::auth::{AuthRequired, UserCredentialManager, UserTokenProvider, auth_required};
+use crate::auth::{AuthRequired, SessionCredentialManager, SessionTokenProvider, auth_required};
 
 /// Session-state key holding the artifact name of the staged payload.
 pub const PARSED_PAYLOAD_ARTIFACT_KEY: &str = "cm360_parsed_payload_artifact";
@@ -143,8 +143,8 @@ To download the updated trafficking sheet:
 /// Shared dependencies of the CM360 tools.
 #[derive(Clone)]
 pub struct Cm360Services {
-    /// Per-user Google OAuth credentials.
-    pub credentials: Arc<UserCredentialManager>,
+    /// Session-bound Google OAuth credentials.
+    pub credentials: Arc<SessionCredentialManager>,
     /// Optional override of the CM360 API (tests).
     pub api_override: Option<Arc<dyn Cm360Api>>,
 }
@@ -166,11 +166,11 @@ impl Cm360Services {
             return api.clone();
         }
         let provider =
-            UserTokenProvider::new(self.credentials.clone(), ctx.user_id(), Self::scopes());
+            SessionTokenProvider::new(self.credentials.clone(), ctx.clone(), Self::scopes());
         Arc::new(Cm360Client::new(Arc::new(provider)))
     }
 
-    /// Ensures the user has valid CM360 credentials before any API call.
+    /// Ensures the session has valid CM360 credentials before any API call.
     async fn ensure_authorized(
         &self,
         ctx: &Arc<dyn ToolContext>,
@@ -180,7 +180,7 @@ impl Cm360Services {
         }
         match self
             .credentials
-            .access_token(ctx.user_id(), &Self::scopes())
+            .access_token(ctx.as_ref(), &Self::scopes())
             .await
         {
             Ok(_) => Ok(()),

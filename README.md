@@ -80,16 +80,26 @@ cargo test
 ### User authorization (OAuth 2.0)
 
 Google Ads, Campaign Manager 360, Display & Video 360, Drive, YouTube, ... are
-called on behalf of the signed-in user. The first time a tool needs access it
-returns `status: "AUTH_REQUIRED"` with an authorization link; the agent shows
-it to the user, Google redirects back to `${PUBLIC_BASE_URL}/oauth2/callback`,
-and the tool call succeeds when retried. Add that redirect URI to the OAuth
-client in the Google Cloud Console.
+called on behalf of the signed-in user, and the credentials belong to the
+**chat session** — not to the server:
 
-Tokens live in memory by default; set `CREDENTIALS_FILE=./.credentials/tokens.json`
-to persist them across restarts, or `GOOGLE_OAUTH_REFRESH_TOKEN` to pre-seed a
-single-user deployment without the browser flow. One consent covers every
-enabled toolset (incremental authorization is used when a new scope is needed).
+1. Open the web UI; a session is created.
+2. The first time a tool needs Google access it returns
+   `status: "AUTH_REQUIRED"` with an authorization link that is bound to that
+   session (the OAuth `state` parameter is a signed claim naming the session).
+3. The user grants access; Google redirects to
+   `${PUBLIC_BASE_URL}/oauth2/callback`, which exchanges the code and writes
+   the tokens into the session's state (`CREDENTIALS_CACHE_KEY`, the same key
+   the Python agent used).
+4. The user tells the agent to continue; the tool reads the token from the
+   session state (refreshing it when expired) and calls the API.
+
+Add that redirect URI to the OAuth client in the Google Cloud Console. One
+consent covers every enabled toolset (incremental authorization is used when a
+new scope is needed). A new session starts without credentials; tokens are
+persisted with the session (so they survive restarts with
+`SESSION_SERVICE_URI=sqlite://...`) and disappear with it. There is no
+server-side token store.
 
 ## Exploring Available Tools
 

@@ -497,6 +497,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "google-cloud-auth",
+ "hmac 0.12.1",
  "indexmap 2.14.2",
  "regex",
  "reqwest 0.12.28",

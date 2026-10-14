@@ -62,6 +62,11 @@ pub async fn build_session_service() -> anyhow::Result<Arc<dyn SessionService>> 
         let service = SqliteSessionService::new(&normalized)
             .await
             .with_context(|| format!("opening session database {normalized}"))?;
+        // Creates/updates the `sessions`/`events` tables (idempotent).
+        service
+            .migrate()
+            .await
+            .with_context(|| format!("migrating session database {normalized}"))?;
         return Ok(Arc::new(service));
     }
     anyhow::bail!(
@@ -138,5 +143,34 @@ mod tests {
             normalize_sqlite_uri("sqlite:///data/s.db"),
             "sqlite:///data/s.db?mode=rwc"
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_sqlite_database_is_migrated_and_usable() {
+        use adk_rust::session::{CreateRequest, ListRequest};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.db");
+        let url = normalize_sqlite_uri(&format!("sqlite:///{}", db.display()));
+        let service = SqliteSessionService::new(&url).await.unwrap();
+        service.migrate().await.unwrap();
+        service
+            .create(CreateRequest {
+                app_name: "app".into(),
+                user_id: "u".into(),
+                session_id: None,
+                state: Default::default(),
+            })
+            .await
+            .unwrap();
+        let listed = service
+            .list(ListRequest {
+                app_name: "app".into(),
+                user_id: "u".into(),
+                limit: None,
+                offset: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
     }
 }

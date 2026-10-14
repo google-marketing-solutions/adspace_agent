@@ -41,12 +41,8 @@ enum Command {
         #[arg(long, env = "PORT", default_value_t = 8000)]
         port: u16,
     },
-    /// Chat with the agent in the terminal.
-    Console {
-        /// User id for the session.
-        #[arg(long, default_value = "user")]
-        user: String,
-    },
+    /// Chat with the agent in the terminal (adk-cli console; user id `user`).
+    Console,
     /// List the tools of a Google API toolset.
     ListTools {
         /// Also print, per toolset, the size of the tool declarations sent to
@@ -77,14 +73,23 @@ enum ListTarget {
     All,
 }
 
+/// Default `RUST_LOG` filter when the operator did not set one.
+const DEFAULT_LOG_FILTER: &str = "info,sqlx=warn,hyper=warn,h2=warn,reqwest=warn";
+
+/// Installs adk-rust's telemetry: a `tracing` console layer plus the
+/// in-process span exporter that backs the web UI's Trace tab.
+///
+/// The Launcher calls the same initializer again when building the server;
+/// that call is idempotent and reuses this exporter. Must run before the
+/// Tokio runtime starts because it may set `RUST_LOG`.
 fn init_tracing() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new("info,sqlx=warn,hyper=warn,h2=warn,reqwest=warn")
-    });
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    if std::env::var_os("RUST_LOG").is_none() {
+        // SAFETY: called from `main` before any other thread exists.
+        unsafe { std::env::set_var("RUST_LOG", DEFAULT_LOG_FILTER) };
+    }
+    if let Err(e) = adk_rust::telemetry::init_with_adk_exporter("adspace-agent") {
+        eprintln!("warning: telemetry initialization failed: {e}");
+    }
 }
 
 async fn list_tools(target: ListTarget, sizes: bool) -> anyhow::Result<()> {
@@ -133,12 +138,18 @@ async fn list_tools(target: ListTarget, sizes: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     init_tracing();
     adk_rust::ensure_crypto_provider();
     let cli = Cli::parse();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(cli))
+}
+
+async fn run(cli: Cli) -> anyhow::Result<()> {
     let command = cli.command.unwrap_or(Command::Serve {
         host: std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into()),
         port: std::env::var("PORT")
@@ -151,9 +162,9 @@ async fn main() -> anyhow::Result<()> {
             let runtime = build_runtime().await?;
             server::serve(runtime, &host, port).await
         }
-        Command::Console { user } => {
+        Command::Console => {
             let runtime = build_runtime().await?;
-            server::console(runtime, &user).await
+            server::console(runtime).await
         }
         Command::ListTools { target, sizes } => list_tools(target, sizes).await,
     }

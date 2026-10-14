@@ -203,9 +203,9 @@ execution happens server-side in Gemini.
   variables (`CONTEXT_CACHE_*`, `COMPACTION_*`) instead of `App(...)`.
 - `bigquery` authenticates with Application Default Credentials rather than the
   end user's OAuth token.
-- The CM360 payload produced by `parse_sheet_tool` is stored in
-  `gs://$SKILLS_BUCKET_NAME/cm360_trafficking/<session>/payloads.json` when the
-  bucket is configured, and in session state otherwise.
+- The operations staged by `parse_sheet_tool` are stored as a versioned session
+  artifact (`cm360_payloads.json`) through the configured artifact service
+  instead of a hard-coded GCS path.
 - Deployment targets Cloud Run; Agent Engine (ReasoningEngine BYOC) can be added
   with adk-rust's `agent-engine` / `gcp-deploy` features.
 

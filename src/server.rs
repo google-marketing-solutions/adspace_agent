@@ -1,17 +1,17 @@
-//! HTTP server (ADK web UI + REST API + OAuth callback) and console runner.
+//! HTTP server (ADK web UI + REST API + OAuth callback) and console REPL.
+//!
+//! Both modes are built on adk-rust's [`Launcher`] (from `adk-cli`): the
+//! console mode is its readline REPL, and the server is its Axum application
+//! with our OAuth redirect route merged in.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use adk_rust::runner::Runner;
-use adk_rust::server::{ServerBuilder, ServerConfig, shutdown_signal};
-use adk_rust::session::CreateRequest;
-use adk_rust::{CacheCapable, Content, Part, SessionId, SingleAgentLoader, UserId};
+use adk_rust::server::shutdown_signal;
+use adk_rust::{CacheCapable, Launcher};
 use axum::Router;
 use axum::extract::{Query, State};
 use axum::response::Html;
 use axum::routing::get;
-use futures::StreamExt;
 
 use crate::agent::AgentRuntime;
 use crate::auth::UserCredentialManager;
@@ -80,26 +80,38 @@ pub fn oauth_router(credentials: Arc<UserCredentialManager>) -> Router {
         .with_state(credentials)
 }
 
+/// User id of the runner-level memory binding and of the console session
+/// (the same value adk-cli's console uses).
+///
+/// Per-user memory recall does not depend on this: `PreloadMemoryTool` queries
+/// the memory service with the invocation's own `user_id`, and
+/// `MemorySavingAgent` writes under it too. The runner-level `Memory` only
+/// backs `ToolContext::search_memory()`, which no tool of ours uses.
+const DEFAULT_USER_ID: &str = "user";
+
+/// adk-cli launcher configured with the runtime's services.
+fn launcher(runtime: &AgentRuntime) -> Launcher {
+    Launcher::new(runtime.agent.clone())
+        .app_name(APP_NAME)
+        .with_session_service(runtime.session_service.clone())
+        .with_artifact_service(runtime.artifact_service.clone())
+        .with_memory_service(runtime.memory_for(DEFAULT_USER_ID))
+        .with_compaction(runtime.compaction_config())
+        .with_context_cache(
+            runtime.context_cache_config(),
+            runtime.model.clone() as Arc<dyn CacheCapable>,
+        )
+}
+
 /// Serves the agent (web UI at `/ui/`, REST API under `/api`, OAuth callback).
 ///
 /// # Errors
 ///
 /// Returns an error when the listener cannot be bound or the server fails.
 pub async fn serve(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Result<()> {
-    let loader = Arc::new(SingleAgentLoader::new(runtime.agent.clone()));
-    let config = ServerConfig::new(loader, runtime.session_service.clone())
-        .with_artifact_service(runtime.artifact_service.clone())
-        .with_memory_service(runtime.memory_for("user"))
-        .with_compaction(runtime.compaction_config())
-        .with_context_cache(
-            runtime.context_cache_config(),
-            runtime.model.clone() as Arc<dyn CacheCapable>,
-        );
-
-    let app = ServerBuilder::new(config)
-        .add_root_routes(oauth_router(runtime.credentials.clone()))
-        .build();
-
+    let app = launcher(&runtime)
+        .build_app()?
+        .merge(oauth_router(runtime.credentials.clone()));
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     let redirect = runtime.credentials.flow().config().redirect_uri.clone();
     tracing::info!(
@@ -114,86 +126,14 @@ pub async fn serve(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Resu
     Ok(())
 }
 
-/// Runs an interactive console session (stdin/stdout).
+/// Runs the interactive console REPL (adk-cli's launcher: readline history,
+/// streaming output, think-block rendering). The session belongs to user
+/// [`DEFAULT_USER_ID`]; adk-cli does not expose a user-id setting.
 ///
 /// # Errors
 ///
-/// Returns an error when the runner cannot be built or a turn fails.
-pub async fn console(runtime: AgentRuntime, user_id: &str) -> anyhow::Result<()> {
-    let runner = Runner::builder()
-        .app_name(APP_NAME)
-        .agent(runtime.agent.clone())
-        .session_service(runtime.session_service.clone())
-        .artifact_service(runtime.artifact_service.clone())
-        .memory_service(runtime.memory_for(user_id))
-        .compaction_config(runtime.compaction_config())
-        .context_cache_config(runtime.context_cache_config())
-        .cache_capable(runtime.model.clone() as Arc<dyn CacheCapable>)
-        .build()?;
-
-    let session = runtime
-        .session_service
-        .create(CreateRequest {
-            app_name: APP_NAME.to_string(),
-            user_id: user_id.to_string(),
-            session_id: None,
-            state: HashMap::new(),
-        })
-        .await?;
-    let session_id = session.id().to_string();
-    println!(
-        "\n  AdSpace Agent — session {session_id}\n  Type a message to chat. Type 'exit' to quit.\n"
-    );
-
-    let stdin = std::io::stdin();
-    loop {
-        use std::io::Write as _;
-        print!("You > ");
-        std::io::stdout().flush().ok();
-        let mut line = String::new();
-        if stdin.read_line(&mut line)? == 0 {
-            break;
-        }
-        let text = line.trim();
-        if text.is_empty() {
-            continue;
-        }
-        if matches!(text, "exit" | "quit" | "/exit" | "/quit") {
-            break;
-        }
-        let mut stream = runner
-            .run(
-                UserId::new(user_id)?,
-                SessionId::new(&session_id)?,
-                Content::new("user").with_text(text),
-            )
-            .await?;
-        print!("Agent > ");
-        std::io::stdout().flush().ok();
-        let mut printed = false;
-        while let Some(event) = stream.next().await {
-            match event {
-                Ok(event) => {
-                    if let Some(content) = event.content() {
-                        for part in &content.parts {
-                            match part {
-                                Part::Text { text } if event.author != "user" => {
-                                    if !event.llm_response.partial || !printed {
-                                        print!("{text}");
-                                        printed = true;
-                                        std::io::stdout().flush().ok();
-                                    }
-                                }
-                                Part::FunctionCall { name, .. } => println!("\n  [calling {name}]"),
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                Err(e) => println!("\n  [error] {e}"),
-            }
-        }
-        println!("\n");
-    }
+/// Returns an error when the REPL cannot start or a turn fails.
+pub async fn console(runtime: AgentRuntime) -> anyhow::Result<()> {
+    launcher(&runtime).run_console_directly().await?;
     Ok(())
 }

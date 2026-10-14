@@ -24,15 +24,11 @@ use super::grouping::{group_ads, group_creatives, group_event_tags, group_placem
 use super::sheet::{RawSheet, apply_trafficked_status, parse_csv, prepare_data, to_csv};
 use super::validations::validate_sheet;
 use crate::auth::{AuthRequired, UserCredentialManager, UserTokenProvider, auth_required};
-use crate::gcs::{GcsClient, parse_gs_url};
 
-/// Session-state key holding the location of the parsed payload.
-pub const PARSED_PAYLOAD_URL_KEY: &str = "parsed_payload_gcs_url";
-/// Session-state key holding the parsed payload itself when no GCS bucket is
-/// configured.
-pub const PARSED_PAYLOAD_INLINE_KEY: &str = "cm360_parsed_payload";
-/// Marker URL used when the payload is stored inline in session state.
-const INLINE_PAYLOAD_URL: &str = "session-state://cm360_parsed_payload";
+/// Session-state key holding the artifact name of the staged payload.
+pub const PARSED_PAYLOAD_ARTIFACT_KEY: &str = "cm360_parsed_payload_artifact";
+/// Artifact (session-scoped, versioned) holding the staged CM360 operations.
+pub const PAYLOAD_ARTIFACT_NAME: &str = "cm360_payloads.json";
 
 /// Workflow instructions injected into every model request while the CM360
 /// trafficking toolset is enabled (formerly the `cm360-trafficking` skill).
@@ -149,21 +145,13 @@ To download the updated trafficking sheet:
 pub struct Cm360Services {
     /// Per-user Google OAuth credentials.
     pub credentials: Arc<UserCredentialManager>,
-    /// GCS client (ADC) and bucket for parsed payloads; `None` stores the
-    /// payload in session state instead.
-    pub payload_bucket: Option<(GcsClient, String)>,
     /// Optional override of the CM360 API (tests).
     pub api_override: Option<Arc<dyn Cm360Api>>,
 }
 
 impl std::fmt::Debug for Cm360Services {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Cm360Services")
-            .field(
-                "payload_bucket",
-                &self.payload_bucket.as_ref().map(|(_, b)| b),
-            )
-            .finish_non_exhaustive()
+        f.debug_struct("Cm360Services").finish_non_exhaustive()
     }
 }
 
@@ -246,12 +234,6 @@ fn state_get(ctx: &Arc<dyn ToolContext>, key: &str) -> Option<Value> {
     ctx.session().and_then(|s| s.state().get(key))
 }
 
-fn state_set(ctx: &Arc<dyn ToolContext>, key: &str, value: Value) {
-    let mut actions = ctx.actions();
-    actions.state_delta.insert(key.to_string(), value);
-    ctx.set_actions(actions);
-}
-
 /// Parses a CM360 trafficking sheet and stages the resolved operations.
 pub struct ParseSheetTool {
     services: Cm360Services,
@@ -282,14 +264,13 @@ impl Tool for ParseSheetTool {
         if let Err(required) = self.services.ensure_authorized(&ctx).await {
             return Ok(required.to_tool_response());
         }
-        let session_id = ctx.session_id().to_string();
-        if session_id.is_empty() {
+        if ctx.session_id().is_empty() {
             return Ok(error_json(
                 "parse_sheet_tool",
                 "Session ID is required and must be present in the tool context.",
             ));
         }
-        match self.run(&ctx, &session_id).await {
+        match self.run(&ctx).await {
             Ok(value) => Ok(value),
             Err(e) => {
                 if let Some(required) = auth_required(&e) {
@@ -308,7 +289,7 @@ impl Tool for ParseSheetTool {
 }
 
 impl ParseSheetTool {
-    async fn run(&self, ctx: &Arc<dyn ToolContext>, session_id: &str) -> anyhow::Result<Value> {
+    async fn run(&self, ctx: &Arc<dyn ToolContext>) -> anyhow::Result<Value> {
         // 1. Load the raw sheet.
         let (raw, _filename) = load_raw_sheet(ctx).await?;
 
@@ -392,7 +373,8 @@ impl ParseSheetTool {
             operations.len()
         );
 
-        // 7. Store the parsed payload.
+        // 7. Stage the parsed payload as a session artifact (versioned; the
+        //    artifact service decides where it lives: memory, disk or GCS).
         let parsed = json!({
             "status": "success",
             "profile_id": meta.profile_id,
@@ -401,31 +383,34 @@ impl ParseSheetTool {
             "campaign_name": meta.campaign_name,
             "operations": operations,
         });
-        let payload_url = match &self.services.payload_bucket {
-            Some((gcs, bucket)) => {
-                let object_path = format!("cm360_trafficking/{session_id}/payloads.json");
-                let content = serde_json::to_string_pretty(&parsed)?;
-                gcs.upload_string(bucket, &object_path, &content, "application/json")
-                    .await?
-            }
-            None => {
-                tracing::warn!(
-                    "SKILLS_BUCKET_NAME is not set; storing the CM360 payload in session state instead of GCS."
-                );
-                state_set(ctx, PARSED_PAYLOAD_INLINE_KEY, parsed.clone());
-                INLINE_PAYLOAD_URL.to_string()
-            }
-        };
-        state_set(
-            ctx,
-            PARSED_PAYLOAD_URL_KEY,
-            Value::String(payload_url.clone()),
+        let artifacts = ctx
+            .artifacts()
+            .ok_or_else(|| anyhow::anyhow!("Artifact service is not configured."))?;
+        let version = artifacts
+            .save(
+                PAYLOAD_ARTIFACT_NAME,
+                &Part::Text {
+                    text: serde_json::to_string_pretty(&parsed)?,
+                },
+            )
+            .await?;
+        let mut actions = ctx.actions();
+        actions
+            .artifact_delta
+            .insert(PAYLOAD_ARTIFACT_NAME.to_string(), version);
+        actions.state_delta.insert(
+            PARSED_PAYLOAD_ARTIFACT_KEY.to_string(),
+            Value::String(PAYLOAD_ARTIFACT_NAME.to_string()),
+        );
+        ctx.set_actions(actions);
+        tracing::info!(
+            "📦 [parse_sheet_tool] - Staged payload as artifact '{PAYLOAD_ARTIFACT_NAME}' (version {version})."
         );
 
         Ok(pretty(&json!({
             "status": "SUCCESS",
             "message": "The trafficking sheet has been successfully parsed.",
-            "parsed_payload_gcs_url": payload_url,
+            "parsed_payload_artifact": PAYLOAD_ARTIFACT_NAME,
             "profile_id": meta.profile_id,
             "advertiser_id": meta.advertiser_id,
             "campaign_id": meta.campaign_id,
@@ -490,35 +475,26 @@ impl Tool for TrafficCampaignsTool {
 
 impl TrafficCampaignsTool {
     async fn load_payload(&self, ctx: &Arc<dyn ToolContext>) -> anyhow::Result<Value> {
-        let url =
-            state_get(ctx, PARSED_PAYLOAD_URL_KEY).and_then(|v| v.as_str().map(str::to_string));
-        let Some(url) = url else {
-            anyhow::bail!(
-                "CM360 payloads not found: parse_sheet_tool has not been run in this session. Please parse the sheet first."
-            );
-        };
-        if url == INLINE_PAYLOAD_URL {
-            return state_get(ctx, PARSED_PAYLOAD_INLINE_KEY).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "CM360 payloads not found in session state. Please try parsing the sheet again."
-                )
-            });
-        }
-        let Some((bucket, object_path)) = parse_gs_url(&url) else {
-            anyhow::bail!(
-                "CM360 payloads not found in GCS: {url}. Please try parsing the sheet again."
-            );
-        };
-        let Some((gcs, _)) = &self.services.payload_bucket else {
-            anyhow::bail!(
-                "GCS bucket name could not be determined from environment or parsed_payload_gcs_url: {url}"
-            );
-        };
+        let name = state_get(ctx, PARSED_PAYLOAD_ARTIFACT_KEY)
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| PAYLOAD_ARTIFACT_NAME.to_string());
+        let artifacts = ctx
+            .artifacts()
+            .ok_or_else(|| anyhow::anyhow!("Artifact service is not configured."))?;
         tracing::info!(
-            "📥 [traffic_campaigns_in_cm360_tool] - Downloading payloads from GCS: {url}..."
+            "📥 [traffic_campaigns_in_cm360_tool] - Loading staged payload from artifact '{name}'..."
         );
-        let content = gcs.download_string(bucket, object_path).await?;
-        Ok(serde_json::from_str(&content)?)
+        let part = artifacts.load(&name).await.map_err(|_| {
+            anyhow::anyhow!("CM360 payloads not found (artifact '{name}'): run parse_sheet_tool first, then try again.")
+        })?;
+        let text = match part {
+            Part::Text { text } => text,
+            Part::InlineData { data, .. } => String::from_utf8_lossy(&data).to_string(),
+            _ => anyhow::bail!(
+                "Staged payload artifact '{name}' has an unexpected format. Please parse the sheet again."
+            ),
+        };
+        Ok(serde_json::from_str(&text)?)
     }
 
     async fn run(&self, ctx: &Arc<dyn ToolContext>) -> anyhow::Result<Value> {

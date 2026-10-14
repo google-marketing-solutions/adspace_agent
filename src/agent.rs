@@ -442,10 +442,8 @@ pub async fn create_agent(
     ));
 
     if settings.is_toolset_enabled("campaign_manager_360") {
-        let payload_bucket = gcs_client.clone().zip(settings.skills_bucket_name.clone());
         toolsets.push(Arc::new(Cm360TraffickingToolset::new(Cm360Services {
             credentials: credentials.clone(),
-            payload_bucket,
             api_override: None,
         })));
         credentials

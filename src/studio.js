@@ -56,14 +56,14 @@
   };
 
   const PALETTE = [
-    "var(--accent-primary)",
-    "#3b82f6",
-    "#f59e0b",
-    "#10b981",
-    "#8b5cf6",
-    "#ec4899",
-    "#06b6d4",
-    "#f97316",
+    "#4b90ff",
+    "#6b7cff",
+    "#9b72cb",
+    "#d96570",
+    "#38bdf8",
+    "#34d399",
+    "#fbbf24",
+    "#f472b6",
   ];
 
   // Application State
@@ -747,7 +747,7 @@
     style(card, {
       width: "100%",
       border: "1px solid var(--border-default)",
-      borderRadius: "10px",
+      borderRadius: "16px",
       background: "var(--surface-card)",
       boxShadow: "var(--shadow-sm)",
       overflow: "hidden",
@@ -762,9 +762,9 @@
         alignItems: "center",
         justifyContent: "space-between",
         gap: "10px",
-        padding: "10px 14px",
+        padding: "12px 16px",
         borderBottom: "1px solid var(--border-default)",
-        background: "color-mix(in srgb, var(--bg-secondary) 50%, var(--surface-card))",
+        background: "color-mix(in srgb, var(--bg-primary) 45%, var(--surface-card))",
       });
 
       const left = document.createElement("div");
@@ -780,13 +780,13 @@
         const chip = document.createElement("span");
         chip.textContent = eyebrow;
         style(chip, {
-          padding: "2px 6px",
-          borderRadius: "5px",
+          padding: "2px 8px",
+          borderRadius: "999px",
           background: "var(--accent-wash)",
           color: "var(--accent-primary)",
           fontSize: "9.5px",
-          fontWeight: "750",
-          letterSpacing: "0.06em",
+          fontWeight: "700",
+          letterSpacing: "0.07em",
           textTransform: "uppercase",
           flexShrink: "0",
         });
@@ -1611,8 +1611,8 @@
           flexDirection: "column",
           justifyContent: "space-between",
           gap: "6px",
-          padding: "11px 13px",
-          borderRadius: "8px",
+          padding: "12px 14px",
+          borderRadius: "12px",
           background: "var(--bg-primary)",
           border: "1px solid var(--border-default)",
         });
@@ -1706,10 +1706,10 @@
           b.textContent = tab.label || `Tab ${idx + 1}`;
           style(b, {
             border: "1px solid var(--border-default)",
-            borderRadius: "6px",
-            padding: "5px 10px",
+            borderRadius: "999px",
+            padding: "5px 12px",
             fontSize: "11.5px",
-            fontWeight: "650",
+            fontWeight: "600",
             cursor: "pointer",
           });
           b.addEventListener("click", () => selectTab(idx));
@@ -1728,14 +1728,14 @@
         const box = document.createElement("div");
         style(box, {
           border: "1px solid var(--border-default)",
-          borderRadius: "8px",
+          borderRadius: "12px",
           overflow: "hidden",
         });
         const bar = document.createElement("div");
         style(bar, {
           display: "flex",
           justifyContent: "flex-end",
-          padding: "6px 10px",
+          padding: "7px 12px",
           background: "var(--bg-primary)",
           borderBottom: "1px solid var(--border-default)",
         });
@@ -1750,8 +1750,8 @@
           display: "grid",
           gridTemplateColumns: "minmax(130px, auto) 1fr",
           gap: "7px 16px",
-          padding: "10px 12px",
-          borderRadius: "7px",
+          padding: "11px 14px",
+          borderRadius: "12px",
           background: "var(--bg-primary)",
           border: "1px solid var(--border-default)",
           fontSize: "12px",
@@ -1923,8 +1923,8 @@
 
         if (type !== "switch") {
           style(control, {
-            padding: type === "select" ? "7px 30px 7px 10px" : "7px 10px",
-            borderRadius: "6px",
+            padding: type === "select" ? "8px 30px 8px 11px" : "8px 11px",
+            borderRadius: "10px",
             border: "1px solid var(--border-default)",
             backgroundColor: "var(--bg-primary)",
             color: "var(--text-primary)",
@@ -1962,10 +1962,10 @@
                   border: "1px solid var(--border-default)",
                 };
         style(btn, {
-          padding: "6px 13px",
-          borderRadius: "6px",
+          padding: "7px 16px",
+          borderRadius: "999px",
           fontSize: "12px",
-          fontWeight: "650",
+          fontWeight: "600",
           cursor: btn.disabled ? "default" : "pointer",
           alignSelf: "flex-start",
           ...btnStyles,
@@ -3506,10 +3506,7 @@
       }
     } else {
       avatar.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">
-        <rect x="4" y="8" width="16" height="12" rx="4"></rect>
-        <path d="M12 3v5M9.5 3h5M2 13v2M22 13v2M9.5 17h5"></path>
-        <circle cx="9.5" cy="13" r="1.35" fill="currentColor" stroke="none"></circle>
-        <circle cx="14.5" cy="13" r="1.35" fill="currentColor" stroke="none"></circle>
+        <path d="M12 2.5C12 7.75 16.25 12 21.5 12C16.25 12 12 16.25 12 21.5C12 16.25 7.75 12 2.5 12C7.75 12 12 7.75 12 2.5Z" fill="currentColor" stroke="none"></path>
       </svg>`;
     }
     return avatar;

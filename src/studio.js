@@ -2856,7 +2856,7 @@
     "0",
   ];
 
-  const slotReelOffsetPct = (cellIdx) => `-${((cellIdx / SLOT_REEL_CELLS.length) * 100).toFixed(4)}%`;
+  const slotReelOffsetPct = (cellIdx) => `-${cellIdx * 100}%`;
 
   const createSlotDigitEl = (initialDigit) => {
     const digitEl = document.createElement("span");

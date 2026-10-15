@@ -621,7 +621,7 @@ select:focus-visible {
   border: 1px solid var(--border-strong);
   border-radius: 18px;
   box-shadow: var(--shadow-md);
-  z-index: 100;
+  z-index: 1000;
   overflow: hidden;
 }
 
@@ -1000,10 +1000,14 @@ select:focus-visible {
 }
 
 .chat-pane {
+  position: relative;
+  z-index: 20;
   background: transparent;
 }
 
 .canvas-pane {
+  position: relative;
+  z-index: 1;
   background-color: var(--bg-canvas);
 }
 
@@ -1043,6 +1047,8 @@ select:focus-visible {
 }
 
 .pane-header {
+  position: relative;
+  z-index: 20;
   min-height: 54px;
   padding: 8px 18px;
   display: flex;

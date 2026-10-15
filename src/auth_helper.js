@@ -7,9 +7,8 @@
 // 2. Watches `details.tool-call` blocks in `/ui/` for `adk-ui` (`UiResponse`)
 //    component trees (`render_chart`, `render_table`, `render_layout`,
 //    `render_card`, `render_form`, `render_confirm`, `render_modal`,
-//    `render_alert`, `render_progress`, `render_toast`) and renders interactive
-//    charts, sortable tables, KPI dashboards, and two-way forms directly in the
-//    chat stream.
+//    `render_alert`, `render_progress`, `render_toast`) and renders them as
+//    standalone, theme-native cards directly in `.transcript`.
 (() => {
   "use strict";
   const AUTH_PREFIX = "https://accounts.google.com/o/oauth2/";
@@ -18,15 +17,17 @@
   const ACK_PATH = "/oauth2/ack";
   const RESUME_MARKER = "Google access has been granted for this chat";
   const SVG_NS = "http://www.w3.org/2000/svg";
+
+  // Series palette harmonized with ADK Web UI's `--accent-primary` (#0f8a8a / #4fd1c5).
   const PALETTE = [
-    "#4285f4",
-    "#34a853",
-    "#fbbc04",
-    "#ea4335",
-    "#a142f4",
-    "#24c1e0",
-    "#f538a0",
-    "#fa903e",
+    "var(--accent-primary)",
+    "#3b82f6",
+    "#f59e0b",
+    "#10b981",
+    "#8b5cf6",
+    "#ec4899",
+    "#06b6d4",
+    "#f97316",
   ];
 
   const seenLinks = new WeakSet();
@@ -45,6 +46,9 @@
     for (const [k, v] of Object.entries(attrs)) {
       if (v !== undefined && v !== null) el.setAttribute(k, String(v));
     }
+    if (tag === "text") {
+      el.setAttribute("stroke", "none");
+    }
     return el;
   };
 
@@ -57,7 +61,7 @@
     const w = 520;
     const h = 720;
     const left = Math.max(0, (window.screenX || 0) + ((window.outerWidth || w) - w) / 2);
-    const top = Math.max(0, (window.screenY || 0) + ((window.outerHeight || h) - h) / 2);
+    const top = Math.max(0, (window.outerHeight ? (window.screenY || 0) + (window.outerHeight - h) / 2 : 80));
     const win = window.open(
       url,
       "adspace_google_auth",
@@ -95,44 +99,45 @@
       display: "flex",
       alignItems: "center",
       justifyContent: "center",
-      background: "rgba(0, 0, 0, 0.55)",
-      font: "14px/1.45 system-ui, sans-serif",
+      background: "rgba(5, 10, 25, 0.6)",
+      font: "14px/1.5 -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
     });
 
     const box = document.createElement("div");
     style(box, {
       maxWidth: "380px",
       width: "90%",
-      padding: "20px 22px",
-      borderRadius: "14px",
-      background: "#1f1f1f",
-      color: "#f5f5f5",
-      boxShadow: "0 12px 36px rgba(0, 0, 0, 0.45)",
+      padding: "18px 20px",
+      borderRadius: "10px",
+      background: "var(--surface-card)",
+      color: "var(--text-primary)",
+      border: "1px solid var(--border-default)",
+      boxShadow: "var(--shadow-md)",
     });
 
     const title = document.createElement("div");
     title.textContent = "Google authorization required";
-    style(title, { fontSize: "16px", fontWeight: "600", marginBottom: "6px" });
+    style(title, { fontSize: "15px", fontWeight: "650", marginBottom: "6px" });
 
     const detail = document.createElement("div");
     const names = shortScopes(scopes);
     detail.textContent = `Click below to open the Google consent popup${names ? ` (${names})` : ""}. Your request will continue automatically as soon as you grant access.`;
-    style(detail, { opacity: "0.88", marginBottom: "16px" });
+    style(detail, { color: "var(--text-secondary)", fontSize: "13px", marginBottom: "16px" });
 
     const row = document.createElement("div");
-    style(row, { display: "flex", gap: "10px", justifyContent: "flex-end" });
+    style(row, { display: "flex", gap: "8px", justifyContent: "flex-end" });
 
     const cancel = document.createElement("button");
     cancel.type = "button";
     cancel.textContent = "Cancel";
     style(cancel, {
-      border: "0",
-      background: "transparent",
-      color: "inherit",
-      opacity: "0.75",
+      border: "1px solid var(--border-default)",
+      borderRadius: "6px",
+      background: "var(--bg-primary)",
+      color: "var(--text-secondary)",
       cursor: "pointer",
-      padding: "8px 12px",
-      font: "inherit",
+      padding: "6px 12px",
+      fontSize: "12px",
     });
     cancel.addEventListener("click", hideModal);
 
@@ -140,14 +145,14 @@
     button.type = "button";
     button.textContent = "Continue with Google";
     style(button, {
-      border: "0",
-      borderRadius: "8px",
-      padding: "8px 16px",
+      border: "1px solid var(--accent-primary)",
+      borderRadius: "6px",
+      padding: "6px 14px",
       cursor: "pointer",
-      background: "#8ab4f8",
-      color: "#202124",
-      fontWeight: "600",
-      font: "inherit",
+      background: "var(--accent-primary)",
+      color: "#fff",
+      fontWeight: "650",
+      fontSize: "12px",
     });
     button.addEventListener("click", () => {
       if (openPopup(authUrl)) hideModal();
@@ -231,7 +236,7 @@
   });
 
   // ---------------------------------------------------------------------------
-  // Live `adk-ui` (`UiResponse`) Component Renderer for `/ui/`
+  // Live `adk-ui` (`UiResponse`) Standalone Card Renderer for `/ui/`
   // ---------------------------------------------------------------------------
 
   const sendMessageToComposer = (text) => {
@@ -292,78 +297,144 @@
     return String(val);
   };
 
-  const getThemeTokens = (themePref) => {
-    const docTheme = document.documentElement.getAttribute("data-theme");
-    const isDark =
-      themePref === "dark" ||
-      (themePref !== "light" &&
-        (docTheme === "dark" ||
-          (!docTheme &&
-            window.matchMedia &&
-            window.matchMedia("(prefers-color-scheme: dark)").matches)));
-    return isDark
-      ? {
-          bg: "#16181d",
-          cardBg: "#1e2128",
-          subtleBg: "#252932",
-          border: "rgba(255,255,255,0.11)",
-          text: "#f1f3f4",
-          muted: "#9aa0a6",
-          gridLine: "rgba(255,255,255,0.08)",
-          stripe: "rgba(255,255,255,0.03)",
-          inputBg: "#121418",
-          shadow: "0 6px 20px rgba(0,0,0,0.32)",
-        }
-      : {
-          bg: "#ffffff",
-          cardBg: "#ffffff",
-          subtleBg: "#f8f9fa",
-          border: "#e0e3e7",
-          text: "#202124",
-          muted: "#5f6368",
-          gridLine: "#eceff1",
-          stripe: "#f8fafd",
-          inputBg: "#ffffff",
-          shadow: "0 4px 14px rgba(60,64,67,0.08)",
-        };
-  };
-
+  // Uses `/ui/`'s native CSS custom properties so light/dark mode matches 100%.
   const variantColors = (variant) => {
     switch (String(variant || "default").toLowerCase()) {
       case "success":
-        return { bg: "rgba(52,168,83,0.15)", fg: "#2e7d32", border: "rgba(52,168,83,0.4)" };
+      case "operational":
+      case "ok":
+        return {
+          bg: "color-mix(in srgb, var(--accent-success) 14%, var(--bg-primary))",
+          fg: "var(--accent-success)",
+          border: "color-mix(in srgb, var(--accent-success) 42%, var(--border-default))",
+        };
       case "warning":
-        return { bg: "rgba(251,188,4,0.16)", fg: "#b06000", border: "rgba(251,188,4,0.45)" };
+      case "degraded":
+        return {
+          bg: "color-mix(in srgb, var(--accent-warning) 14%, var(--bg-primary))",
+          fg: "var(--accent-warning)",
+          border: "color-mix(in srgb, var(--accent-warning) 45%, var(--border-default))",
+        };
       case "error":
       case "danger":
-        return { bg: "rgba(234,67,53,0.15)", fg: "#c5221f", border: "rgba(234,67,53,0.4)" };
+      case "down":
+      case "outage":
+        return {
+          bg: "color-mix(in srgb, var(--accent-error) 14%, var(--bg-primary))",
+          fg: "var(--accent-error)",
+          border: "color-mix(in srgb, var(--accent-error) 42%, var(--border-default))",
+        };
       case "info":
       case "primary":
-        return { bg: "rgba(66,133,244,0.15)", fg: "#1967d2", border: "rgba(66,133,244,0.4)" };
+        return {
+          bg: "var(--accent-wash)",
+          fg: "var(--accent-primary)",
+          border: "color-mix(in srgb, var(--accent-primary) 40%, var(--border-default))",
+        };
       default:
-        return { bg: "rgba(128,134,139,0.14)", fg: "inherit", border: "rgba(128,134,139,0.35)" };
+        return {
+          bg: "var(--bg-primary)",
+          fg: "var(--text-secondary)",
+          border: "var(--border-default)",
+        };
     }
   };
 
+  // Creates a standalone top-level card matching `.message` in `index-FuuY_PBH.css`.
+  const createStandaloneCard = ({ title, description, eyebrow, headerRight, flushBody = false }) => {
+    const card = document.createElement("section");
+    card.className = "adk-ui-surface adk-ui-card";
+    card.setAttribute("data-ui-scope", "true");
+    style(card, {
+      maxWidth: "760px",
+      width: "100%",
+      border: "1px solid var(--border-default)",
+      borderRadius: "10px",
+      background: "var(--surface-card)",
+      boxShadow: "var(--shadow-sm)",
+      overflow: "hidden",
+      display: "flex",
+      flexDirection: "column",
+    });
+
+    if (title || description || eyebrow || headerRight) {
+      const hdr = document.createElement("header");
+      style(hdr, {
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: "10px",
+        padding: "9px 14px",
+        borderBottom: "1px solid var(--border-default)",
+        background: "color-mix(in srgb, var(--bg-secondary) 50%, var(--surface-card))",
+      });
+
+      const left = document.createElement("div");
+      style(left, { display: "flex", alignItems: "center", gap: "8px", minWidth: "0", flexWrap: "wrap" });
+
+      if (eyebrow) {
+        const chip = document.createElement("span");
+        chip.textContent = eyebrow;
+        style(chip, {
+          padding: "2px 6px",
+          borderRadius: "5px",
+          background: "var(--accent-wash)",
+          color: "var(--accent-primary)",
+          fontSize: "9.5px",
+          fontWeight: "750",
+          letterSpacing: "0.06em",
+          textTransform: "uppercase",
+          flexShrink: "0",
+        });
+        left.appendChild(chip);
+      }
+
+      if (title) {
+        const strong = document.createElement("strong");
+        strong.textContent = title;
+        style(strong, {
+          fontSize: "12.5px",
+          fontWeight: "650",
+          color: "var(--text-primary)",
+        });
+        left.appendChild(strong);
+      }
+
+      if (description) {
+        const sub = document.createElement("span");
+        sub.textContent = description;
+        style(sub, {
+          fontSize: "11.5px",
+          color: "var(--text-muted)",
+        });
+        left.appendChild(sub);
+      }
+
+      hdr.appendChild(left);
+      if (headerRight) hdr.appendChild(headerRight);
+      card.appendChild(hdr);
+    }
+
+    const body = document.createElement("div");
+    style(body, {
+      padding: flushBody ? "0" : "14px 16px",
+      display: "flex",
+      flexDirection: "column",
+      gap: "12px",
+    });
+    card.appendChild(body);
+
+    return { card, body };
+  };
+
   // Renders SVG charts (`bar`, `line`, `area`, `pie`, `scatter`, `sparkline`).
-  const renderChart = (comp, tokens) => {
+  const renderChartInner = (comp) => {
     const wrap = document.createElement("div");
     style(wrap, {
       display: "flex",
       flexDirection: "column",
       gap: "10px",
-      padding: "14px 16px",
-      borderRadius: "12px",
-      background: tokens.cardBg,
-      border: `1px solid ${tokens.border}`,
     });
-
-    if (comp.title) {
-      const title = document.createElement("div");
-      title.textContent = comp.title;
-      style(title, { fontSize: "15px", fontWeight: "600", color: tokens.text });
-      wrap.appendChild(title);
-    }
 
     const data = Array.isArray(comp.data) ? comp.data : [];
     const xKey = comp.x_key || (data[0] ? Object.keys(data[0])[0] : "x");
@@ -379,7 +450,7 @@
     if (!data.length || !yKeys.length) {
       const empty = document.createElement("div");
       empty.textContent = "No chart data available.";
-      style(empty, { color: tokens.muted, fontSize: "13px", padding: "12px 0" });
+      style(empty, { color: "var(--text-muted)", fontSize: "12px", padding: "8px 0" });
       wrap.appendChild(empty);
       return wrap;
     }
@@ -401,15 +472,22 @@
         flexWrap: "wrap",
         alignItems: "center",
         gap: "24px",
-        padding: "6px 0",
+        padding: "4px 0",
       });
 
-      const svg = svgEl("svg", { viewBox: "0 0 220 220" });
-      style(svg, { width: "190px", height: "190px", flexShrink: "0" });
+      const svg = svgEl("svg", { viewBox: "0 0 210 210" });
+      // Override global `svg { width:17px; height:17px; stroke:currentColor }`
+      style(svg, {
+        width: "180px",
+        height: "180px",
+        flexShrink: "0",
+        fill: "none",
+        stroke: "none",
+      });
 
-      const cx = 110;
-      const cy = 110;
-      const rOuter = 92;
+      const cx = 105;
+      const cy = 105;
+      const rOuter = 88;
       const rInner = 52;
       let angle = -Math.PI / 2;
 
@@ -417,7 +495,14 @@
         const frac = s.value / total;
         const sweep = frac * Math.PI * 2;
         if (frac >= 0.9999) {
-          const c = svgEl("circle", { cx, cy, r: (rOuter + rInner) / 2, fill: "none", stroke: s.color, "stroke-width": rOuter - rInner });
+          const c = svgEl("circle", {
+            cx,
+            cy,
+            r: (rOuter + rInner) / 2,
+            fill: "none",
+            stroke: s.color,
+            "stroke-width": rOuter - rInner,
+          });
           const t = svgEl("title");
           t.textContent = `${s.label}: ${formatCellValue(s.value)} (100%)`;
           c.appendChild(t);
@@ -440,7 +525,12 @@
             `A ${rInner} ${rInner} 0 ${large} 0 ${x4} ${y4}`,
             "Z",
           ].join(" ");
-          const path = svgEl("path", { d, fill: s.color, stroke: tokens.cardBg, "stroke-width": "2" });
+          const path = svgEl("path", {
+            d,
+            fill: s.color,
+            stroke: "var(--surface-card)",
+            "stroke-width": "2",
+          });
           const t = svgEl("title");
           t.textContent = `${s.label}: ${formatCellValue(s.value)} (${(frac * 100).toFixed(1)}%)`;
           path.appendChild(t);
@@ -453,16 +543,16 @@
         x: cx,
         y: cy - 4,
         "text-anchor": "middle",
-        fill: tokens.muted,
-        "font-size": "11",
+        fill: "var(--text-muted)",
+        "font-size": "10",
       });
       centerTop.textContent = yKey;
       const centerVal = svgEl("text", {
         x: cx,
-        y: cy + 16,
+        y: cy + 14,
         "text-anchor": "middle",
-        fill: tokens.text,
-        "font-size": "16",
+        fill: "var(--text-primary)",
+        "font-size": "15",
         "font-weight": "700",
       });
       centerVal.textContent = formatCompact(total);
@@ -472,7 +562,7 @@
       style(legend, {
         display: "flex",
         flexDirection: "column",
-        gap: "7px",
+        gap: "6px",
         flex: "1",
         minWidth: "180px",
       });
@@ -483,22 +573,22 @@
           alignItems: "center",
           justifyContent: "space-between",
           gap: "10px",
-          fontSize: "13px",
+          fontSize: "12px",
         });
         const left = document.createElement("div");
         style(left, { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" });
         const swatch = document.createElement("span");
         style(swatch, {
-          width: "10px",
-          height: "10px",
-          borderRadius: "3px",
+          width: "9px",
+          height: "9px",
+          borderRadius: "2.5px",
           background: s.color,
           flexShrink: "0",
         });
         const lbl = document.createElement("span");
         lbl.textContent = s.label;
         style(lbl, {
-          color: tokens.text,
+          color: "var(--text-primary)",
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
@@ -507,7 +597,12 @@
 
         const right = document.createElement("span");
         right.textContent = `${formatCompact(s.value)} (${((s.value / total) * 100).toFixed(1)}%)`;
-        style(right, { color: tokens.muted, fontVariantNumeric: "tabular-nums", flexShrink: "0" });
+        style(right, {
+          color: "var(--text-secondary)",
+          fontFamily: "var(--mono)",
+          fontSize: "11px",
+          flexShrink: "0",
+        });
         item.append(left, right);
         legend.appendChild(item);
       }
@@ -520,11 +615,11 @@
     // Cartesian SVG chart (`bar`, `line`, `area`, `scatter`, `sparkline`)
     const isSpark = kind === "sparkline";
     const W = 680;
-    const H = isSpark ? 90 : 270;
-    const padL = isSpark ? 10 : 56;
-    const padR = isSpark ? 10 : 20;
-    const padT = isSpark ? 10 : 18;
-    const padB = isSpark ? 12 : 52;
+    const H = isSpark ? 84 : 245;
+    const padL = isSpark ? 8 : 52;
+    const padR = isSpark ? 8 : 16;
+    const padT = isSpark ? 8 : 16;
+    const padB = isSpark ? 10 : 44;
     const plotW = W - padL - padR;
     const plotH = H - padT - padB;
 
@@ -544,9 +639,15 @@
     const yToPx = (v) => padT + plotH - ((v - minVal) / span) * plotH;
 
     const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}` });
-    style(svg, { width: "100%", height: "auto", maxHeight: isSpark ? "95px" : "290px", overflow: "visible" });
+    style(svg, {
+      width: "100%",
+      height: "auto",
+      maxHeight: isSpark ? "90px" : "260px",
+      overflow: "visible",
+      fill: "none",
+      stroke: "none",
+    });
 
-    // Grid lines + Y-axis labels
     if (!isSpark) {
       const steps = 4;
       for (let i = 0; i <= steps; i++) {
@@ -557,15 +658,15 @@
           y1: y,
           x2: W - padR,
           y2: y,
-          stroke: tokens.gridLine,
+          stroke: "var(--border-default)",
           "stroke-width": "1",
         });
         const label = svgEl("text", {
           x: padL - 8,
-          y: y + 4,
+          y: y + 3.5,
           "text-anchor": "end",
-          fill: tokens.muted,
-          "font-size": "11",
+          fill: "var(--text-muted)",
+          "font-size": "10",
         });
         label.textContent = formatCompact(val);
         svg.append(line, label);
@@ -575,7 +676,7 @@
     const n = data.length;
     if (kind === "bar") {
       const groupStep = plotW / Math.max(1, n);
-      const groupW = groupStep * 0.74;
+      const groupW = groupStep * 0.72;
       const barW = Math.max(4, groupW / Math.max(1, yKeys.length) - 2);
       const zeroY = yToPx(Math.max(0, minVal));
 
@@ -594,8 +695,9 @@
             y: top,
             width: barW,
             height: h,
-            rx: "4",
+            rx: "3.5",
             fill: colors[sIdx % colors.length],
+            stroke: "none",
           });
           const title = svgEl("title");
           title.textContent = `${row[xKey] ?? i} · ${yk}: ${formatCellValue(raw)}`;
@@ -605,27 +707,26 @@
           if (n <= 12 && yKeys.length === 1) {
             const valTxt = svgEl("text", {
               x: bx + barW / 2,
-              y: Math.max(11, top - 5),
+              y: Math.max(10, top - 5),
               "text-anchor": "middle",
-              fill: tokens.muted,
-              "font-size": "10",
+              fill: "var(--text-secondary)",
+              "font-size": "9.5",
             });
             valTxt.textContent = formatCompact(v);
             svg.appendChild(valTxt);
           }
         });
 
-        // X-axis label
         const stepEvery = Math.max(1, Math.ceil(n / 10));
         if (i % stepEvery === 0) {
           const rawLbl = String(row[xKey] ?? "");
-          const shortLbl = rawLbl.length > 14 ? `${rawLbl.slice(0, 13)}…` : rawLbl;
+          const shortLbl = rawLbl.length > 13 ? `${rawLbl.slice(0, 12)}…` : rawLbl;
           const xTxt = svgEl("text", {
             x: padL + (i + 0.5) * groupStep,
-            y: H - padB + 18,
+            y: H - padB + 17,
             "text-anchor": "middle",
-            fill: tokens.muted,
-            "font-size": "11",
+            fill: "var(--text-muted)",
+            "font-size": "10",
           });
           xTxt.textContent = shortLbl;
           const t = svgEl("title");
@@ -635,7 +736,6 @@
         }
       });
     } else {
-      // `line`, `area`, `scatter`, `sparkline`
       const xForIdx = (i) =>
         n === 1 ? padL + plotW / 2 : padL + (i / (n - 1)) * plotW;
       const baseY = yToPx(Math.max(0, minVal));
@@ -661,7 +761,8 @@
             svgEl("polygon", {
               points: areaPts,
               fill: color,
-              "fill-opacity": "0.18",
+              "fill-opacity": "0.14",
+              stroke: "none",
             })
           );
         }
@@ -672,7 +773,7 @@
               points: pts.map((p) => `${p.x},${p.y}`).join(" "),
               fill: "none",
               stroke: color,
-              "stroke-width": isSpark ? "2" : "2.5",
+              "stroke-width": isSpark ? "2" : "2.2",
               "stroke-linecap": "round",
               "stroke-linejoin": "round",
             })
@@ -684,9 +785,9 @@
             const dot = svgEl("circle", {
               cx: p.x,
               cy: p.y,
-              r: kind === "scatter" ? "5" : "3.5",
+              r: kind === "scatter" ? "4.5" : "3.2",
               fill: color,
-              stroke: tokens.cardBg,
+              stroke: "var(--surface-card)",
               "stroke-width": "1.5",
             });
             const t = svgEl("title");
@@ -702,13 +803,13 @@
         data.forEach((row, i) => {
           if (i % stepEvery !== 0 && i !== n - 1) return;
           const rawLbl = String(row[xKey] ?? "");
-          const shortLbl = rawLbl.length > 14 ? `${rawLbl.slice(0, 13)}…` : rawLbl;
+          const shortLbl = rawLbl.length > 13 ? `${rawLbl.slice(0, 12)}…` : rawLbl;
           const xTxt = svgEl("text", {
             x: xForIdx(i),
-            y: H - padB + 18,
+            y: H - padB + 17,
             "text-anchor": "middle",
-            fill: tokens.muted,
-            "font-size": "11",
+            fill: "var(--text-muted)",
+            "font-size": "10",
           });
           xTxt.textContent = shortLbl;
           svg.appendChild(xTxt);
@@ -718,7 +819,6 @@
 
     wrap.appendChild(svg);
 
-    // Legend
     if (comp.show_legend !== false && !isSpark && yKeys.length > 0) {
       const legend = document.createElement("div");
       style(legend, {
@@ -726,17 +826,17 @@
         flexWrap: "wrap",
         gap: "14px",
         justifyContent: "center",
-        fontSize: "12px",
-        color: tokens.muted,
+        fontSize: "11px",
+        color: "var(--text-secondary)",
       });
       yKeys.forEach((yk, sIdx) => {
         const item = document.createElement("span");
         style(item, { display: "inline-flex", alignItems: "center", gap: "6px" });
         const dot = document.createElement("span");
         style(dot, {
-          width: "10px",
-          height: "10px",
-          borderRadius: "3px",
+          width: "8px",
+          height: "8px",
+          borderRadius: "2px",
           background: colors[sIdx % colors.length],
         });
         const txt = document.createElement("span");
@@ -750,15 +850,11 @@
     return wrap;
   };
 
-  // Renders interactive sortable/filterable tables (`table`).
-  const renderTable = (comp, tokens) => {
+  // Renders interactive sortable/filterable table content (`table`).
+  // Returns `{ element, toolbar }` so a parent card can mount `toolbar` right in its header!
+  const renderTableParts = (comp) => {
     const wrap = document.createElement("div");
-    style(wrap, {
-      borderRadius: "12px",
-      border: `1px solid ${tokens.border}`,
-      background: tokens.cardBg,
-      overflow: "hidden",
-    });
+    style(wrap, { display: "flex", flexDirection: "column" });
 
     const rawRows = Array.isArray(comp.data) ? [...comp.data] : [];
     const columns =
@@ -774,39 +870,36 @@
     let page = 0;
     const pageSize = comp.page_size && comp.page_size > 0 ? Number(comp.page_size) : 0;
 
-    if (rawRows.length > 4) {
-      const toolbar = document.createElement("div");
-      style(toolbar, {
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        padding: "8px 12px",
-        borderBottom: `1px solid ${tokens.border}`,
-        background: tokens.subtleBg,
-      });
-      const countLbl = document.createElement("span");
-      countLbl.textContent = `${rawRows.length} rows`;
-      style(countLbl, { fontSize: "12px", color: tokens.muted });
+    const toolbar = document.createElement("div");
+    style(toolbar, { display: "flex", alignItems: "center", gap: "8px" });
+    const countChip = document.createElement("span");
+    countChip.textContent = `${rawRows.length} rows`;
+    style(countChip, {
+      fontSize: "10.5px",
+      color: "var(--text-muted)",
+      fontFamily: "var(--mono)",
+    });
+    toolbar.appendChild(countChip);
 
+    if (rawRows.length > 4) {
       const search = document.createElement("input");
       search.type = "search";
-      search.placeholder = "Filter rows…";
+      search.placeholder = "Filter…";
       style(search, {
-        padding: "5px 10px",
-        borderRadius: "7px",
-        border: `1px solid ${tokens.border}`,
-        background: tokens.inputBg,
-        color: tokens.text,
-        fontSize: "12px",
-        width: "180px",
+        padding: "3px 8px",
+        borderRadius: "6px",
+        border: "1px solid var(--border-default)",
+        background: "var(--bg-primary)",
+        color: "var(--text-primary)",
+        fontSize: "11px",
+        width: "145px",
       });
       search.addEventListener("input", () => {
         filterQuery = search.value.trim().toLowerCase();
         page = 0;
         rebuildBody();
       });
-      toolbar.append(countLbl, search);
-      wrap.appendChild(toolbar);
+      toolbar.appendChild(search);
     }
 
     const scroller = document.createElement("div");
@@ -816,13 +909,16 @@
     style(table, {
       width: "100%",
       borderCollapse: "collapse",
-      fontSize: "13px",
-      color: tokens.text,
+      fontSize: "12px",
+      color: "var(--text-primary)",
     });
 
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
-    style(headRow, { background: tokens.subtleBg, borderBottom: `1px solid ${tokens.border}` });
+    style(headRow, {
+      background: "var(--bg-primary)",
+      borderBottom: "1px solid var(--border-default)",
+    });
 
     const tbody = document.createElement("tbody");
     const pager = document.createElement("div");
@@ -837,10 +933,10 @@
         th.textContent = `${col.header}${indicator}`;
         style(th, {
           textAlign: "left",
-          padding: "9px 12px",
-          fontWeight: "600",
-          fontSize: "12px",
-          color: tokens.muted,
+          padding: "8px 14px",
+          fontWeight: "650",
+          fontSize: "11px",
+          color: "var(--text-secondary)",
           whiteSpace: "nowrap",
           cursor: canSort ? "pointer" : "default",
           userSelect: "none",
@@ -893,9 +989,13 @@
 
       rows.forEach((row, idx) => {
         const tr = document.createElement("tr");
+        const isLast = idx === rows.length - 1 && !(pageSize > 0 && totalRows > pageSize);
         style(tr, {
-          borderBottom: `1px solid ${tokens.border}`,
-          background: comp.striped && idx % 2 === 1 ? tokens.stripe : "transparent",
+          borderBottom: isLast ? "0" : "1px solid var(--border-default)",
+          background:
+            comp.striped && idx % 2 === 1
+              ? "color-mix(in srgb, var(--bg-primary) 55%, var(--surface-card))"
+              : "transparent",
         });
         for (const col of columns) {
           const td = document.createElement("td");
@@ -906,9 +1006,10 @@
             (typeof raw === "string" && /^[$+-]?[\d,.]+%?$/.test(raw.trim()));
           td.textContent = text;
           style(td, {
-            padding: "9px 12px",
+            padding: "8px 14px",
             textAlign: isNumeric ? "right" : "left",
-            fontVariantNumeric: isNumeric ? "tabular-nums" : "normal",
+            fontFamily: isNumeric ? "var(--mono)" : "inherit",
+            fontSize: isNumeric ? "11.5px" : "12px",
             whiteSpace: isNumeric ? "nowrap" : "normal",
           });
           tr.appendChild(td);
@@ -923,13 +1024,14 @@
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
-          padding: "8px 12px",
-          fontSize: "12px",
-          color: tokens.muted,
-          background: tokens.subtleBg,
+          padding: "7px 14px",
+          fontSize: "11px",
+          color: "var(--text-muted)",
+          background: "var(--bg-primary)",
+          borderTop: "1px solid var(--border-default)",
         });
         const info = document.createElement("span");
-        info.textContent = `Page ${page + 1} of ${totalPages} (${totalRows} rows)`;
+        info.textContent = `Page ${page + 1} of ${totalPages}`;
         const btnWrap = document.createElement("div");
         style(btnWrap, { display: "flex", gap: "6px" });
         const mkBtn = (lbl, disabled, onClick) => {
@@ -938,14 +1040,14 @@
           b.textContent = lbl;
           b.disabled = disabled;
           style(b, {
-            padding: "4px 10px",
-            borderRadius: "6px",
-            border: `1px solid ${tokens.border}`,
-            background: tokens.cardBg,
-            color: tokens.text,
+            padding: "3px 9px",
+            borderRadius: "5px",
+            border: "1px solid var(--border-default)",
+            background: "var(--surface-card)",
+            color: "var(--text-secondary)",
             cursor: disabled ? "default" : "pointer",
             opacity: disabled ? "0.45" : "1",
-            fontSize: "12px",
+            fontSize: "11px",
           });
           b.addEventListener("click", onClick);
           return b;
@@ -972,11 +1074,11 @@
     table.append(thead, tbody);
     scroller.appendChild(table);
     wrap.append(scroller, pager);
-    return wrap;
+    return { element: wrap, toolbar };
   };
 
-  // Recursively renders any `adk_ui::Component` node.
-  const renderComponent = (comp, tokens, surfaceRoot) => {
+  // Recursively renders an inner `adk_ui::Component` inside a card body.
+  const renderInnerComponent = (comp, surfaceRoot, inGrid = false) => {
     if (!comp || typeof comp !== "object") return document.createTextNode("");
     const type = String(comp.type || "").toLowerCase();
 
@@ -986,19 +1088,42 @@
         const el = document.createElement(v === "code" ? "code" : "div");
         el.textContent = comp.content ?? "";
         const map = {
-          h1: { fontSize: "20px", fontWeight: "700", lineHeight: "1.3", color: tokens.text },
-          h2: { fontSize: "17px", fontWeight: "700", lineHeight: "1.35", color: tokens.text },
-          h3: { fontSize: "15px", fontWeight: "600", lineHeight: "1.4", color: tokens.text },
-          h4: { fontSize: "13.5px", fontWeight: "600", lineHeight: "1.4", color: tokens.text },
-          caption: { fontSize: "12px", color: tokens.muted, lineHeight: "1.4" },
-          code: {
-            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-            fontSize: "12.5px",
-            background: tokens.subtleBg,
-            padding: "2px 6px",
-            borderRadius: "5px",
+          h1: {
+            fontSize: "19px",
+            fontWeight: "750",
+            letterSpacing: "-0.01em",
+            lineHeight: "1.25",
+            color: "var(--text-primary)",
           },
-          body: { fontSize: "13.5px", lineHeight: "1.5", color: tokens.text },
+          h2: {
+            fontSize: inGrid ? "20px" : "16px",
+            fontWeight: "750",
+            letterSpacing: "-0.01em",
+            lineHeight: "1.25",
+            color: "var(--text-primary)",
+          },
+          h3: {
+            fontSize: "13.5px",
+            fontWeight: "650",
+            lineHeight: "1.35",
+            color: "var(--text-primary)",
+          },
+          h4: {
+            fontSize: "12.5px",
+            fontWeight: "650",
+            lineHeight: "1.4",
+            color: "var(--text-primary)",
+          },
+          caption: { fontSize: "11.5px", color: "var(--text-muted)", lineHeight: "1.4" },
+          code: {
+            fontFamily: "var(--mono)",
+            fontSize: "11.5px",
+            background: "var(--bg-primary)",
+            border: "1px solid var(--border-default)",
+            padding: "1px 5px",
+            borderRadius: "4px",
+          },
+          body: { fontSize: "13px", lineHeight: "1.5", color: "var(--text-primary)" },
         };
         style(el, map[v] || map.body);
         return el;
@@ -1009,11 +1134,12 @@
         span.textContent = comp.label ?? "";
         const vc = variantColors(comp.variant);
         style(span, {
-          display: "inline-block",
-          padding: "2px 9px",
+          display: "inline-flex",
+          alignItems: "center",
+          padding: "2px 8px",
           borderRadius: "999px",
-          fontSize: "11.5px",
-          fontWeight: "600",
+          fontSize: "10.5px",
+          fontWeight: "650",
           background: vc.bg,
           color: vc.fg,
           border: `1px solid ${vc.border}`,
@@ -1026,8 +1152,8 @@
         const hr = document.createElement("hr");
         style(hr, {
           border: "0",
-          borderTop: `1px solid ${tokens.border}`,
-          margin: "8px 0",
+          borderTop: "1px solid var(--border-default)",
+          margin: "4px 0",
           width: "100%",
         });
         return hr;
@@ -1036,7 +1162,7 @@
       case "stack": {
         const div = document.createElement("div");
         const horiz = String(comp.direction || "vertical").toLowerCase() === "horizontal";
-        const gapPx = Math.max(1, Number(comp.gap ?? 3)) * 4;
+        const gapPx = Math.max(1, Number(comp.gap ?? 3)) * 3.5;
         style(div, {
           display: "flex",
           flexDirection: horiz ? "row" : "column",
@@ -1045,7 +1171,7 @@
           gap: `${gapPx}px`,
         });
         for (const child of comp.children || []) {
-          div.appendChild(renderComponent(child, tokens, surfaceRoot));
+          div.appendChild(renderInnerComponent(child, surfaceRoot, inGrid));
         }
         return div;
       }
@@ -1053,103 +1179,108 @@
       case "grid": {
         const div = document.createElement("div");
         const cols = Math.max(1, Math.min(6, Number(comp.columns) || 2));
-        const gapPx = Math.max(2, Number(comp.gap ?? 3)) * 4;
         style(div, {
           display: "grid",
-          gridTemplateColumns: `repeat(auto-fit, minmax(${cols >= 3 ? "165px" : "240px"}, 1fr))`,
-          gap: `${gapPx}px`,
+          gridTemplateColumns: `repeat(auto-fit, minmax(${cols >= 3 ? "155px" : "210px"}, 1fr))`,
+          gap: "10px",
           alignItems: "stretch",
         });
         for (const child of comp.children || []) {
-          div.appendChild(renderComponent(child, tokens, surfaceRoot));
+          div.appendChild(renderInnerComponent(child, surfaceRoot, true));
         }
         return div;
       }
 
       case "container": {
         const div = document.createElement("div");
-        const padPx = Math.max(0, Number(comp.padding ?? 3)) * 4;
         style(div, {
-          padding: `${padPx}px`,
           display: "flex",
           flexDirection: "column",
-          gap: "12px",
+          gap: "10px",
         });
         for (const child of comp.children || []) {
-          div.appendChild(renderComponent(child, tokens, surfaceRoot));
+          div.appendChild(renderInnerComponent(child, surfaceRoot, inGrid));
         }
         return div;
       }
 
+      // Nested card (e.g. KPI stat tile inside a `Grid`)
       case "card":
       case "modal": {
-        const card = document.createElement("div");
-        card.setAttribute("data-ui-scope", "true");
-        style(card, {
+        const tile = document.createElement("div");
+        tile.setAttribute("data-ui-scope", "true");
+        style(tile, {
           display: "flex",
           flexDirection: "column",
           justifyContent: "space-between",
-          gap: "12px",
-          padding: "16px",
-          borderRadius: "12px",
-          background: tokens.cardBg,
-          border: `1px solid ${tokens.border}`,
-          boxShadow: tokens.shadow,
+          gap: "6px",
+          padding: "11px 13px",
+          borderRadius: "8px",
+          background: "var(--bg-primary)",
+          border: "1px solid var(--border-default)",
         });
 
-        if (comp.title || comp.description) {
-          const hdr = document.createElement("div");
-          style(hdr, { display: "flex", flexDirection: "column", gap: "4px" });
-          if (comp.title) {
-            const t = document.createElement("div");
-            t.textContent = comp.title;
-            style(t, { fontSize: "15px", fontWeight: "600", color: tokens.text });
-            hdr.appendChild(t);
-          }
-          if (comp.description) {
-            const d = document.createElement("div");
-            d.textContent = comp.description;
-            style(d, { fontSize: "12.5px", color: tokens.muted });
-            hdr.appendChild(d);
-          }
-          card.appendChild(hdr);
+        if (comp.title) {
+          const t = document.createElement("div");
+          t.textContent = comp.title;
+          style(
+            t,
+            inGrid
+              ? {
+                  fontSize: "10px",
+                  fontWeight: "750",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.06em",
+                  color: "var(--text-muted)",
+                }
+              : {
+                  fontSize: "12.5px",
+                  fontWeight: "650",
+                  color: "var(--text-primary)",
+                }
+          );
+          tile.appendChild(t);
         }
-
+        if (comp.description) {
+          const d = document.createElement("div");
+          d.textContent = comp.description;
+          style(d, { fontSize: "11.5px", color: "var(--text-muted)" });
+          tile.appendChild(d);
+        }
         if (Array.isArray(comp.content) && comp.content.length) {
           const body = document.createElement("div");
-          style(body, { display: "flex", flexDirection: "column", gap: "12px" });
+          style(body, { display: "flex", flexDirection: "column", gap: "6px" });
           for (const child of comp.content) {
-            body.appendChild(renderComponent(child, tokens, card));
+            body.appendChild(renderInnerComponent(child, tile, inGrid));
           }
-          card.appendChild(body);
+          tile.appendChild(body);
         }
-
         if (Array.isArray(comp.footer) && comp.footer.length) {
           const ftr = document.createElement("div");
           style(ftr, {
             display: "flex",
             flexWrap: "wrap",
-            gap: "8px",
+            gap: "6px",
             justifyContent: "flex-end",
-            paddingTop: "10px",
-            borderTop: `1px solid ${tokens.border}`,
+            paddingTop: "8px",
+            borderTop: "1px solid var(--border-default)",
           });
           for (const child of comp.footer) {
-            ftr.appendChild(renderComponent(child, tokens, card));
+            ftr.appendChild(renderInnerComponent(child, tile, false));
           }
-          card.appendChild(ftr);
+          tile.appendChild(ftr);
         }
-        return card;
+        return tile;
       }
 
       case "tabs": {
         const wrap = document.createElement("div");
-        style(wrap, { display: "flex", flexDirection: "column", gap: "12px" });
+        style(wrap, { display: "flex", flexDirection: "column", gap: "10px" });
         const bar = document.createElement("div");
         style(bar, {
           display: "flex",
           gap: "6px",
-          borderBottom: `1px solid ${tokens.border}`,
+          borderBottom: "1px solid var(--border-default)",
           paddingBottom: "6px",
         });
         const panel = document.createElement("div");
@@ -1160,13 +1291,15 @@
           activeIdx = idx;
           Array.from(bar.children).forEach((btn, i) => {
             style(btn, {
-              background: i === activeIdx ? "#4285f4" : tokens.subtleBg,
-              color: i === activeIdx ? "#ffffff" : tokens.text,
+              background: i === activeIdx ? "var(--accent-wash)" : "var(--bg-primary)",
+              color: i === activeIdx ? "var(--accent-primary)" : "var(--text-secondary)",
+              borderColor:
+                i === activeIdx ? "var(--accent-primary)" : "var(--border-default)",
             });
           });
           panel.replaceChildren();
           for (const child of tabs[idx]?.content || []) {
-            panel.appendChild(renderComponent(child, tokens, surfaceRoot));
+            panel.appendChild(renderInnerComponent(child, surfaceRoot, false));
           }
         };
 
@@ -1175,11 +1308,11 @@
           b.type = "button";
           b.textContent = tab.label || `Tab ${idx + 1}`;
           style(b, {
-            border: "0",
-            borderRadius: "7px",
-            padding: "6px 12px",
-            fontSize: "12.5px",
-            fontWeight: "600",
+            border: "1px solid var(--border-default)",
+            borderRadius: "6px",
+            padding: "5px 10px",
+            fontSize: "11.5px",
+            fontWeight: "650",
             cursor: "pointer",
           });
           b.addEventListener("click", () => selectTab(idx));
@@ -1191,30 +1324,48 @@
       }
 
       case "chart":
-        return renderChart(comp, tokens);
+        return renderChartInner(comp);
 
-      case "table":
-        return renderTable(comp, tokens);
+      case "table": {
+        const { element, toolbar } = renderTableParts(comp);
+        const box = document.createElement("div");
+        style(box, {
+          border: "1px solid var(--border-default)",
+          borderRadius: "8px",
+          overflow: "hidden",
+        });
+        const bar = document.createElement("div");
+        style(bar, {
+          display: "flex",
+          justifyContent: "flex-end",
+          padding: "6px 10px",
+          background: "var(--bg-primary)",
+          borderBottom: "1px solid var(--border-default)",
+        });
+        bar.appendChild(toolbar);
+        box.append(bar, element);
+        return box;
+      }
 
       case "key_value": {
         const dl = document.createElement("div");
         style(dl, {
           display: "grid",
-          gridTemplateColumns: "minmax(120px, auto) 1fr",
-          gap: "8px 16px",
-          padding: "12px 14px",
-          borderRadius: "10px",
-          background: tokens.subtleBg,
-          border: `1px solid ${tokens.border}`,
-          fontSize: "13px",
+          gridTemplateColumns: "minmax(130px, auto) 1fr",
+          gap: "7px 16px",
+          padding: "10px 12px",
+          borderRadius: "7px",
+          background: "var(--bg-primary)",
+          border: "1px solid var(--border-default)",
+          fontSize: "12px",
         });
         for (const pair of comp.pairs || []) {
           const k = document.createElement("div");
           k.textContent = pair.key;
-          style(k, { color: tokens.muted, fontWeight: "500" });
+          style(k, { color: "var(--text-muted)", fontWeight: "600" });
           const v = document.createElement("div");
           v.textContent = pair.value;
-          style(v, { color: tokens.text, fontWeight: "600" });
+          style(v, { color: "var(--text-primary)", fontWeight: "650" });
           dl.append(k, v);
         }
         return dl;
@@ -1227,9 +1378,9 @@
           paddingLeft: "20px",
           display: "flex",
           flexDirection: "column",
-          gap: "5px",
-          fontSize: "13.5px",
-          color: tokens.text,
+          gap: "4px",
+          fontSize: "12.5px",
+          color: "var(--text-primary)",
         });
         for (const item of comp.items || []) {
           const li = document.createElement("li");
@@ -1244,13 +1395,14 @@
         pre.textContent = comp.code ?? "";
         style(pre, {
           margin: "0",
-          padding: "12px 14px",
-          borderRadius: "9px",
-          background: "#111318",
-          color: "#e8eaed",
-          fontSize: "12.5px",
+          padding: "10px 12px",
+          borderRadius: "7px",
+          background: "var(--bg-primary)",
+          border: "1px solid var(--border-default)",
+          color: "var(--text-primary)",
+          fontSize: "11.5px",
           overflowX: "auto",
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          fontFamily: "var(--mono)",
         });
         return pre;
       }
@@ -1260,8 +1412,8 @@
         const box = document.createElement("div");
         const vc = variantColors(comp.variant);
         style(box, {
-          padding: "12px 14px",
-          borderRadius: "10px",
+          padding: "10px 12px",
+          borderRadius: "8px",
           background: vc.bg,
           border: `1px solid ${vc.border}`,
           display: "flex",
@@ -1270,12 +1422,12 @@
         });
         const title = document.createElement("div");
         title.textContent = comp.title || comp.message || "";
-        style(title, { fontWeight: "600", fontSize: "13.5px", color: tokens.text });
+        style(title, { fontWeight: "650", fontSize: "12.5px", color: vc.fg });
         box.appendChild(title);
         if (comp.description) {
           const desc = document.createElement("div");
           desc.textContent = comp.description;
-          style(desc, { fontSize: "12.5px", color: tokens.muted });
+          style(desc, { fontSize: "12px", color: "var(--text-secondary)" });
           box.appendChild(desc);
         }
         return box;
@@ -1286,20 +1438,21 @@
         style(wrap, { display: "flex", flexDirection: "column", gap: "6px" });
         const pct = Math.max(0, Math.min(100, Number(comp.value) || 0));
         const top = document.createElement("div");
-        style(top, { display: "flex", justifyContent: "space-between", fontSize: "12.5px" });
+        style(top, { display: "flex", justifyContent: "space-between", fontSize: "12px" });
         const lbl = document.createElement("span");
         lbl.textContent = comp.label || "Progress";
-        style(lbl, { color: tokens.text, fontWeight: "500" });
+        style(lbl, { color: "var(--text-primary)", fontWeight: "600" });
         const val = document.createElement("span");
         val.textContent = `${pct}%`;
-        style(val, { color: tokens.muted, fontVariantNumeric: "tabular-nums" });
+        style(val, { color: "var(--text-muted)", fontFamily: "var(--mono)" });
         top.append(lbl, val);
 
         const track = document.createElement("div");
         style(track, {
-          height: "8px",
+          height: "7px",
           borderRadius: "999px",
-          background: tokens.subtleBg,
+          background: "var(--bg-primary)",
+          border: "1px solid var(--border-default)",
           overflow: "hidden",
         });
         const bar = document.createElement("div");
@@ -1307,7 +1460,7 @@
           width: `${pct}%`,
           height: "100%",
           borderRadius: "999px",
-          background: "#4285f4",
+          background: "var(--accent-primary)",
         });
         track.appendChild(bar);
         wrap.append(top, track);
@@ -1323,10 +1476,10 @@
       case "slider":
       case "switch": {
         const field = document.createElement("label");
-        style(field, { display: "flex", flexDirection: "column", gap: "5px", fontSize: "12.5px" });
+        style(field, { display: "flex", flexDirection: "column", gap: "4px", fontSize: "11.5px" });
         const lbl = document.createElement("span");
         lbl.textContent = `${comp.label || comp.name}${comp.required ? " *" : ""}`;
-        style(lbl, { fontWeight: "600", color: tokens.text });
+        style(lbl, { fontWeight: "650", color: "var(--text-secondary)" });
         field.appendChild(lbl);
 
         let control;
@@ -1346,7 +1499,7 @@
           }
         } else if (type === "switch") {
           const row = document.createElement("div");
-          style(row, { display: "flex", alignItems: "center", gap: "8px" });
+          style(row, { display: "flex", alignItems: "center", gap: "8px", padding: "2px 0" });
           control = document.createElement("input");
           control.type = "checkbox";
           control.checked = !!comp.default_checked;
@@ -1373,12 +1526,12 @@
 
         if (type !== "switch") {
           style(control, {
-            padding: "8px 10px",
-            borderRadius: "8px",
-            border: `1px solid ${tokens.border}`,
-            background: tokens.inputBg,
-            color: tokens.text,
-            font: "inherit",
+            padding: "7px 10px",
+            borderRadius: "6px",
+            border: "1px solid var(--border-default)",
+            background: "var(--bg-primary)",
+            color: "var(--text-primary)",
+            fontSize: "12.5px",
           });
           field.appendChild(control);
         }
@@ -1395,19 +1548,27 @@
         const v = String(comp.variant || "primary").toLowerCase();
         const btnStyles =
           v === "primary"
-            ? { background: "#4285f4", color: "#ffffff", border: "1px solid #4285f4" }
+            ? {
+                background: "var(--accent-primary)",
+                color: "#fff",
+                border: "1px solid var(--accent-primary)",
+              }
             : v === "danger"
-              ? { background: "#ea4335", color: "#ffffff", border: "1px solid #ea4335" }
+              ? {
+                  background: "var(--accent-error)",
+                  color: "#fff",
+                  border: "1px solid var(--accent-error)",
+                }
               : {
-                  background: tokens.subtleBg,
-                  color: tokens.text,
-                  border: `1px solid ${tokens.border}`,
+                  background: "var(--bg-primary)",
+                  color: "var(--text-secondary)",
+                  border: "1px solid var(--border-default)",
                 };
         style(btn, {
-          padding: "8px 15px",
-          borderRadius: "8px",
-          fontSize: "13px",
-          fontWeight: "600",
+          padding: "6px 13px",
+          borderRadius: "6px",
+          fontSize: "12px",
+          fontWeight: "650",
           cursor: btn.disabled ? "default" : "pointer",
           alignSelf: "flex-start",
           ...btnStyles,
@@ -1451,6 +1612,165 @@
     }
   };
 
+  // Converts a top-level `UiResponse` into one or more standalone `.adk-ui-card` elements
+  // so every chart, table, KPI section, or form renders as its own card in `.transcript`.
+  const buildStandaloneCards = (uiResp) => {
+    const comps = Array.isArray(uiResp.components) ? uiResp.components : [];
+    const cards = [];
+
+    // Pattern 1: `render_table` emits `[Text(H3, title), Table]` or `[Table]`.
+    if (
+      (comps.length === 2 &&
+        comps[0]?.type === "text" &&
+        comps[1]?.type === "table") ||
+      (comps.length === 1 && comps[0]?.type === "table")
+    ) {
+      const title = comps.length === 2 ? comps[0].content : comps[0].title || "Data Table";
+      const tableComp = comps.length === 2 ? comps[1] : comps[0];
+      const { element, toolbar } = renderTableParts(tableComp);
+      const { card, body } = createStandaloneCard({
+        title,
+        eyebrow: "Table",
+        headerRight: toolbar,
+        flushBody: true,
+      });
+      body.appendChild(element);
+      cards.push(card);
+      return cards;
+    }
+
+    // Pattern 2: `render_chart` emits `[Chart]`.
+    if (comps.length === 1 && comps[0]?.type === "chart") {
+      const chartComp = comps[0];
+      const kind = String(chartComp.kind || "bar").toUpperCase();
+      const { card, body } = createStandaloneCard({
+        title: chartComp.title || "Chart",
+        eyebrow: kind,
+      });
+      const chartClone = { ...chartComp, title: null };
+      body.appendChild(renderChartInner(chartClone));
+      cards.push(card);
+      return cards;
+    }
+
+    // Pattern 3: `render_layout` or multi-component responses.
+    let pendingTitle = null;
+    let pendingSubtitle = null;
+
+    for (let i = 0; i < comps.length; i++) {
+      const comp = comps[i];
+      if (!comp || typeof comp !== "object") continue;
+      const t = String(comp.type || "").toLowerCase();
+
+      // Capture leading dashboard title/caption to attach to the first section card.
+      if (t === "text" && (comp.variant === "h1" || comp.variant === "h2") && !pendingTitle) {
+        pendingTitle = comp.content;
+        continue;
+      }
+      if (t === "text" && comp.variant === "caption" && pendingTitle && !pendingSubtitle) {
+        pendingSubtitle = comp.content;
+        continue;
+      }
+
+      // `build_metric_section` from `render_layout`: `Stack` of `[Text(H3, title), Grid(statCards)]`
+      if (
+        t === "stack" &&
+        Array.isArray(comp.children) &&
+        comp.children.length === 2 &&
+        comp.children[0]?.type === "text" &&
+        comp.children[1]?.type === "grid"
+      ) {
+        const secTitle = comp.children[0].content;
+        const { card, body } = createStandaloneCard({
+          title: secTitle,
+          description: pendingTitle ? `${pendingTitle}${pendingSubtitle ? ` · ${pendingSubtitle}` : ""}` : null,
+          eyebrow: "KPIs",
+        });
+        pendingTitle = null;
+        pendingSubtitle = null;
+        body.appendChild(renderInnerComponent(comp.children[1], card, true));
+        cards.push(card);
+        continue;
+      }
+
+      // Top-level `Card` or `Modal` (from `render_card`, `render_form`, `render_confirm`, `render_modal`, or `render_layout` sections)
+      if (t === "card" || t === "modal") {
+        const contentArr = Array.isArray(comp.content) ? comp.content : [];
+        const singleTable = contentArr.length === 1 && contentArr[0]?.type === "table";
+        const singleChart = contentArr.length === 1 && contentArr[0]?.type === "chart";
+
+        let headerRight = null;
+        let tableElement = null;
+        if (singleTable) {
+          const parts = renderTableParts(contentArr[0]);
+          headerRight = parts.toolbar;
+          tableElement = parts.element;
+        }
+
+        const eyebrow = singleTable
+          ? "Table"
+          : singleChart
+            ? String(contentArr[0].kind || "Chart").toUpperCase()
+            : pendingTitle
+              ? pendingTitle
+              : null;
+
+        const { card, body } = createStandaloneCard({
+          title: comp.title || pendingTitle || "Details",
+          description: comp.description || (comp.title && pendingTitle ? pendingSubtitle : null),
+          eyebrow,
+          headerRight,
+          flushBody: singleTable,
+        });
+        pendingTitle = null;
+        pendingSubtitle = null;
+
+        if (singleTable && tableElement) {
+          body.appendChild(tableElement);
+        } else if (singleChart) {
+          body.appendChild(renderChartInner({ ...contentArr[0], title: null }));
+        } else {
+          for (const child of contentArr) {
+            body.appendChild(renderInnerComponent(child, card, false));
+          }
+        }
+
+        if (Array.isArray(comp.footer) && comp.footer.length) {
+          const ftr = document.createElement("footer");
+          style(ftr, {
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "8px",
+            justifyContent: "flex-end",
+            padding: "10px 14px",
+            borderTop: "1px solid var(--border-default)",
+            background: "var(--bg-primary)",
+          });
+          for (const child of comp.footer) {
+            ftr.appendChild(renderInnerComponent(child, card, false));
+          }
+          card.appendChild(ftr);
+        }
+
+        cards.push(card);
+        continue;
+      }
+
+      // Any other top-level component (`alert`, `progress`, `toast`, `table`, `chart`, etc.)
+      const { card, body } = createStandaloneCard({
+        title: comp.title || pendingTitle || null,
+        description: pendingSubtitle || null,
+        eyebrow: t === "alert" || t === "toast" ? String(comp.variant || "Alert") : null,
+      });
+      pendingTitle = null;
+      pendingSubtitle = null;
+      body.appendChild(renderInnerComponent(comp, card, false));
+      cards.push(card);
+    }
+
+    return cards;
+  };
+
   // Extracts an `adk_ui::UiResponse` (`{ components: [...] }`) from a tool JSON object.
   const extractUiResponse = (obj) => {
     if (!obj || typeof obj !== "object") return null;
@@ -1481,6 +1801,79 @@
     return null;
   };
 
+  // Promotes an `<article class="message">` into a clean unboxed slot when it
+  // only holds `render_*` calls/results, so UI cards sit directly in `.transcript`
+  // as their own standalone cards instead of inside a chat bubble.
+  const promoteArticleIfPureUi = (article) => {
+    if (!article) return;
+    const hasText = !!article.querySelector(".message-text");
+    const visibleTools = Array.from(article.querySelectorAll("details.tool-call")).filter(
+      (d) => d.style.display !== "none"
+    );
+    const uiCards = article.querySelectorAll(".adk-ui-card");
+
+    if (!hasText && visibleTools.length === 0) {
+      if (uiCards.length === 0) {
+        // Pure `Tool · render_*` call message with no text and no rendered cards: hide completely.
+        style(article, { display: "none" });
+      } else {
+        // Pure `render_*` result message: strip outer chat bubble chrome so cards are standalone.
+        const hdr = article.querySelector(":scope > header");
+        if (hdr) style(hdr, { display: "none" });
+        style(article, {
+          display: "flex",
+          flexDirection: "column",
+          gap: "14px",
+          background: "transparent",
+          border: "0",
+          boxShadow: "none",
+          borderRadius: "0",
+          minHeight: "0",
+          overflow: "visible",
+        });
+      }
+      return;
+    }
+
+    // Article has text or non-UI tool calls.
+    if (uiCards.length === 0) {
+      style(article, { display: "" });
+      return;
+    }
+
+    // Article has both chat content AND UI cards: separate the chat bubble from standalone UI cards.
+    const hdr = article.querySelector("header");
+    if (hdr) style(hdr, { display: "" });
+    let bubble = article.querySelector(":scope > .adk-ui-chat-bubble");
+    if (!bubble) {
+      bubble = document.createElement("div");
+      bubble.className = "adk-ui-chat-bubble";
+      style(bubble, {
+        border: "1px solid var(--border-default)",
+        borderRadius: "10px",
+        background: "var(--surface-card)",
+        boxShadow: "var(--shadow-sm)",
+        overflow: "hidden",
+      });
+      article.insertBefore(bubble, article.firstChild);
+    }
+    const toMove = Array.from(article.children).filter(
+      (ch) => ch !== bubble && !ch.classList.contains("adk-ui-card")
+    );
+    for (const ch of toMove) bubble.appendChild(ch);
+    style(article, {
+      display: "flex",
+      flexDirection: "column",
+      gap: "14px",
+      background: "transparent",
+      border: "0",
+      boxShadow: "none",
+      borderRadius: "0",
+      minHeight: "0",
+      overflow: "visible",
+    });
+  };
+
   const wireToolDetails = (details) => {
     if (seenDetails.has(details)) return;
     const pre = details.querySelector("pre");
@@ -1494,39 +1887,27 @@
     }
     seenDetails.add(details);
 
-    // Hide/compact raw `Tool · render_*` call blocks so the rendered UI stands out.
+    const article = details.closest("article.message");
+
+    // Hide `Tool · render_*` functionCall blocks so only the rendered UI cards appear.
     const callName =
       parsed?.name || parsed?.functionCall?.name || parsed?.function_call?.name || "";
     if (typeof callName === "string" && callName.startsWith("render_")) {
-      style(details, { opacity: "0.55", fontSize: "11.5px", marginTop: "4px" });
+      style(details, { display: "none" });
+      promoteArticleIfPureUi(article);
       return;
     }
 
     const uiResp = extractUiResponse(parsed);
     if (!uiResp) return;
 
-    const tokens = getThemeTokens(uiResp.theme);
-    const surface = document.createElement("div");
-    surface.className = "adk-ui-surface";
-    surface.setAttribute("data-ui-scope", "true");
-    style(surface, {
-      display: "flex",
-      flexDirection: "column",
-      gap: "12px",
-      margin: "10px 0 6px 0",
-      font: "13.5px/1.45 system-ui, -apple-system, sans-serif",
-      color: tokens.text,
-    });
-
-    for (const comp of uiResp.components) {
-      surface.appendChild(renderComponent(comp, tokens, surface));
+    style(details, { display: "none" });
+    const cards = buildStandaloneCards(uiResp);
+    const parent = article || details.parentNode;
+    for (const card of cards) {
+      parent?.insertBefore(card, details);
     }
-
-    details.parentNode?.insertBefore(surface, details);
-    details.open = false;
-    const summary = details.querySelector("summary");
-    if (summary) summary.textContent = "UI specification (JSON)";
-    style(details, { opacity: "0.55", fontSize: "11.5px" });
+    promoteArticleIfPureUi(article);
   };
 
   // If an OAuth link is ever clicked directly in the chat transcript, open it
@@ -1554,6 +1935,10 @@
         if (isAuthLink(a)) wireLink(a);
       });
       root.querySelectorAll("details.tool-call").forEach(wireToolDetails);
+    }
+    const parentArticle = root.closest ? root.closest("article.message") : null;
+    if (parentArticle && parentArticle.querySelector(".adk-ui-card, details.tool-call")) {
+      promoteArticleIfPureUi(parentArticle);
     }
   };
 

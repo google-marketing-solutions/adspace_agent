@@ -1877,10 +1877,10 @@
 
         if (type !== "switch") {
           style(control, {
-            padding: "7px 10px",
+            padding: type === "select" ? "7px 30px 7px 10px" : "7px 10px",
             borderRadius: "6px",
             border: "1px solid var(--border-default)",
-            background: "var(--bg-primary)",
+            backgroundColor: "var(--bg-primary)",
             color: "var(--text-primary)",
             fontSize: "12.5px",
           });

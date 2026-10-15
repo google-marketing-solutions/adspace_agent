@@ -448,6 +448,39 @@ select:focus-visible {
   color: var(--text-muted);
 }
 
+.popover-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.popover-link-btn {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--accent-primary);
+  cursor: pointer;
+}
+
+.popover-link-btn:hover {
+  text-decoration: underline;
+}
+
+.pricing-rates-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.settings-inputs label code {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-primary);
+}
+
 .segmented {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(0, 1fr));

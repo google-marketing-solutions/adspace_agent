@@ -140,6 +140,69 @@
             </div>
 
             <div class="popover-section">
+              <div class="popover-label-row">
+                <div class="popover-label">Model Pricing (USD / 1M Tokens)</div>
+                <button
+                  id="setting-pricing-reset"
+                  type="button"
+                  class="popover-link-btn"
+                  title="Reset active model rates to Gemini API Paid Tier Standard defaults"
+                >
+                  Reset defaults
+                </button>
+              </div>
+              <div class="settings-inputs">
+                <label>
+                  <span>
+                    Pricing Tier (<code id="setting-pricing-model-label">gemini-3.8-flash</code>)
+                  </span>
+                  <select id="setting-pricing-tier" aria-label="Pricing Tier">
+                    <option value="standard">Paid Tier · Standard (Default)</option>
+                    <option value="priority">Paid Tier · Priority</option>
+                    <option value="batch">Paid Tier · Batch / Flex / Contributor</option>
+                    <option value="free">Free Tier ($0.00)</option>
+                    <option value="custom">Custom Rates…</option>
+                  </select>
+                </label>
+                <div class="pricing-rates-grid">
+                  <label>
+                    <span>Input ($/1M)</span>
+                    <input
+                      id="setting-price-input"
+                      type="number"
+                      step="any"
+                      min="0"
+                      placeholder="0.75"
+                      aria-label="Input price per 1M tokens in USD"
+                    />
+                  </label>
+                  <label>
+                    <span>Cached ($/1M)</span>
+                    <input
+                      id="setting-price-cached"
+                      type="number"
+                      step="any"
+                      min="0"
+                      placeholder="0.075"
+                      aria-label="Cached input price per 1M tokens in USD"
+                    />
+                  </label>
+                  <label>
+                    <span>Output ($/1M)</span>
+                    <input
+                      id="setting-price-output"
+                      type="number"
+                      step="any"
+                      min="0"
+                      placeholder="3.75"
+                      aria-label="Output price per 1M tokens in USD"
+                    />
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div class="popover-section">
               <div class="popover-label">Default Google Ads Account (Optional)</div>
               <div class="settings-inputs">
                 <label>

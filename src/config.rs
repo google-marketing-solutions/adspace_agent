@@ -688,30 +688,67 @@ pub struct ModelPricing {
     pub audio_input_per_million: f64,
 }
 
-/// Returns the per-million-token pricing table for `model`.
+/// Returns the per-million-token Paid Tier Standard pricing table for `model`
+/// (from <https://ai.google.dev/gemini-api/docs/pricing>).
 pub fn model_pricing(model: &str) -> ModelPricing {
     let m = model.trim().to_ascii_lowercase();
-    if m.contains("flash-lite") {
+    if m.contains("gemini-4") || m.contains("argon") {
+        // Gemini 4 Argon (Paid Tier Standard): $2.00 in, $0.10 cached, $10.00 out
+        ModelPricing {
+            input_per_million: 2.00,
+            input_long_per_million: 2.00,
+            cached_input_per_million: 0.10,
+            cached_input_long_per_million: 0.10,
+            output_per_million: 10.00,
+            output_long_per_million: 10.00,
+            audio_input_per_million: 2.00,
+        }
+    } else if m.contains("gemini-3.5-flash-lite") {
+        // Gemini 3.5 Flash-Lite (Paid Tier Standard): $0.30 in, $0.03 cached, $2.50 out
+        ModelPricing {
+            input_per_million: 0.30,
+            input_long_per_million: 0.30,
+            cached_input_per_million: 0.03,
+            cached_input_long_per_million: 0.03,
+            output_per_million: 2.50,
+            output_long_per_million: 2.50,
+            audio_input_per_million: 0.30,
+        }
+    } else if m.contains("gemini-3.1-flash-lite") {
+        // Gemini 3.1 Flash-Lite (Paid Tier Standard): $0.25 in ($0.50 audio), $0.025 cached, $1.50 out
+        ModelPricing {
+            input_per_million: 0.25,
+            input_long_per_million: 0.25,
+            cached_input_per_million: 0.025,
+            cached_input_long_per_million: 0.025,
+            output_per_million: 1.50,
+            output_long_per_million: 1.50,
+            audio_input_per_million: 0.50,
+        }
+    } else if m.contains("flash-lite") || m.contains("gemini-2.0-flash") {
+        // Gemini 2.5 Flash-Lite (Paid Tier Standard): $0.10 in ($0.30 audio), $0.01 cached, $0.40 out
         ModelPricing {
             input_per_million: 0.10,
             input_long_per_million: 0.10,
-            cached_input_per_million: 0.025,
-            cached_input_long_per_million: 0.025,
+            cached_input_per_million: 0.01,
+            cached_input_long_per_million: 0.01,
             output_per_million: 0.40,
             output_long_per_million: 0.40,
             audio_input_per_million: 0.30,
         }
-    } else if m.contains("gemini-2.0-flash") {
+    } else if (m.contains("gemini-3.8") || m.contains("gemini-3.6")) && m.contains("flash") {
+        // Gemini 3.8 Flash & Gemini 3.6 Flash (Paid Tier Standard): $0.75 in, $0.075 cached, $3.75 out
         ModelPricing {
-            input_per_million: 0.10,
-            input_long_per_million: 0.10,
-            cached_input_per_million: 0.025,
-            cached_input_long_per_million: 0.025,
-            output_per_million: 0.40,
-            output_long_per_million: 0.40,
-            audio_input_per_million: 0.70,
+            input_per_million: 0.75,
+            input_long_per_million: 0.75,
+            cached_input_per_million: 0.075,
+            cached_input_long_per_million: 0.075,
+            output_per_million: 3.75,
+            output_long_per_million: 3.75,
+            audio_input_per_million: 0.75,
         }
     } else if m.contains("gemini-3") && m.contains("flash") {
+        // Gemini 3 Flash Preview (Paid Tier Standard): $0.50 in ($1.00 audio), $0.05 cached, $3.00 out
         ModelPricing {
             input_per_million: 0.50,
             input_long_per_million: 0.50,
@@ -722,6 +759,7 @@ pub fn model_pricing(model: &str) -> ModelPricing {
             audio_input_per_million: 1.00,
         }
     } else if m.contains("flash") {
+        // Gemini 2.5 Flash (Paid Tier Standard): $0.30 in ($1.00 audio), $0.03 cached, $2.50 out
         ModelPricing {
             input_per_million: 0.30,
             input_long_per_million: 0.30,
@@ -731,7 +769,8 @@ pub fn model_pricing(model: &str) -> ModelPricing {
             output_long_per_million: 2.50,
             audio_input_per_million: 1.00,
         }
-    } else if m.contains("gemini-3") || m.contains("gemini-4") || m.contains("argon") {
+    } else if m.contains("gemini-3") {
+        // Gemini 3.1 Pro Preview (Paid Tier Standard): $2.00/$4.00 in, $0.20/$0.40 cached, $12.00/$18.00 out
         ModelPricing {
             input_per_million: 2.00,
             input_long_per_million: 4.00,
@@ -742,6 +781,7 @@ pub fn model_pricing(model: &str) -> ModelPricing {
             audio_input_per_million: 2.00,
         }
     } else {
+        // Gemini 2.5 Pro (Paid Tier Standard): $1.25/$2.50 in, $0.125/$0.25 cached, $10.00/$15.00 out
         ModelPricing {
             input_per_million: 1.25,
             input_long_per_million: 2.50,
@@ -906,12 +946,16 @@ mod tests {
         let flash_cost = estimate_usage_cost_usd("gemini-2.5-flash", &usage);
         assert!((flash_cost - 0.0442).abs() < 1e-9, "got {flash_cost}");
 
-        // gemini-3.5-flash-lite: 60k * $0.10/1M ($0.006) + 40k * $0.025/1M ($0.001) + 10k * $0.40/1M ($0.004) = $0.011
+        // gemini-3.5-flash-lite: 60k * $0.30/1M ($0.018) + 40k * $0.03/1M ($0.0012) + 10k * $2.50/1M ($0.025) = $0.0442
         let lite_cost = estimate_usage_cost_usd("gemini-3.5-flash-lite", &usage);
-        assert!((lite_cost - 0.011).abs() < 1e-9, "got {lite_cost}");
+        assert!((lite_cost - 0.0442).abs() < 1e-9, "got {lite_cost}");
 
-        // gemini-3.8-flash: 60k * $0.50/1M ($0.03) + 40k * $0.05/1M ($0.002) + 10k * $3.00/1M ($0.03) = $0.062
-        let flash3_cost = estimate_usage_cost_usd("gemini-3.8-flash", &usage);
-        assert!((flash3_cost - 0.062).abs() < 1e-9, "got {flash3_cost}");
+        // gemini-3.8-flash: 60k * $0.75/1M ($0.045) + 40k * $0.075/1M ($0.003) + 10k * $3.75/1M ($0.0375) = $0.0855
+        let flash38_cost = estimate_usage_cost_usd("gemini-3.8-flash", &usage);
+        assert!((flash38_cost - 0.0855).abs() < 1e-9, "got {flash38_cost}");
+
+        // gemini-4-argon: 60k * $2.00/1M ($0.12) + 40k * $0.10/1M ($0.004) + 10k * $10.00/1M ($0.10) = $0.224
+        let argon_cost = estimate_usage_cost_usd("gemini-4-argon", &usage);
+        assert!((argon_cost - 0.224).abs() < 1e-9, "got {argon_cost}");
     }
 }

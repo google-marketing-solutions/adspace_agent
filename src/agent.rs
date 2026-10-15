@@ -219,98 +219,199 @@ impl adk_rust::Llm for RuntimeModelConfig {
     }
 }
 
+/// Counts character lengths of text/tool parts and thinking parts in `content`.
+fn count_chunk_content_chars(content: Option<&adk_rust::Content>) -> (usize, usize) {
+    let Some(content) = content else {
+        return (0, 0);
+    };
+    let mut text_chars = 0usize;
+    let mut thinking_chars = 0usize;
+    for part in &content.parts {
+        match part {
+            adk_rust::Part::Text { text } => {
+                text_chars = text_chars.saturating_add(text.chars().count());
+            }
+            adk_rust::Part::Thinking { thinking, .. } => {
+                thinking_chars = thinking_chars.saturating_add(thinking.chars().count());
+            }
+            adk_rust::Part::FunctionCall { name, args, .. } => {
+                text_chars = text_chars
+                    .saturating_add(name.len())
+                    .saturating_add(args.to_string().len());
+            }
+            _ => {}
+        }
+    }
+    (text_chars, thinking_chars)
+}
+
 /// Wraps an [`adk_rust::LlmResponseStream`] to record OpenTelemetry GenAI token
 /// usage via [`adk_rust::telemetry::record_llm_usage`] and enrich each
-/// [`adk_rust::UsageMetadata`] with the active model name, OTel `gen_ai.usage.*`
-/// attributes, and estimated USD cost.
+/// [`adk_rust::UsageMetadata`] (including live partial streaming chunks) with
+/// the active model name, OTel `gen_ai.usage.*` attributes, and estimated USD cost.
 fn track_stream_token_usage(
     stream: adk_rust::LlmResponseStream,
     span: tracing::Span,
     model_name: String,
 ) -> adk_rust::LlmResponseStream {
+    let mut known_prompt_tokens: i32 = 0;
+    let mut known_cache_read_tokens: Option<i32> = None;
+    let mut known_cache_creation_tokens: Option<i32> = None;
+    let mut known_audio_input_tokens: Option<i32> = None;
+    let mut streamed_text_chars: usize = 0;
+    let mut streamed_thinking_chars: usize = 0;
+
     let tracked = stream.map(move |mut item| {
-        if let Ok(ref mut response) = item
-            && let Some(ref mut usage) = response.usage_metadata
-        {
-            let llm_usage = adk_rust::telemetry::LlmUsage {
-                input_tokens: usage.prompt_token_count,
-                output_tokens: usage.candidates_token_count,
-                total_tokens: usage.total_token_count,
-                cache_read_tokens: usage.cache_read_input_token_count,
-                cache_creation_tokens: usage.cache_creation_input_token_count,
-                thinking_tokens: usage.thinking_token_count,
-                audio_input_tokens: usage.audio_input_token_count,
-                audio_output_tokens: usage.audio_output_token_count,
-            };
+        if let Ok(ref mut response) = item {
+            let (chunk_text_chars, chunk_thinking_chars) =
+                count_chunk_content_chars(response.content.as_ref());
+            if response.partial {
+                streamed_text_chars = streamed_text_chars.saturating_add(chunk_text_chars);
+                streamed_thinking_chars =
+                    streamed_thinking_chars.saturating_add(chunk_thinking_chars);
+            } else if streamed_text_chars == 0 && streamed_thinking_chars == 0 {
+                streamed_text_chars = chunk_text_chars;
+                streamed_thinking_chars = chunk_thinking_chars;
+            }
+
+            let est_text_tokens = (streamed_text_chars.div_ceil(4)) as i32;
+            let est_thinking_tokens = (streamed_thinking_chars.div_ceil(4)) as i32;
+            let est_candidates_tokens = est_text_tokens.saturating_add(est_thinking_tokens);
+
+            if response.usage_metadata.is_none()
+                && (known_prompt_tokens > 0 || est_candidates_tokens > 0)
             {
-                let _enter = span.enter();
-                adk_rust::telemetry::record_llm_usage(&llm_usage);
-            }
-            adk_rust::telemetry::record_llm_usage(&llm_usage);
-
-            let estimated_cost = config::estimate_usage_cost_usd(&model_name, usage);
-            if usage.cost.is_none() {
-                usage.cost = Some(estimated_cost);
+                response.usage_metadata = Some(adk_rust::UsageMetadata::default());
             }
 
-            let mut meta_obj = match usage.provider_usage.take() {
-                Some(serde_json::Value::Object(map)) => map,
-                Some(other) => {
-                    let mut map = serde_json::Map::new();
-                    map.insert("raw".to_string(), other);
-                    map
+            if let Some(ref mut usage) = response.usage_metadata {
+                if usage.prompt_token_count > 0 {
+                    known_prompt_tokens = usage.prompt_token_count;
+                } else if known_prompt_tokens > 0 {
+                    usage.prompt_token_count = known_prompt_tokens;
                 }
-                None => serde_json::Map::new(),
-            };
-            meta_obj.insert("model".to_string(), serde_json::json!(model_name));
-            meta_obj.insert("gen_ai.system".to_string(), serde_json::json!("gemini"));
-            meta_obj.insert(
-                "gen_ai.request.model".to_string(),
-                serde_json::json!(model_name),
-            );
-            meta_obj.insert(
-                "gen_ai.usage.input_tokens".to_string(),
-                serde_json::json!(llm_usage.input_tokens),
-            );
-            meta_obj.insert(
-                "gen_ai.usage.output_tokens".to_string(),
-                serde_json::json!(llm_usage.output_tokens),
-            );
-            meta_obj.insert(
-                "gen_ai.usage.total_tokens".to_string(),
-                serde_json::json!(llm_usage.total_tokens),
-            );
-            if let Some(v) = llm_usage.cache_read_tokens {
+
+                if usage.cache_read_input_token_count.is_some() {
+                    known_cache_read_tokens = usage.cache_read_input_token_count;
+                } else if known_cache_read_tokens.is_some() {
+                    usage.cache_read_input_token_count = known_cache_read_tokens;
+                }
+
+                if usage.cache_creation_input_token_count.is_some() {
+                    known_cache_creation_tokens = usage.cache_creation_input_token_count;
+                } else if known_cache_creation_tokens.is_some() {
+                    usage.cache_creation_input_token_count = known_cache_creation_tokens;
+                }
+
+                if usage.audio_input_token_count.is_some() {
+                    known_audio_input_tokens = usage.audio_input_token_count;
+                } else if known_audio_input_tokens.is_some() {
+                    usage.audio_input_token_count = known_audio_input_tokens;
+                }
+
+                if response.partial {
+                    if usage.candidates_token_count < est_candidates_tokens {
+                        usage.candidates_token_count = est_candidates_tokens;
+                    }
+                    if est_thinking_tokens > 0
+                        && usage.thinking_token_count.unwrap_or(0) < est_thinking_tokens
+                    {
+                        usage.thinking_token_count = Some(est_thinking_tokens);
+                    }
+                } else if usage.candidates_token_count == 0 && est_candidates_tokens > 0 {
+                    usage.candidates_token_count = est_candidates_tokens;
+                    if est_thinking_tokens > 0 && usage.thinking_token_count.is_none() {
+                        usage.thinking_token_count = Some(est_thinking_tokens);
+                    }
+                }
+
+                let min_total = usage
+                    .prompt_token_count
+                    .saturating_add(usage.candidates_token_count);
+                if usage.total_token_count < min_total {
+                    usage.total_token_count = min_total;
+                }
+
+                let llm_usage = adk_rust::telemetry::LlmUsage {
+                    input_tokens: usage.prompt_token_count,
+                    output_tokens: usage.candidates_token_count,
+                    total_tokens: usage.total_token_count,
+                    cache_read_tokens: usage.cache_read_input_token_count,
+                    cache_creation_tokens: usage.cache_creation_input_token_count,
+                    thinking_tokens: usage.thinking_token_count,
+                    audio_input_tokens: usage.audio_input_token_count,
+                    audio_output_tokens: usage.audio_output_token_count,
+                };
+                {
+                    let _enter = span.enter();
+                    adk_rust::telemetry::record_llm_usage(&llm_usage);
+                }
+                adk_rust::telemetry::record_llm_usage(&llm_usage);
+
+                let estimated_cost = config::estimate_usage_cost_usd(&model_name, usage);
+                if response.partial || usage.cost.is_none() {
+                    usage.cost = Some(estimated_cost);
+                }
+
+                let mut meta_obj = match usage.provider_usage.take() {
+                    Some(serde_json::Value::Object(map)) => map,
+                    Some(other) => {
+                        let mut map = serde_json::Map::new();
+                        map.insert("raw".to_string(), other);
+                        map
+                    }
+                    None => serde_json::Map::new(),
+                };
+                meta_obj.insert("model".to_string(), serde_json::json!(model_name));
+                meta_obj.insert("gen_ai.system".to_string(), serde_json::json!("gemini"));
                 meta_obj.insert(
-                    "gen_ai.usage.cache_read_tokens".to_string(),
-                    serde_json::json!(v),
+                    "gen_ai.request.model".to_string(),
+                    serde_json::json!(model_name),
                 );
-            }
-            if let Some(v) = llm_usage.cache_creation_tokens {
                 meta_obj.insert(
-                    "gen_ai.usage.cache_creation_tokens".to_string(),
-                    serde_json::json!(v),
+                    "gen_ai.usage.input_tokens".to_string(),
+                    serde_json::json!(llm_usage.input_tokens),
                 );
-            }
-            if let Some(v) = llm_usage.thinking_tokens {
                 meta_obj.insert(
-                    "gen_ai.usage.thinking_tokens".to_string(),
-                    serde_json::json!(v),
+                    "gen_ai.usage.output_tokens".to_string(),
+                    serde_json::json!(llm_usage.output_tokens),
                 );
-            }
-            if let Some(v) = llm_usage.audio_input_tokens {
                 meta_obj.insert(
-                    "gen_ai.usage.audio_input_tokens".to_string(),
-                    serde_json::json!(v),
+                    "gen_ai.usage.total_tokens".to_string(),
+                    serde_json::json!(llm_usage.total_tokens),
                 );
+                if let Some(v) = llm_usage.cache_read_tokens {
+                    meta_obj.insert(
+                        "gen_ai.usage.cache_read_tokens".to_string(),
+                        serde_json::json!(v),
+                    );
+                }
+                if let Some(v) = llm_usage.cache_creation_tokens {
+                    meta_obj.insert(
+                        "gen_ai.usage.cache_creation_tokens".to_string(),
+                        serde_json::json!(v),
+                    );
+                }
+                if let Some(v) = llm_usage.thinking_tokens {
+                    meta_obj.insert(
+                        "gen_ai.usage.thinking_tokens".to_string(),
+                        serde_json::json!(v),
+                    );
+                }
+                if let Some(v) = llm_usage.audio_input_tokens {
+                    meta_obj.insert(
+                        "gen_ai.usage.audio_input_tokens".to_string(),
+                        serde_json::json!(v),
+                    );
+                }
+                if let Some(v) = llm_usage.audio_output_tokens {
+                    meta_obj.insert(
+                        "gen_ai.usage.audio_output_tokens".to_string(),
+                        serde_json::json!(v),
+                    );
+                }
+                usage.provider_usage = Some(serde_json::Value::Object(meta_obj));
             }
-            if let Some(v) = llm_usage.audio_output_tokens {
-                meta_obj.insert(
-                    "gen_ai.usage.audio_output_tokens".to_string(),
-                    serde_json::json!(v),
-                );
-            }
-            usage.provider_usage = Some(serde_json::Value::Object(meta_obj));
         }
         item
     });
@@ -1132,5 +1233,42 @@ mod tests {
         assert_eq!(provider_usage["gen_ai.usage.total_tokens"], 1_250);
         assert_eq!(provider_usage["gen_ai.usage.cache_read_tokens"], 200);
         assert_eq!(provider_usage["gen_ai.usage.thinking_tokens"], 50);
+    }
+
+    #[tokio::test]
+    async fn telemetry_stream_updates_partial_chunks_live() {
+        let mut chunk1 =
+            adk_rust::LlmResponse::new(Content::new("model").with_text("Hello world! "));
+        chunk1.partial = true;
+        chunk1.usage_metadata = Some(adk_rust::UsageMetadata {
+            prompt_token_count: 1_000,
+            candidates_token_count: 0,
+            total_token_count: 1_000,
+            ..Default::default()
+        });
+
+        let mut chunk2 =
+            adk_rust::LlmResponse::new(Content::new("model").with_text("Streaming more tokens."));
+        chunk2.partial = true;
+        chunk2.usage_metadata = None;
+
+        let raw_stream: adk_rust::LlmResponseStream =
+            Box::pin(futures::stream::iter(vec![Ok(chunk1), Ok(chunk2)]));
+        let span = adk_rust::telemetry::llm_generate_span("gemini", "gemini-3.8-flash", true);
+        let mut tracked = track_stream_token_usage(raw_stream, span, "gemini-3.8-flash".into());
+
+        let first = tracked.next().await.unwrap().unwrap();
+        let u1 = first.usage_metadata.expect("chunk1 usage");
+        assert_eq!(u1.prompt_token_count, 1_000);
+        assert!(u1.candidates_token_count > 0);
+        assert_eq!(u1.total_token_count, 1_000 + u1.candidates_token_count);
+        assert!(u1.cost.unwrap_or(0.0) > 0.0);
+
+        let second = tracked.next().await.unwrap().unwrap();
+        let u2 = second.usage_metadata.expect("chunk2 synthesized usage");
+        assert_eq!(u2.prompt_token_count, 1_000);
+        assert!(u2.candidates_token_count > u1.candidates_token_count);
+        assert_eq!(u2.total_token_count, 1_000 + u2.candidates_token_count);
+        assert!(u2.cost.unwrap_or(0.0) > u1.cost.unwrap_or(0.0));
     }
 }

@@ -31,6 +31,8 @@
     model: "adspace.studio.model",
     imageModel: "adspace.studio.imageModel",
     videoModel: "adspace.studio.videoModel",
+    pricingTier: "adspace.studio.pricingTier",
+    modelPricing: "adspace.studio.modelPricing",
   };
 
   const DEFAULT_MODELS = {
@@ -76,6 +78,17 @@
   let popup = null;
   const handledStates = new Set();
 
+  const loadStoredModelPricing = () => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEYS.modelPricing);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  };
+
   // Preferences
   let prefs = {
     theme: localStorage.getItem(STORAGE_KEYS.theme) || "system",
@@ -90,6 +103,8 @@
     model: localStorage.getItem(STORAGE_KEYS.model) || DEFAULT_MODELS.model,
     imageModel: localStorage.getItem(STORAGE_KEYS.imageModel) || DEFAULT_MODELS.imageModel,
     videoModel: localStorage.getItem(STORAGE_KEYS.videoModel) || DEFAULT_MODELS.videoModel,
+    pricingTier: localStorage.getItem(STORAGE_KEYS.pricingTier) || "standard",
+    modelPricing: loadStoredModelPricing(),
   };
 
   // DOM Elements
@@ -229,7 +244,11 @@
     }
   };
 
-  const applyPreferences = ({ rerender = true, syncModels = true } = {}) => {
+  const applyPreferences = ({
+    rerender = true,
+    syncModels = true,
+    syncPricing = true,
+  } = {}) => {
     if (prefs.theme === "light" || prefs.theme === "dark") {
       document.documentElement.setAttribute("data-theme", prefs.theme);
     } else {
@@ -247,6 +266,8 @@
     localStorage.setItem(STORAGE_KEYS.model, prefs.model);
     localStorage.setItem(STORAGE_KEYS.imageModel, prefs.imageModel);
     localStorage.setItem(STORAGE_KEYS.videoModel, prefs.videoModel);
+    localStorage.setItem(STORAGE_KEYS.pricingTier, prefs.pricingTier || "standard");
+    localStorage.setItem(STORAGE_KEYS.modelPricing, JSON.stringify(prefs.modelPricing || {}));
 
     document.querySelectorAll("#theme-segmented button").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.themeChoice === prefs.theme);
@@ -269,6 +290,9 @@
     $("setting-login-customer-id").value = prefs.loginCustomerId;
     if (syncModels) {
       syncAllModelControls();
+    }
+    if (syncPricing && typeof syncPricingControls === "function") {
+      syncPricingControls();
     }
 
     const ids = [prefs.model];
@@ -2468,56 +2492,54 @@
   // OpenTelemetry GenAI Token Usage (`adk_telemetry` / `gen_ai.usage.*`) & Cost
   // ---------------------------------------------------------------------------
 
-  const getModelPricing = (model) => {
+  // Official Paid Tier pricing per 1M tokens (USD) from https://ai.google.dev/gemini-api/docs/pricing
+  const getDefaultModelPricing = (model, tier = prefs.pricingTier) => {
     const m = String(model || prefs.model || DEFAULT_MODELS.model)
       .trim()
       .toLowerCase();
-    if (m.includes("flash-lite")) {
-      return {
-        input: 0.1,
-        inputLong: 0.1,
-        cached: 0.025,
-        cachedLong: 0.025,
-        output: 0.4,
-        outputLong: 0.4,
-        audioIn: 0.3,
+    let base;
+    if (m.includes("argon") || m.includes("gemini-4")) {
+      base = {
+        input: 2.0,
+        inputLong: 2.0,
+        cached: 0.1,
+        cachedLong: 0.1,
+        output: 10.0,
+        outputLong: 10.0,
+        audioIn: 2.0,
       };
-    }
-    if (m.includes("gemini-2.0-flash")) {
-      return {
-        input: 0.1,
-        inputLong: 0.1,
-        cached: 0.025,
-        cachedLong: 0.025,
-        output: 0.4,
-        outputLong: 0.4,
-        audioIn: 0.7,
+    } else if (m.includes("3.8-flash") || m.includes("3.6-flash")) {
+      base = {
+        input: 0.75,
+        inputLong: 0.75,
+        cached: 0.075,
+        cachedLong: 0.075,
+        output: 3.75,
+        outputLong: 3.75,
+        audioIn: 0.75,
       };
-    }
-    if (m.includes("gemini-3") && m.includes("flash")) {
-      return {
-        input: 0.5,
-        inputLong: 0.5,
-        cached: 0.05,
-        cachedLong: 0.05,
-        output: 3.0,
-        outputLong: 3.0,
-        audioIn: 1.0,
-      };
-    }
-    if (m.includes("flash")) {
-      return {
+    } else if (m.includes("3.5-flash-lite")) {
+      base = {
         input: 0.3,
         inputLong: 0.3,
         cached: 0.03,
         cachedLong: 0.03,
         output: 2.5,
         outputLong: 2.5,
-        audioIn: 1.0,
+        audioIn: 0.3,
       };
-    }
-    if (m.includes("gemini-3") || m.includes("gemini-4") || m.includes("argon")) {
-      return {
+    } else if (m.includes("3.1-flash-lite")) {
+      base = {
+        input: 0.25,
+        inputLong: 0.25,
+        cached: 0.025,
+        cachedLong: 0.025,
+        output: 1.5,
+        outputLong: 1.5,
+        audioIn: 0.5,
+      };
+    } else if (m.includes("3.1-pro") || (m.includes("gemini-3") && m.includes("pro"))) {
+      base = {
         input: 2.0,
         inputLong: 4.0,
         cached: 0.2,
@@ -2526,16 +2548,143 @@
         outputLong: 18.0,
         audioIn: 2.0,
       };
+    } else if (m.includes("gemini-3") && m.includes("flash")) {
+      base = {
+        input: 0.5,
+        inputLong: 0.5,
+        cached: 0.05,
+        cachedLong: 0.05,
+        output: 3.0,
+        outputLong: 3.0,
+        audioIn: 1.0,
+      };
+    } else if (m.includes("2.5-flash-lite") || m.includes("flash-lite")) {
+      base = {
+        input: 0.1,
+        inputLong: 0.1,
+        cached: 0.01,
+        cachedLong: 0.01,
+        output: 0.4,
+        outputLong: 0.4,
+        audioIn: 0.3,
+      };
+    } else if (m.includes("2.0-flash")) {
+      base = {
+        input: 0.1,
+        inputLong: 0.1,
+        cached: 0.025,
+        cachedLong: 0.025,
+        output: 0.4,
+        outputLong: 0.4,
+        audioIn: 0.7,
+      };
+    } else if (m.includes("flash")) {
+      base = {
+        input: 0.3,
+        inputLong: 0.3,
+        cached: 0.03,
+        cachedLong: 0.03,
+        output: 2.5,
+        outputLong: 2.5,
+        audioIn: 1.0,
+      };
+    } else {
+      base = {
+        input: 1.25,
+        inputLong: 2.5,
+        cached: 0.125,
+        cachedLong: 0.25,
+        output: 10.0,
+        outputLong: 15.0,
+        audioIn: 1.25,
+      };
     }
+
+    const mult = tier === "priority" ? 1.8 : tier === "batch" ? 0.5 : 1.0;
+    const scale = (v) => Number((v * mult).toFixed(6));
     return {
-      input: 1.25,
-      inputLong: 2.5,
-      cached: 0.125,
-      cachedLong: 0.25,
-      output: 10.0,
-      outputLong: 15.0,
-      audioIn: 1.25,
+      input: scale(base.input),
+      inputLong: scale(base.inputLong),
+      cached: scale(base.cached),
+      cachedLong: scale(base.cachedLong),
+      output: scale(base.output),
+      outputLong: scale(base.outputLong),
+      audioIn: scale(base.audioIn),
     };
+  };
+
+  const getModelPricingKey = (model, tier = prefs.pricingTier) => {
+    const m = String(model || prefs.model || DEFAULT_MODELS.model)
+      .trim()
+      .toLowerCase();
+    const t = String(tier || "standard").toLowerCase();
+    return `${t}:${m}`;
+  };
+
+  const getModelPricing = (model) => {
+    const tier = prefs.pricingTier || "standard";
+    const defaults = getDefaultModelPricing(model, tier);
+    const key = getModelPricingKey(model, tier);
+    const custom =
+      prefs.modelPricing && typeof prefs.modelPricing === "object"
+        ? prefs.modelPricing[key]
+        : null;
+    if (!custom || typeof custom !== "object") {
+      return { ...defaults, isCustom: false, tier };
+    }
+
+    const input =
+      typeof custom.input === "number" && Number.isFinite(custom.input) && custom.input >= 0
+        ? custom.input
+        : defaults.input;
+    const cached =
+      typeof custom.cached === "number" && Number.isFinite(custom.cached) && custom.cached >= 0
+        ? custom.cached
+        : defaults.cached;
+    const output =
+      typeof custom.output === "number" && Number.isFinite(custom.output) && custom.output >= 0
+        ? custom.output
+        : defaults.output;
+
+    const inLongRatio = defaults.input > 0 ? defaults.inputLong / defaults.input : 1;
+    const cachedLongRatio = defaults.cached > 0 ? defaults.cachedLong / defaults.cached : 1;
+    const outLongRatio = defaults.output > 0 ? defaults.outputLong / defaults.output : 1;
+    const audioRatio = defaults.input > 0 ? defaults.audioIn / defaults.input : 1;
+
+    return {
+      input,
+      inputLong: Number((input * inLongRatio).toFixed(6)),
+      cached,
+      cachedLong: Number((cached * cachedLongRatio).toFixed(6)),
+      output,
+      outputLong: Number((output * outLongRatio).toFixed(6)),
+      audioIn: Number((input * audioRatio).toFixed(6)),
+      isCustom: true,
+      tier,
+    };
+  };
+
+  const syncPricingControls = () => {
+    const activeModel = prefs.model || DEFAULT_MODELS.model;
+    const rates = getModelPricing(activeModel);
+    if ($("setting-pricing-model-label")) {
+      $("setting-pricing-model-label").textContent = activeModel;
+    }
+    if ($("setting-pricing-tier")) {
+      $("setting-pricing-tier").value = prefs.pricingTier || "standard";
+    }
+    const inEl = $("setting-price-input");
+    if (inEl && document.activeElement !== inEl) {
+      inEl.value = String(rates.input);
+    }
+    const cachedEl = $("setting-price-cached");
+    if (cachedEl && document.activeElement !== cachedEl) {
+      cachedEl.value = String(rates.cached);
+    }
+    const outEl = $("setting-price-output");
+    if (outEl && document.activeElement !== outEl) {
+      outEl.value = String(rates.output);
+    }
   };
 
   const formatCompactTokens = (n) => {
@@ -2552,8 +2701,7 @@
     const val = Math.max(0, Number(cost) || 0);
     if (val === 0) return "$0.00";
     if (val < 0.0001) return "<$0.0001";
-    if (val < 0.01) return `~$${val.toFixed(4)}`;
-    if (val < 1) return `~$${val.toFixed(3)}`;
+    if (val < 10) return `~$${val.toFixed(4)}`;
     return `~$${val.toFixed(2)}`;
   };
 
@@ -2570,6 +2718,9 @@
 
   const triggerPulseClass = (el, className) => {
     if (!el || prefersReducedMotion()) return;
+    const now = performance.now();
+    if (el._lastPulseAt && now - el._lastPulseAt < 450) return;
+    el._lastPulseAt = now;
     el.classList.remove(className);
     void el.offsetWidth;
     el.classList.add(className);
@@ -2586,11 +2737,12 @@
     if (!el) return;
     const target = Math.max(0, Number(nextValue) || 0);
     const formatSig = options.formatSig ?? "";
+    el._counterFormatFn = formatter;
     if (el._counterTarget === target && el._counterFormatSig === formatSig) {
       return;
     }
 
-    const startValue =
+    const currentVal =
       typeof el._counterValue === "number" && Number.isFinite(el._counterValue)
         ? el._counterValue
         : 0;
@@ -2598,49 +2750,121 @@
     el._counterTarget = target;
     el._counterFormatSig = formatSig;
 
-    if (el._counterRaf) {
-      cancelAnimationFrame(el._counterRaf);
-      el._counterRaf = null;
-    }
-
     if (
       prefersReducedMotion() ||
       target === 0 ||
-      Math.abs(target - startValue) < 1e-9
+      Math.abs(target - currentVal) < 1e-9
     ) {
+      if (el._counterRaf) {
+        cancelAnimationFrame(el._counterRaf);
+        el._counterRaf = null;
+      }
+      el._counterLastFrameTime = null;
       el._counterValue = target;
       el.textContent = formatter(target);
       return;
     }
 
-    if (target > startValue && (hadPreviousTarget || options.pulseOnMount)) {
+    if (target > currentVal && (hadPreviousTarget || options.pulseOnMount)) {
       triggerPulseClass(el, "counter-tick");
     }
 
-    const duration = options.duration ?? 520;
-    const startTime = performance.now();
+    const duration = options.duration ?? 360;
+    const nowInit = performance.now();
+
+    if (el._counterRaf) {
+      if (el._counterLastFrameTime) {
+        el._counterStartValue = currentVal;
+        el._counterStartTime = el._counterLastFrameTime;
+      }
+      return;
+    }
+
+    el._counterStartValue = currentVal;
+    el._counterStartTime = nowInit;
+    el._counterLastFrameTime = null;
 
     const step = (now) => {
-      const elapsed = now - startTime;
-      const t = Math.min(1, Math.max(0, elapsed / duration));
+      el._counterLastFrameTime = now;
+      const startVal = el._counterStartValue ?? 0;
+      const endVal = el._counterTarget ?? 0;
+      const elapsed = Math.max(0, now - (el._counterStartTime ?? now));
+      const t = Math.min(1, elapsed / duration);
       const eased = 1 - Math.pow(1 - t, 3);
-      const current = startValue + (target - startValue) * eased;
-      el._counterValue = current;
-      el.textContent = formatter(t >= 1 ? target : current);
+      const current = startVal + (endVal - startVal) * eased;
+      el._counterValue = t >= 1 ? endVal : current;
+      const fmt = el._counterFormatFn || formatter;
+      el.textContent = fmt(el._counterValue);
       if (t < 1) {
         el._counterRaf = requestAnimationFrame(step);
       } else {
-        el._counterValue = target;
+        el._counterValue = endVal;
         el._counterRaf = null;
+        el._counterLastFrameTime = null;
       }
     };
 
     el._counterRaf = requestAnimationFrame(step);
   };
 
+  const estimateStreamedPartsTokens = (parts) => {
+    let textChars = 0;
+    let thinkingChars = 0;
+    for (const p of Array.isArray(parts) ? parts : []) {
+      if (!p || typeof p !== "object") continue;
+      if (typeof p.thinking === "string") {
+        thinkingChars += p.thinking.length;
+      } else if (typeof p.text === "string") {
+        textChars += p.text.length;
+      }
+      const fc = p.functionCall || p.function_call;
+      if (fc && typeof fc === "object") {
+        textChars += (fc.name || "").length + JSON.stringify(fc.args || {}).length;
+      }
+    }
+    const thinkingTokens = Math.ceil(thinkingChars / 4);
+    const textTokens = Math.ceil(textChars / 4);
+    return {
+      thinkingTokens,
+      outputTokens: textTokens + thinkingTokens,
+    };
+  };
+
   const extractEventUsage = (ev) => {
+    const isUser =
+      (ev?.content?.role || (ev?.author === "user" ? "user" : "model")) === "user" ||
+      ev?.author === "user";
+    if (isUser) return null;
+
     const u = ev?.usage_metadata || ev?.usageMetadata;
-    if (!u || typeof u !== "object") return null;
+    const streamedEst = ev?.partial
+      ? estimateStreamedPartsTokens(ev?.content?.parts)
+      : { thinkingTokens: 0, outputTokens: 0 };
+
+    if (!u || typeof u !== "object") {
+      if (!ev?.partial || streamedEst.outputTokens === 0) return null;
+      const model = prefs.model || DEFAULT_MODELS.model;
+      const p = getModelPricing(model);
+      const outputCost = (streamedEst.outputTokens / 1e6) * p.output;
+      return {
+        model,
+        inputTokens: 0,
+        uncachedInputTokens: 0,
+        outputTokens: streamedEst.outputTokens,
+        totalTokens: streamedEst.outputTokens,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        thinkingTokens: streamedEst.thinkingTokens,
+        audioInputTokens: 0,
+        audioOutputTokens: 0,
+        inputCost: 0,
+        cacheReadCost: 0,
+        audioCost: 0,
+        outputCost,
+        totalCost: outputCost,
+      };
+    }
+
     const prov = u.provider_usage && typeof u.provider_usage === "object" ? u.provider_usage : {};
     const model =
       prov["gen_ai.request.model"] || prov.model || prefs.model || DEFAULT_MODELS.model;
@@ -2651,7 +2875,7 @@
         u.prompt_token_count ?? prov["gen_ai.usage.input_tokens"] ?? prov.promptTokenCount ?? 0
       ) || 0
     );
-    const outputTokens = Math.max(
+    const rawOutputTokens = Math.max(
       0,
       Number(
         u.candidates_token_count ??
@@ -2660,7 +2884,10 @@
           0
       ) || 0
     );
-    const totalTokens = Math.max(
+    const outputTokens = ev?.partial
+      ? Math.max(rawOutputTokens, streamedEst.outputTokens)
+      : rawOutputTokens;
+    const rawTotalTokens = Math.max(
       0,
       Number(
         u.total_token_count ??
@@ -2669,6 +2896,7 @@
           inputTokens + outputTokens
       ) || 0
     );
+    const totalTokens = Math.max(rawTotalTokens, inputTokens + outputTokens);
     const cacheReadTokens = Math.min(
       inputTokens,
       Math.max(
@@ -2687,7 +2915,7 @@
         u.cache_creation_input_token_count ?? prov["gen_ai.usage.cache_creation_tokens"] ?? 0
       ) || 0
     );
-    const thinkingTokens = Math.max(
+    const rawThinkingTokens = Math.max(
       0,
       Number(
         u.thinking_token_count ??
@@ -2696,6 +2924,9 @@
           0
       ) || 0
     );
+    const thinkingTokens = ev?.partial
+      ? Math.max(rawThinkingTokens, streamedEst.thinkingTokens)
+      : rawThinkingTokens;
     const remainingInput = Math.max(0, inputTokens - cacheReadTokens);
     const audioInputTokens = Math.min(
       remainingInput,
@@ -2722,7 +2953,11 @@
     const outputCost = (outputTokens / 1e6) * outputRate;
     const computedTotalCost = inputCost + cacheReadCost + audioCost + outputCost;
     const totalCost =
-      typeof u.cost === "number" && Number.isFinite(u.cost) ? u.cost : computedTotalCost;
+      computedTotalCost > 0 || inputTokens + outputTokens > 0
+        ? computedTotalCost
+        : typeof u.cost === "number" && Number.isFinite(u.cost)
+          ? u.cost
+          : 0;
 
     return {
       model,
@@ -2828,7 +3063,7 @@
     animateCounter(
       $("session-usage-tokens"),
       s.totalTokens,
-      (v) => `${formatCompactTokens(v)} tok`
+      (v) => `${formatExactInt(v)} tok`
     );
     if ($("session-usage-sep")) {
       $("session-usage-sep").classList.toggle("hidden", !showCost);
@@ -2914,8 +3149,15 @@
     }
 
     if ($("usage-rate-note")) {
+      const tierLabel = rates.isCustom
+        ? "Custom"
+        : rates.tier === "priority"
+          ? "Paid Priority"
+          : rates.tier === "batch"
+            ? "Paid Batch/Flex"
+            : "Paid Standard";
       $("usage-rate-note").textContent = showCost
-        ? `Rates (${primaryModel}): $${rates.input}/1M in · $${rates.cached}/1M cached · $${rates.output}/1M out`
+        ? `${tierLabel} (${primaryModel}): $${rates.input}/1M in · $${rates.cached}/1M cached · $${rates.output}/1M out`
         : `Model (${primaryModel}) · OpenTelemetry gen_ai.usage.* counters`;
     }
 
@@ -2974,11 +3216,18 @@
   const mergeStreamedEvent = (prev, incoming) => {
     const prevParts = Array.isArray(prev?.content?.parts) ? prev.content.parts : [];
     const nextParts = Array.isArray(incoming?.content?.parts) ? incoming.content.parts : [];
+    const mergedUsage =
+      incoming?.usage_metadata ??
+      incoming?.usageMetadata ??
+      prev?.usage_metadata ??
+      prev?.usageMetadata ??
+      null;
 
     if (incoming.partial) {
       return {
         ...prev,
         ...incoming,
+        usage_metadata: mergedUsage,
         content: {
           ...(prev?.content || {}),
           ...(incoming?.content || {}),
@@ -3008,6 +3257,7 @@
     return {
       ...prev,
       ...incoming,
+      usage_metadata: mergedUsage,
       partial: false,
       content: {
         ...(prev?.content || {}),
@@ -3197,9 +3447,9 @@
       }
     }
 
-    // 5. Per-turn token telemetry & cost footer (for completed agent messages)
+    // 5. Per-turn token telemetry & cost footer (live during streaming and after completion)
     const usageSig =
-      !isUser && !partial && usage && prefs.showMessageUsage
+      !isUser && usage && prefs.showMessageUsage
         ? `${usage.totalTokens}:${usage.inputTokens}:${usage.outputTokens}:${usage.thinkingTokens}:${usage.cacheReadTokens}:${prefs.showCost ? usage.totalCost.toFixed(6) : "nocost"}`
         : "";
     if (article.dataset.usageSig !== usageSig) {
@@ -3792,7 +4042,7 @@
       } else {
         customEl.classList.add("hidden");
         prefs[prefKey] = selectEl.value;
-        applyPreferences({ rerender: false });
+        applyPreferences({ rerender: prefKey === "model" });
         pushModelsToServer();
       }
     });
@@ -3805,7 +4055,7 @@
       }
       if (cleaned !== prefs[prefKey]) {
         prefs[prefKey] = cleaned;
-        applyPreferences({ rerender: false, syncModels: false });
+        applyPreferences({ rerender: prefKey === "model", syncModels: false });
         pushModelsToServer();
       }
     };
@@ -3834,6 +4084,73 @@
     "setting-video-model-custom",
     DEFAULT_MODELS.videoModel
   );
+
+  // Model Pricing Controls (Paid Tier Standard / Priority / Batch & Custom Overrides)
+  if ($("setting-pricing-tier")) {
+    $("setting-pricing-tier").addEventListener("change", (e) => {
+      prefs.pricingTier = e.target.value || "standard";
+      applyPreferences();
+    });
+  }
+
+  const commitCustomPricingInputs = () => {
+    const activeModel = prefs.model || DEFAULT_MODELS.model;
+    const tier = prefs.pricingTier || "standard";
+    const defaults = getDefaultModelPricing(activeModel, tier);
+    const key = getModelPricingKey(activeModel, tier);
+
+    const parseRate = (el, fallback) => {
+      if (!el) return fallback;
+      const num = parseFloat(el.value);
+      return Number.isFinite(num) && num >= 0 ? num : fallback;
+    };
+
+    const nextInput = parseRate($("setting-price-input"), defaults.input);
+    const nextCached = parseRate($("setting-price-cached"), defaults.cached);
+    const nextOutput = parseRate($("setting-price-output"), defaults.output);
+
+    if (!prefs.modelPricing || typeof prefs.modelPricing !== "object") {
+      prefs.modelPricing = {};
+    }
+
+    const isDefault =
+      Math.abs(nextInput - defaults.input) < 1e-9 &&
+      Math.abs(nextCached - defaults.cached) < 1e-9 &&
+      Math.abs(nextOutput - defaults.output) < 1e-9;
+
+    if (isDefault) {
+      delete prefs.modelPricing[key];
+    } else {
+      prefs.modelPricing[key] = {
+        input: nextInput,
+        cached: nextCached,
+        output: nextOutput,
+      };
+    }
+
+    applyPreferences({ syncPricing: false });
+  };
+
+  ["setting-price-input", "setting-price-cached", "setting-price-output"].forEach((id) => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener("input", commitCustomPricingInputs);
+    el.addEventListener("change", () => {
+      commitCustomPricingInputs();
+      syncPricingControls();
+    });
+  });
+
+  if ($("setting-pricing-reset")) {
+    $("setting-pricing-reset").addEventListener("click", () => {
+      const activeModel = prefs.model || DEFAULT_MODELS.model;
+      const tier = prefs.pricingTier || "standard";
+      if (prefs.modelPricing && typeof prefs.modelPricing === "object") {
+        delete prefs.modelPricing[getModelPricingKey(activeModel, tier)];
+      }
+      applyPreferences();
+    });
+  }
 
   // Split-Pane Resizer
   let isResizing = false;

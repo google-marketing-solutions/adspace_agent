@@ -456,6 +456,7 @@
 
   const loadSession = async (sessionId) => {
     if (!currentUser || !sessionId) return;
+    const isSessionSwitch = !activeSession || activeSession.id !== sessionId;
     try {
       const resp = await fetch(
         apiUrl(
@@ -468,8 +469,10 @@
       activeSession = await resp.json();
       chatSessionTitle.textContent = `Session ${activeSession.id.slice(0, 8)}`;
       $("menu-session-id").textContent = activeSession.id;
-      activeSurfaceId = "all";
-      rebuildFromSessionEvents(activeSession.events || []);
+      if (isSessionSwitch) {
+        activeSurfaceId = "all";
+      }
+      rebuildFromSessionEvents(activeSession.events || [], { forceCanvas: isSessionSwitch });
     } catch (err) {
       showError(`Could not load session: ${err.message || err}`);
     }
@@ -2332,17 +2335,103 @@
 
   let currentEvents = [];
 
-  const rebuildFromSessionEvents = (events) => {
+  const isPlainTextPart = (part) =>
+    part &&
+    typeof part.text === "string" &&
+    !part.thinking &&
+    !part.functionCall &&
+    !part.function_call &&
+    !part.functionResponse &&
+    !part.function_response &&
+    !part.inlineData &&
+    !part.inline_data;
+
+  const coalesceParts = (parts) => {
+    const out = [];
+    for (const part of Array.isArray(parts) ? parts : []) {
+      if (!part || typeof part !== "object") continue;
+      if (isPlainTextPart(part)) {
+        const last = out[out.length - 1];
+        if (last && isPlainTextPart(last)) {
+          last.text += part.text;
+          continue;
+        }
+      } else if (typeof part.thinking === "string") {
+        const last = out[out.length - 1];
+        if (last && typeof last.thinking === "string" && !isPlainTextPart(last)) {
+          last.thinking += part.thinking;
+          continue;
+        }
+      }
+      out.push({ ...part });
+    }
+    return out;
+  };
+
+  const extractConcatenatedText = (parts) =>
+    (Array.isArray(parts) ? parts : [])
+      .map((p) => (typeof p?.text === "string" ? p.text : ""))
+      .join("");
+
+  const mergeStreamedEvent = (prev, incoming) => {
+    const prevParts = Array.isArray(prev?.content?.parts) ? prev.content.parts : [];
+    const nextParts = Array.isArray(incoming?.content?.parts) ? incoming.content.parts : [];
+
+    if (incoming.partial) {
+      return {
+        ...prev,
+        ...incoming,
+        content: {
+          ...(prev?.content || {}),
+          ...(incoming?.content || {}),
+          parts: coalesceParts([...prevParts, ...nextParts]),
+        },
+      };
+    }
+
+    const contentComplete = incoming?.provider_metadata?.content_complete === true;
+    const prevText = extractConcatenatedText(prevParts);
+    const nextText = extractConcatenatedText(nextParts);
+
+    let finalParts;
+    if (nextParts.length === 0 && prevParts.length > 0) {
+      finalParts = coalesceParts(prevParts);
+    } else if (
+      prev?.partial &&
+      !contentComplete &&
+      prevText &&
+      (!nextText || !nextText.startsWith(prevText))
+    ) {
+      finalParts = coalesceParts([...prevParts, ...nextParts]);
+    } else {
+      finalParts = coalesceParts(nextParts);
+    }
+
+    return {
+      ...prev,
+      ...incoming,
+      partial: false,
+      content: {
+        ...(prev?.content || {}),
+        ...(incoming?.content || {}),
+        parts: finalParts,
+      },
+    };
+  };
+
+  const rebuildFromSessionEvents = (events, { forceCanvas = false } = {}) => {
     currentEvents = Array.isArray(events) ? events : [];
+    const prevSurfaceIds = canvasSurfaces.map((s) => s.id).join("|");
     const existingById = new Map(canvasSurfaces.map((s) => [s.id, s]));
     const nextSurfaces = [];
 
     currentEvents.forEach((ev, idx) => {
       const parts = ev?.content?.parts || [];
-      parts.forEach((part, pIdx) => {
+      let uiIndex = 0;
+      parts.forEach((part) => {
         const uiResp = extractUiResponse(part);
         if (uiResp) {
-          const surfaceId = `surface-${ev.id || idx}-${pIdx}`;
+          const surfaceId = `surface-${ev.id || idx}-${uiIndex++}`;
           const prev = existingById.get(surfaceId);
           if (prev) {
             nextSurfaces.push(prev);
@@ -2360,9 +2449,12 @@
       });
     });
     canvasSurfaces = nextSurfaces;
+    const nextSurfaceIds = canvasSurfaces.map((s) => s.id).join("|");
 
     renderTranscript();
-    renderCanvas();
+    if (forceCanvas || prevSurfaceIds !== nextSurfaceIds) {
+      renderCanvas();
+    }
   };
 
   const focusSurfaceOnCanvas = (surfaceId) => {
@@ -2376,116 +2468,81 @@
     }
   };
 
-  const renderTranscript = () => {
-    chatTranscript.replaceChildren();
-
-    if (!currentEvents.length) {
-      const empty = document.createElement("div");
-      style(empty, {
-        margin: "auto",
-        textAlign: "center",
-        color: "var(--text-muted)",
-        padding: "32px 18px",
-        fontSize: "12.5px",
-      });
-      empty.textContent =
-        "Ask a question on the left or pick a starter card on the right to begin.";
-      chatTranscript.appendChild(empty);
-      return;
-    }
-
-    currentEvents.forEach((ev, idx) => {
-      const parts = ev?.content?.parts || [];
-      const isUser =
-        (ev?.content?.role || (ev?.author === "user" ? "user" : "model")) === "user" ||
-        ev?.author === "user";
-
-      const textContent = parts
-        .map((p) => (typeof p.text === "string" ? p.text : ""))
-        .filter(Boolean)
-        .join("");
-
-      const toolParts = [];
-      const surfaceRefs = [];
-
-      parts.forEach((part, pIdx) => {
-        const callName =
-          part?.name || part?.functionCall?.name || part?.function_call?.name || "";
-        if (callName && String(callName).startsWith("render_")) {
-          return; // Skip raw `render_*` functionCall in chat
-        }
-        const uiResp = extractUiResponse(part);
-        if (uiResp) {
-          const surfaceId = `surface-${ev.id || idx}-${pIdx}`;
-          const found = canvasSurfaces.find((s) => s.id === surfaceId);
-          if (found) surfaceRefs.push(found);
-          return;
-        }
-        if ("name" in part || "functionResponse" in part || "function_response" in part) {
-          toolParts.push(part);
-        }
-      });
-
-      const visibleTools = prefs.showTools ? toolParts : [];
-      if (!textContent && visibleTools.length === 0 && surfaceRefs.length === 0) {
-        return;
-      }
-
-      const row = document.createElement("div");
-      row.className = `message-row ${isUser ? "message-row-user" : "message-row-agent"}`;
-
-      const authorLabel = isUser
-        ? currentUser?.name || currentUser?.email || "You"
-        : ev.author === APP_NAME
-          ? "AdSpace Agent"
-          : ev.author || "Agent";
-
-      const avatar = document.createElement("span");
-      avatar.className = `avatar ${isUser ? "avatar-user" : "avatar-agent"}`;
-      avatar.title = authorLabel;
-      if (isUser) {
-        if (currentUser?.picture) {
-          const img = document.createElement("img");
-          img.src = currentUser.picture;
-          img.alt = authorLabel;
-          img.referrerPolicy = "no-referrer";
-          img.onerror = () => {
-            avatar.textContent = initialsOf(authorLabel);
-          };
-          avatar.appendChild(img);
-        } else {
+  const createAvatarElement = (isUser, authorLabel) => {
+    const avatar = document.createElement("span");
+    avatar.className = `avatar ${isUser ? "avatar-user" : "avatar-agent"}`;
+    avatar.title = authorLabel;
+    if (isUser) {
+      if (currentUser?.picture) {
+        const img = document.createElement("img");
+        img.src = currentUser.picture;
+        img.alt = authorLabel;
+        img.referrerPolicy = "no-referrer";
+        img.onerror = () => {
           avatar.textContent = initialsOf(authorLabel);
-        }
+        };
+        avatar.appendChild(img);
       } else {
-        avatar.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">
-          <rect x="4" y="8" width="16" height="12" rx="4"></rect>
-          <path d="M12 3v5M9.5 3h5M2 13v2M22 13v2M9.5 17h5"></path>
-          <circle cx="9.5" cy="13" r="1.35" fill="currentColor" stroke="none"></circle>
-          <circle cx="14.5" cy="13" r="1.35" fill="currentColor" stroke="none"></circle>
-        </svg>`;
+        avatar.textContent = initialsOf(authorLabel);
       }
+    } else {
+      avatar.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="4" y="8" width="16" height="12" rx="4"></rect>
+        <path d="M12 3v5M9.5 3h5M2 13v2M22 13v2M9.5 17h5"></path>
+        <circle cx="9.5" cy="13" r="1.35" fill="currentColor" stroke="none"></circle>
+        <circle cx="14.5" cy="13" r="1.35" fill="currentColor" stroke="none"></circle>
+      </svg>`;
+    }
+    return avatar;
+  };
 
-      const article = document.createElement("article");
-      article.className = `message ${isUser ? "message-user" : "message-agent"}`;
-
-      if (ev.partial) {
-        const st = document.createElement("div");
+  const updateMessageArticle = (article, { isUser, partial, textContent, visibleTools, surfaceRefs }) => {
+    // 1. Streaming indicator
+    let st = article.querySelector(":scope > .streaming-tag");
+    if (partial) {
+      if (!st) {
+        st = document.createElement("div");
         st.className = "streaming-tag";
         st.textContent = "streaming…";
-        article.appendChild(st);
+        article.prepend(st);
       }
+    } else if (st) {
+      st.remove();
+    }
 
-      if (textContent) {
-        if (isUser) {
-          const div = document.createElement("div");
-          div.className = "message-text";
-          div.textContent = textContent;
-          article.appendChild(div);
+    // 2. Message text container (updated in place only when text changed)
+    let textEl = article.querySelector(":scope > .message-text");
+    if (textContent) {
+      if (!textEl) {
+        textEl = document.createElement("div");
+        textEl.className = "message-text";
+        if (st && st.nextSibling) {
+          article.insertBefore(textEl, st.nextSibling);
+        } else if (st) {
+          article.appendChild(textEl);
         } else {
-          article.appendChild(renderMarkdownBlock(textContent));
+          article.prepend(textEl);
         }
       }
+      if (textEl.dataset.renderedText !== textContent) {
+        textEl.dataset.renderedText = textContent;
+        if (isUser) {
+          textEl.textContent = textContent;
+        } else {
+          textEl.replaceChildren();
+          parseMarkdownBlocksInto(textEl, textContent);
+        }
+      }
+    } else if (textEl) {
+      textEl.remove();
+    }
 
+    // 3. Tool calls container (updated only when tool calls changed)
+    const toolsSig = visibleTools.length ? JSON.stringify(visibleTools) : "";
+    if (article.dataset.toolsSig !== toolsSig) {
+      article.dataset.toolsSig = toolsSig;
+      article.querySelectorAll(":scope > details.tool-call").forEach((el) => el.remove());
+      const firstChip = article.querySelector(":scope > .canvas-jump-chip");
       for (const tp of visibleTools) {
         const details = document.createElement("details");
         details.className = "tool-call";
@@ -2502,9 +2559,19 @@
         const pre = document.createElement("pre");
         pre.textContent = JSON.stringify(tp, null, 2);
         details.append(summary, pre);
-        article.appendChild(details);
+        if (firstChip) {
+          article.insertBefore(details, firstChip);
+        } else {
+          article.appendChild(details);
+        }
       }
+    }
 
+    // 4. Canvas jump chips (updated only when surface refs changed)
+    const surfacesSig = surfaceRefs.map((s) => s.id).join("|");
+    if (article.dataset.surfacesSig !== surfacesSig) {
+      article.dataset.surfacesSig = surfacesSig;
+      article.querySelectorAll(":scope > .canvas-jump-chip").forEach((el) => el.remove());
       for (const surf of surfaceRefs) {
         const chip = document.createElement("button");
         chip.type = "button";
@@ -2520,10 +2587,119 @@
         chip.addEventListener("click", () => focusSurfaceOnCanvas(surf.id));
         article.appendChild(chip);
       }
+    }
+  };
 
-      row.append(avatar, article);
-      chatTranscript.appendChild(row);
+  const renderTranscript = () => {
+    const visibleItems = [];
+
+    currentEvents.forEach((ev, idx) => {
+      const parts = ev?.content?.parts || [];
+      const isUser =
+        (ev?.content?.role || (ev?.author === "user" ? "user" : "model")) === "user" ||
+        ev?.author === "user";
+
+      const textContent = parts
+        .map((p) => (typeof p.text === "string" ? p.text : ""))
+        .filter(Boolean)
+        .join("");
+
+      const toolParts = [];
+      const surfaceRefs = [];
+      let uiIndex = 0;
+
+      parts.forEach((part) => {
+        const callName =
+          part?.name || part?.functionCall?.name || part?.function_call?.name || "";
+        if (callName && String(callName).startsWith("render_")) {
+          return; // Skip raw `render_*` functionCall in chat
+        }
+        const uiResp = extractUiResponse(part);
+        if (uiResp) {
+          const surfaceId = `surface-${ev.id || idx}-${uiIndex++}`;
+          const found = canvasSurfaces.find((s) => s.id === surfaceId);
+          if (found) surfaceRefs.push(found);
+          return;
+        }
+        if ("name" in part || "functionResponse" in part || "function_response" in part) {
+          toolParts.push(part);
+        }
+      });
+
+      const visibleTools = prefs.showTools ? toolParts : [];
+      if (!textContent && visibleTools.length === 0 && surfaceRefs.length === 0) {
+        return;
+      }
+
+      const authorLabel = isUser
+        ? currentUser?.name || currentUser?.email || "You"
+        : ev.author === APP_NAME
+          ? "AdSpace Agent"
+          : ev.author || "Agent";
+
+      visibleItems.push({
+        isUser,
+        authorLabel,
+        partial: !!ev.partial,
+        textContent,
+        visibleTools,
+        surfaceRefs,
+      });
     });
+
+    if (!visibleItems.length) {
+      chatTranscript.replaceChildren();
+      const empty = document.createElement("div");
+      empty.className = "transcript-empty-placeholder";
+      style(empty, {
+        margin: "auto",
+        textAlign: "center",
+        color: "var(--text-muted)",
+        padding: "32px 18px",
+        fontSize: "12.5px",
+      });
+      empty.textContent =
+        "Ask a question on the left or pick a starter card on the right to begin.";
+      chatTranscript.appendChild(empty);
+      return;
+    }
+
+    chatTranscript
+      .querySelectorAll(":scope > .transcript-empty-placeholder")
+      .forEach((el) => el.remove());
+
+    const existingRows = Array.from(chatTranscript.querySelectorAll(":scope > .message-row"));
+
+    visibleItems.forEach((item, idx) => {
+      const roleKey = item.isUser ? "user" : "agent";
+      let row = existingRows[idx];
+
+      if (!row || row.dataset.roleKey !== roleKey || row.dataset.authorLabel !== item.authorLabel) {
+        const newRow = document.createElement("div");
+        newRow.className = `message-row ${item.isUser ? "message-row-user" : "message-row-agent"}`;
+        newRow.dataset.roleKey = roleKey;
+        newRow.dataset.authorLabel = item.authorLabel;
+
+        const avatar = createAvatarElement(item.isUser, item.authorLabel);
+        const article = document.createElement("article");
+        article.className = `message ${item.isUser ? "message-user" : "message-agent"}`;
+        newRow.append(avatar, article);
+
+        if (row) {
+          chatTranscript.replaceChild(newRow, row);
+        } else {
+          chatTranscript.appendChild(newRow);
+        }
+        row = newRow;
+      }
+
+      const article = row.querySelector(":scope > article.message");
+      updateMessageArticle(article, item);
+    });
+
+    while (chatTranscript.children.length > visibleItems.length) {
+      chatTranscript.lastElementChild.remove();
+    }
 
     if (prefs.autoScroll) {
       chatTranscript.scrollTop = chatTranscript.scrollHeight;
@@ -2774,9 +2950,14 @@
             if (ev && typeof ev === "object") {
               const existingIdx = currentEvents.findIndex((e) => e.id && e.id === ev.id);
               if (existingIdx !== -1) {
-                currentEvents[existingIdx] = ev;
+                currentEvents[existingIdx] = mergeStreamedEvent(currentEvents[existingIdx], ev);
               } else {
-                currentEvents.push(ev);
+                currentEvents.push({
+                  ...ev,
+                  content: ev.content
+                    ? { ...ev.content, parts: coalesceParts(ev.content.parts) }
+                    : ev.content,
+                });
               }
               rebuildFromSessionEvents(currentEvents);
             }

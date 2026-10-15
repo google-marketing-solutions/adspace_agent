@@ -864,59 +864,76 @@ select:focus-visible {
 }
 
 .usage-pill.usage-pill-bump {
-  animation: usagePillPulse 0.64s cubic-bezier(0.22, 1, 0.36, 1);
+  animation: usagePillPulse 0.55s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 @keyframes usagePillPulse {
   0% {
-    transform: translateY(0) scale(1);
     border-color: var(--border-default);
     box-shadow: 0 0 0 0 transparent;
   }
-  28% {
-    transform: translateY(-1.5px) scale(1.035);
+  35% {
     border-color: var(--accent-primary);
     background: var(--accent-wash);
-    box-shadow: 0 3px 10px -2px var(--ring), 0 0 0 3px var(--ring);
-  }
-  58% {
-    transform: translateY(0.6px) scale(0.99);
-  }
-  80% {
-    transform: translateY(-0.4px) scale(1.008);
+    box-shadow: 0 0 0 3px var(--ring);
   }
   100% {
-    transform: translateY(0) scale(1);
     border-color: var(--border-default);
     box-shadow: 0 0 0 0 transparent;
   }
 }
 
-@keyframes counterTick {
-  0% {
-    transform: translateY(0) scale(1);
-  }
-  28% {
-    transform: translateY(-3px) scale(1.085);
-    color: var(--accent-primary);
-  }
-  56% {
-    transform: translateY(1.2px) scale(0.97);
-  }
-  78% {
-    transform: translateY(-0.8px) scale(1.02);
-  }
-  100% {
-    transform: translateY(0) scale(1);
-  }
+/* Slot-Machine / Odometer Rolling Digit Reels */
+.odometer {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: bottom;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2em;
+  white-space: pre;
 }
 
-.counter-tick {
+.odometer-static {
   display: inline-block;
-  font-variant-numeric: tabular-nums;
-  transform-origin: center center;
+  line-height: 1.2em;
+}
+
+.odometer-digit {
+  display: inline-block;
+  height: 1.2em;
+  line-height: 1.2em;
+  overflow: hidden;
+  vertical-align: bottom;
+  position: relative;
+  text-align: center;
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    #000 10%,
+    #000 90%,
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    #000 10%,
+    #000 90%,
+    transparent 100%
+  );
+}
+
+.odometer-ribbon {
+  display: flex;
+  flex-direction: column;
   will-change: transform;
-  animation: counterTick 0.62s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.odometer-cell {
+  display: block;
+  height: 1.2em;
+  line-height: 1.2em;
+  text-align: center;
+  user-select: none;
 }
 
 .usage-pill:hover {

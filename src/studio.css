@@ -916,8 +916,61 @@ select:focus-visible {
   padding-left: 21px;
 }
 
+.message-text ul ul,
+.message-text ul ol,
+.message-text ol ul,
+.message-text ol ol {
+  margin: 4px 0 4px;
+}
+
 .message-text li {
-  margin: 3px 0;
+  margin: 4px 0;
+}
+
+.message-text hr {
+  border: 0;
+  border-top: 1px solid var(--border-default);
+  margin: 12px 0;
+}
+
+.message-text blockquote {
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--accent-primary);
+  background: color-mix(in srgb, var(--accent-wash) 45%, var(--bg-primary));
+  border-radius: 0 6px 6px 0;
+  color: var(--text-secondary);
+}
+
+.message-text table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 9px 0;
+  font-size: 12px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.message-text th,
+.message-text td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-default);
+  text-align: left;
+  vertical-align: top;
+}
+
+.message-text th {
+  background: var(--bg-primary);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.message-text tr:last-child td {
+  border-bottom: 0;
 }
 
 .message-text code {

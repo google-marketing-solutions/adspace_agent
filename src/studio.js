@@ -299,41 +299,49 @@
     }
   };
 
-  const checkAuthStatus = async () => {
-    try {
-      const resp = await fetch("/auth/me");
-      const data = await resp.json();
-      if (!data.authenticated || !data.user) {
-        currentUser = null;
-        authGate.classList.remove("hidden");
-        workspace.classList.add("hidden");
-        sessionControls.classList.add("hidden");
-        userMenuAnchor.classList.add("hidden");
-        authGateHint.textContent = data.oauth_configured
-          ? "Uses your configured Google OAuth 2.0 Web Client."
-          : "Configure CLIENT_ID and CLIENT_SECRET in .env to enable Google Sign-In.";
-        return;
+  let authCheckPromise = null;
+
+  const checkAuthStatus = () => {
+    if (authCheckPromise) return authCheckPromise;
+    authCheckPromise = (async () => {
+      try {
+        const resp = await fetch("/auth/me");
+        const data = await resp.json();
+        if (!data.authenticated || !data.user) {
+          currentUser = null;
+          authGate.classList.remove("hidden");
+          workspace.classList.add("hidden");
+          sessionControls.classList.add("hidden");
+          userMenuAnchor.classList.add("hidden");
+          authGateHint.textContent = data.oauth_configured
+            ? "Uses your configured Google OAuth 2.0 Web Client."
+            : "Configure CLIENT_ID and CLIENT_SECRET in .env to enable Google Sign-In.";
+          return;
+        }
+
+        currentUser = data.user;
+        authGate.classList.add("hidden");
+        workspace.classList.remove("hidden");
+        sessionControls.classList.remove("hidden");
+        userMenuAnchor.classList.remove("hidden");
+
+        $("user-name").textContent = currentUser.name || currentUser.email;
+        $("menu-user-name").textContent = currentUser.name || "Google User";
+        $("menu-user-email").textContent = currentUser.email;
+        $("menu-user-id").textContent = currentUser.id;
+        composerUserHint.textContent = currentUser.email;
+
+        setAvatarImage($("user-avatar-img"), $("user-avatar-fallback"), currentUser);
+        setAvatarImage($("menu-avatar-img"), $("menu-avatar-fallback"), currentUser);
+
+        await loadUserSessions();
+      } catch (err) {
+        showError(`Could not verify authentication status: ${err.message || err}`);
+      } finally {
+        authCheckPromise = null;
       }
-
-      currentUser = data.user;
-      authGate.classList.add("hidden");
-      workspace.classList.remove("hidden");
-      sessionControls.classList.remove("hidden");
-      userMenuAnchor.classList.remove("hidden");
-
-      $("user-name").textContent = currentUser.name || currentUser.email;
-      $("menu-user-name").textContent = currentUser.name || "Google User";
-      $("menu-user-email").textContent = currentUser.email;
-      $("menu-user-id").textContent = currentUser.id;
-      composerUserHint.textContent = currentUser.email;
-
-      setAvatarImage($("user-avatar-img"), $("user-avatar-fallback"), currentUser);
-      setAvatarImage($("menu-avatar-img"), $("menu-avatar-fallback"), currentUser);
-
-      await loadUserSessions();
-    } catch (err) {
-      showError(`Could not verify authentication status: ${err.message || err}`);
-    }
+    })();
+    return authCheckPromise;
   };
 
   googleLoginBtn.addEventListener("click", () => {
@@ -397,25 +405,41 @@
     });
   };
 
-  const createNewSession = async () => {
-    if (!currentUser) return;
-    try {
-      const resp = await fetch(
-        apiUrl(`/apps/${encodeURIComponent(APP_NAME)}/users/${encodeURIComponent(currentUser.id)}/sessions`),
-        {
+  let createSessionPromise = null;
+
+  const createNewSession = () => {
+    if (!currentUser) return Promise.resolve();
+    if (createSessionPromise) return createSessionPromise;
+    createSessionPromise = (async () => {
+      const url = apiUrl(
+        `/apps/${encodeURIComponent(APP_NAME)}/users/${encodeURIComponent(currentUser.id)}/sessions`
+      );
+      try {
+        let resp = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: "{}",
+        });
+        if (!resp.ok && resp.status >= 500) {
+          await new Promise((r) => setTimeout(r, 80));
+          resp = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
         }
-      );
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const created = await resp.json();
-      sessions = [created, ...sessions.filter((s) => s.id !== created.id)];
-      renderSessionOptions(created.id);
-      await loadSession(created.id);
-    } catch (err) {
-      showError(`Could not create session: ${err.message || err}`);
-    }
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const created = await resp.json();
+        sessions = [created, ...sessions.filter((s) => s.id !== created.id)];
+        renderSessionOptions(created.id);
+        await loadSession(created.id);
+      } catch (err) {
+        showError(`Could not create session: ${err.message || err}`);
+      } finally {
+        createSessionPromise = null;
+      }
+    })();
+    return createSessionPromise;
   };
 
   const loadSession = async (sessionId) => {

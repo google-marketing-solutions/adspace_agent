@@ -6,13 +6,21 @@
 //! `MEMORY_SERVICE_URI`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use adk_rust::AdkError;
 use adk_rust::artifact::{
     ArtifactService, FileArtifactService, GcsArtifactService, InMemoryArtifactService,
 };
+use adk_rust::identity::AdkIdentity;
 use adk_rust::memory::{InMemoryMemoryService, MemoryService};
-use adk_rust::session::{InMemorySessionService, SessionService, SqliteSessionService};
+use adk_rust::session::{
+    AppendEventRequest, CreateRequest, DeleteRequest, Event, GetRequest, InMemorySessionService,
+    ListRequest, Session, SessionService, SqliteSessionService,
+};
 use anyhow::Context;
+use async_trait::async_trait;
+use tokio::sync::RwLock;
 
 use crate::config::env_opt;
 
@@ -67,11 +75,204 @@ pub async fn build_session_service() -> anyhow::Result<Arc<dyn SessionService>> 
             .migrate()
             .await
             .with_context(|| format!("migrating session database {normalized}"))?;
-        return Ok(Arc::new(service));
+        return Ok(Arc::new(SerializedSqliteSessionService::new(service)));
     }
     anyhow::bail!(
         "Unsupported SESSION_SERVICE_URI '{uri}'. Use memory:// or sqlite:///path/to/sessions.db"
     )
+}
+
+/// Wraps [`SqliteSessionService`] with an async reader-writer lock and retry
+/// backoff so concurrent requests never hit SQLite `BEGIN DEFERRED`
+/// read-before-write lock-upgrade deadlocks (`(code: 5) database is locked`).
+pub struct SerializedSqliteSessionService {
+    inner: SqliteSessionService,
+    lock: RwLock<()>,
+}
+
+impl SerializedSqliteSessionService {
+    /// Wraps an initialized [`SqliteSessionService`].
+    pub fn new(inner: SqliteSessionService) -> Self {
+        Self {
+            inner,
+            lock: RwLock::new(()),
+        }
+    }
+}
+
+fn is_sqlite_locked(err: &AdkError) -> bool {
+    let msg = err.to_string();
+    msg.contains("database is locked") || msg.contains("SQLITE_BUSY")
+}
+
+#[async_trait]
+impl SessionService for SerializedSqliteSessionService {
+    async fn create(&self, req: CreateRequest) -> adk_rust::Result<Box<dyn Session>> {
+        let _guard = self.lock.write().await;
+        for attempt in 1..=5 {
+            match self.inner.create(req.clone()).await {
+                Ok(session) => return Ok(session),
+                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
+                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
+    async fn get(&self, req: GetRequest) -> adk_rust::Result<Box<dyn Session>> {
+        let _guard = self.lock.read().await;
+        for attempt in 1..=5 {
+            match self.inner.get(req.clone()).await {
+                Ok(session) => return Ok(session),
+                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
+                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
+    async fn list(&self, req: ListRequest) -> adk_rust::Result<Vec<Box<dyn Session>>> {
+        let _guard = self.lock.read().await;
+        for attempt in 1..=5 {
+            match self.inner.list(req.clone()).await {
+                Ok(sessions) => return Ok(sessions),
+                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
+                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
+    async fn delete(&self, req: DeleteRequest) -> adk_rust::Result<()> {
+        let _guard = self.lock.write().await;
+        for attempt in 1..=5 {
+            match self.inner.delete(req.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
+                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
+    async fn append_event(&self, session_id: &str, event: Event) -> adk_rust::Result<()> {
+        let _guard = self.lock.write().await;
+        for attempt in 1..=5 {
+            match self.inner.append_event(session_id, event.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
+                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
+    async fn get_for_identity(&self, identity: &AdkIdentity) -> adk_rust::Result<Box<dyn Session>> {
+        let _guard = self.lock.read().await;
+        for attempt in 1..=5 {
+            match self.inner.get_for_identity(identity).await {
+                Ok(session) => return Ok(session),
+                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
+                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
+    async fn delete_for_identity(&self, identity: &AdkIdentity) -> adk_rust::Result<()> {
+        let _guard = self.lock.write().await;
+        for attempt in 1..=5 {
+            match self.inner.delete_for_identity(identity).await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
+                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
+    async fn append_event_for_identity(&self, req: AppendEventRequest) -> adk_rust::Result<()> {
+        let _guard = self.lock.write().await;
+        for attempt in 1..=5 {
+            match self.inner.append_event_for_identity(req.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
+                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
+    async fn delete_all_sessions(&self, app_name: &str, user_id: &str) -> adk_rust::Result<()> {
+        let _guard = self.lock.write().await;
+        for attempt in 1..=5 {
+            match self.inner.delete_all_sessions(app_name, user_id).await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
+                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
+    async fn rewind(
+        &self,
+        session_id: &str,
+        target_event_id: &str,
+    ) -> adk_rust::Result<Box<dyn Session>> {
+        let _guard = self.lock.write().await;
+        for attempt in 1..=5 {
+            match self.inner.rewind(session_id, target_event_id).await {
+                Ok(session) => return Ok(session),
+                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
+                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
+    async fn rewind_steps(
+        &self,
+        session_id: &str,
+        steps: usize,
+    ) -> adk_rust::Result<Box<dyn Session>> {
+        let _guard = self.lock.write().await;
+        for attempt in 1..=5 {
+            match self.inner.rewind_steps(session_id, steps).await {
+                Ok(session) => return Ok(session),
+                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
+                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
+    async fn health_check(&self) -> adk_rust::Result<()> {
+        let _guard = self.lock.read().await;
+        self.inner.health_check().await
+    }
 }
 
 /// Builds the artifact service from `ARTIFACT_SERVICE_URI`.
@@ -172,5 +373,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn serialized_sqlite_handles_concurrent_session_creates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.db");
+        let url = normalize_sqlite_uri(&format!("sqlite:///{}", db.display()));
+        let inner = SqliteSessionService::new(&url).await.unwrap();
+        inner.migrate().await.unwrap();
+        let service = Arc::new(SerializedSqliteSessionService::new(inner));
+
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let svc = service.clone();
+            handles.push(tokio::spawn(async move {
+                svc.create(CreateRequest {
+                    app_name: "adspace_agent".into(),
+                    user_id: "coconate@google.com".into(),
+                    session_id: None,
+                    state: Default::default(),
+                })
+                .await
+            }));
+        }
+        for h in handles {
+            h.await
+                .unwrap()
+                .expect("concurrent session create must succeed");
+        }
+
+        let listed = service
+            .list(ListRequest {
+                app_name: "adspace_agent".into(),
+                user_id: "coconate@google.com".into(),
+                limit: None,
+                offset: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 16);
     }
 }

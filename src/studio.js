@@ -1891,11 +1891,26 @@
         } else if (type === "select" || type === "multi_select") {
           control = document.createElement("select");
           if (type === "multi_select") control.multiple = true;
+          const hasDefault =
+            comp.default_value !== undefined &&
+            comp.default_value !== null &&
+            String(comp.default_value) !== "";
+          if (type === "select" && (comp.placeholder || (comp.required && !hasDefault))) {
+            const ph = document.createElement("option");
+            ph.value = "";
+            ph.textContent = comp.placeholder || "Select an option…";
+            ph.disabled = true;
+            ph.selected = !hasDefault;
+            control.appendChild(ph);
+          }
           for (const opt of comp.options || []) {
             const o = document.createElement("option");
             o.value = opt.value;
             o.textContent = opt.label;
             control.appendChild(o);
+          }
+          if (hasDefault) {
+            control.value = String(comp.default_value);
           }
         } else if (type === "switch") {
           const row = document.createElement("div");
@@ -1919,10 +1934,17 @@
           if (comp.min !== undefined && comp.min !== null) control.min = String(comp.min);
           if (comp.max !== undefined && comp.max !== null) control.max = String(comp.max);
           if (comp.step !== undefined && comp.step !== null) control.step = String(comp.step);
+          if (comp.pattern) control.pattern = String(comp.pattern);
           if (comp.default_value !== undefined && comp.default_value !== null) {
             control.value = String(comp.default_value);
           }
         }
+
+        if (comp.required) {
+          control.required = true;
+          control.setAttribute("aria-required", "true");
+        }
+        control.setAttribute("data-ui-label", comp.label || comp.name || "Field");
 
         if (type !== "switch") {
           style(control, {
@@ -1935,6 +1957,26 @@
           });
           field.appendChild(control);
         }
+
+        const errEl = document.createElement("span");
+        errEl.className = "ui-field-error hidden";
+        style(errEl, {
+          fontSize: "11px",
+          fontWeight: "500",
+          color: "var(--accent-error)",
+        });
+        field.appendChild(errEl);
+
+        const clearFieldError = () => {
+          if (type !== "switch") {
+            control.style.borderColor = "var(--border-default)";
+          }
+          control.removeAttribute("aria-invalid");
+          errEl.textContent = "";
+          errEl.classList.add("hidden");
+        };
+        control.addEventListener("input", clearFieldError);
+        control.addEventListener("change", clearFieldError);
 
         control.setAttribute("data-ui-field", comp.name || comp.label || "field");
         return field;
@@ -1978,6 +2020,56 @@
           const scope = btn.closest('[data-ui-scope="true"]') || surfaceRoot;
           const inputs = scope ? Array.from(scope.querySelectorAll("[data-ui-field]")) : [];
           const actionId = comp.action_id || comp.label || "click";
+          const isCancelAction =
+            v === "secondary" ||
+            v === "ghost" ||
+            /^(cancel|dismiss|close|skip|reset)\b/i.test(actionId) ||
+            /^(cancel|dismiss|close|skip|reset)\b/i.test(comp.label || "");
+
+          if (inputs.length > 0 && !isCancelAction) {
+            let firstInvalid = null;
+            for (const inp of inputs) {
+              const fieldLabel = inp.getAttribute("data-ui-label") || inp.getAttribute("data-ui-field") || "Field";
+              const errEl = inp.closest("label")?.querySelector(".ui-field-error");
+              let errMsg = "";
+
+              if (inp.required) {
+                const isEmpty =
+                  inp.type === "checkbox"
+                    ? !inp.checked
+                    : inp.multiple
+                      ? inp.selectedOptions.length === 0
+                      : String(inp.value ?? "").trim() === "";
+                if (isEmpty) {
+                  errMsg = `${fieldLabel} is required.`;
+                }
+              }
+              if (!errMsg && typeof inp.checkValidity === "function" && !inp.checkValidity()) {
+                errMsg = inp.validationMessage || `${fieldLabel} is invalid.`;
+              }
+
+              if (errMsg) {
+                if (inp.type !== "checkbox") {
+                  inp.style.borderColor = "var(--accent-error)";
+                }
+                inp.setAttribute("aria-invalid", "true");
+                if (errEl) {
+                  errEl.textContent = errMsg;
+                  errEl.classList.remove("hidden");
+                }
+                if (!firstInvalid) firstInvalid = inp;
+              }
+            }
+
+            if (firstInvalid) {
+              firstInvalid.focus();
+              if (typeof firstInvalid.reportValidity === "function") {
+                firstInvalid.reportValidity();
+              }
+              return;
+            }
+          }
+
           let msg;
           if (inputs.length > 0) {
             const lines = inputs.map((inp) => {

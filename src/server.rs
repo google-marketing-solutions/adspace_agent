@@ -29,7 +29,8 @@ use futures::stream::Stream;
 use crate::agent::{AgentRuntime, TurnRunner};
 use crate::auth::oauth::OAUTH_CALLBACK_PATH;
 use crate::auth::{
-    AuthenticatedUser, LOGIN_SENTINEL_APP, OAuthToken, SessionCredentialManager, SessionRef,
+    AuthenticatedUser, CREDENTIALS_STATE_KEY, LOGIN_SENTINEL_APP, OAuthToken,
+    SessionCredentialManager, SessionRef,
 };
 use crate::config::APP_NAME;
 
@@ -135,12 +136,22 @@ fn callback_script(status: &str) -> String {
     )
 }
 
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 fn html_page(title: &str, body: &str, status: &str) -> Html<String> {
+    let safe_title = escape_html(title);
     Html(format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title>\
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{safe_title}</title>\
          <style>body{{font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem;color:#202124}}\
          h1{{font-size:1.4rem}}code{{background:#f1f3f4;padding:.1rem .3rem;border-radius:4px}}</style></head>\
-         <body><h1>{title}</h1>{body}<script>{}</script></body></html>",
+         <body><h1>{safe_title}</h1>{body}<script>{}</script></body></html>",
         callback_script(status)
     ))
 }
@@ -289,13 +300,113 @@ async fn studio_js() -> Response {
 async fn auth_login(State(routes): State<OAuthRoutes>) -> Response {
     match routes.credentials.begin_user_login() {
         Ok(url) => Redirect::to(&url).into_response(),
-        Err(e) => html_page(
-            "Sign-In Unavailable",
-            &format!("<p>{e}</p><p><a href=\"/app/\">Return to AdSpace Agent</a></p>"),
-            "error",
-        )
-        .into_response(),
+        Err(e) => {
+            let safe_err = escape_html(&e.to_string());
+            html_page(
+                "Sign-In Unavailable",
+                &format!("<p>{safe_err}</p><p><a href=\"/app/\">Return to AdSpace Agent</a></p>"),
+                "error",
+            )
+            .into_response()
+        }
     }
+}
+
+fn percent_decode_segment(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3])
+            && let Ok(val) = u8::from_str_radix(hex, 16)
+        {
+            out.push(val);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn extract_api_path_user_id(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/api/apps/")?;
+    let mut segments = rest.split('/');
+    let _app = segments.next()?;
+    let users_lit = segments.next()?;
+    if users_lit != "users" {
+        return None;
+    }
+    let raw_user = segments.next()?;
+    if raw_user.is_empty() {
+        return None;
+    }
+    Some(percent_decode_segment(raw_user))
+}
+
+fn scrub_credentials_from_json(val: &mut serde_json::Value) {
+    match val {
+        serde_json::Value::Object(map) => {
+            map.remove(CREDENTIALS_STATE_KEY);
+            for v in map.values_mut() {
+                scrub_credentials_from_json(v);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                scrub_credentials_from_json(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Middleware that protects user-scoped `/api/apps/{app}/users/{user_id}` routes
+/// with the signed `adspace_user` cookie (for non-default users) and strips raw
+/// OAuth token secrets (`CREDENTIALS_STATE_KEY`) from session JSON responses.
+pub async fn enforce_api_user_cookie(
+    State(credentials): State<Arc<SessionCredentialManager>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let path = req.uri().path().to_string();
+    if let Some(target_user_id) = extract_api_path_user_id(&path)
+        && target_user_id != DEFAULT_USER_ID
+    {
+        let cookie_user = extract_cookie_user(req.headers(), &credentials);
+        if !matches!(cookie_user, Some(u) if u.id == target_user_id) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+    }
+
+    let is_session_api = path.starts_with("/api/apps/") && path.contains("/sessions");
+    let response = next.run(req).await;
+    if !is_session_api || !response.status().is_success() {
+        return response;
+    }
+    let is_json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    if !is_json {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = to_bytes(body, 16 * 1024 * 1024).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    if let Ok(mut json_val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+        scrub_credentials_from_json(&mut json_val);
+        if let Ok(cleaned) = serde_json::to_vec(&json_val) {
+            parts.headers.remove(header::CONTENT_LENGTH);
+            return Response::from_parts(parts, Body::from(cleaned));
+        }
+    }
+    Response::from_parts(parts, Body::from(bytes))
 }
 
 fn extract_cookie_user(
@@ -354,10 +465,11 @@ pub async fn oauth_callback(
         if let Some(state) = query.state.as_deref() {
             routes.credentials.fail_authorization(state, &error);
         }
+        let safe_error = escape_html(&error);
         return html_page(
             "Authorization failed",
             &format!(
-                "<p>Google reported: <code>{error}</code>. Return to the chat and try again.</p>"
+                "<p>Google reported: <code>{safe_error}</code>. Return to the chat and try again.</p>"
             ),
             "error",
         )
@@ -378,10 +490,11 @@ pub async fn oauth_callback(
     {
         Ok(result) => result,
         Err(e) => {
+            let safe_err = escape_html(&e.to_string());
             return html_page(
                 "Authorization failed",
                 &format!(
-                    "<p>{e}</p><p>Return to the chat and ask the agent to start the authorization again.</p>"
+                    "<p>{safe_err}</p><p>Return to the chat and ask the agent to start the authorization again.</p>"
                 ),
                 "error",
             )
@@ -401,11 +514,12 @@ pub async fn oauth_callback(
                 let cookie = format!(
                     "{USER_COOKIE_NAME}={signed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800"
                 );
+                let safe_name = escape_html(&user.name);
+                let safe_email = escape_html(&user.email);
                 let page = html_page(
                     "Signed in to AdSpace Agent",
                     &format!(
-                        "<p>Signed in as <strong>{}</strong> (<code>{}</code>). Returning to AdSpace Agent…</p>",
-                        user.name, user.email
+                        "<p>Signed in as <strong>{safe_name}</strong> (<code>{safe_email}</code>). Returning to AdSpace Agent…</p>",
                     ),
                     "login_ok",
                 );
@@ -420,10 +534,11 @@ pub async fn oauth_callback(
             }
             Err(e) => {
                 tracing::error!("Failed to fetch Google userinfo during login: {e:#}");
+                let safe_err = escape_html(&e.to_string());
                 return html_page(
                     "Sign-in failed",
                     &format!(
-                        "<p>Could not retrieve your Google profile: {e}</p><p><a href=\"/app/\">Try again</a></p>"
+                        "<p>Could not retrieve your Google profile: {safe_err}</p><p><a href=\"/app/\">Try again</a></p>"
                     ),
                     "error",
                 )
@@ -539,7 +654,11 @@ pub async fn serve(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Resu
     let app = launcher(&runtime)
         .build_app()?
         .merge(oauth_router(runtime.oauth_routes(true)))
-        .layer(middleware::from_fn(inject_auth_helper));
+        .layer(middleware::from_fn(inject_auth_helper))
+        .layer(middleware::from_fn_with_state(
+            runtime.credentials.clone(),
+            enforce_api_user_cookie,
+        ));
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     tracing::info!(
         "AdSpace Agent listening on http://{host}:{port}  (studio: http://{host}:{port}/app/  ·  dev UI: http://{host}:{port}/ui/)"
@@ -775,7 +894,77 @@ mod tests {
         assert_eq!(body["authenticated"], true);
         assert_eq!(body["user"]["email"], "nate@example.com");
 
-        // 4. `/oauth2/events` SSE stream closes immediately on `notify_shutdown()`.
+        // 4. `/oauth2/callback` escapes reflected query error strings.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/oauth2/callback?error=%3Cscript%3Ealert(1)%3C/script%3E")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let err_html = String::from_utf8(
+            to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!err_html.contains("<script>alert(1)</script>"));
+        assert!(err_html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+
+        // 5. `enforce_api_user_cookie` blocks unauthenticated non-default user API calls
+        // and scrubs `CREDENTIALS_STATE_KEY` from session responses.
+        let api_app = Router::new()
+            .route(
+                "/api/apps/{app}/users/{user_id}/sessions",
+                get(|| async {
+                    Json(serde_json::json!([{
+                        "id": "s1",
+                        "state": {
+                            CREDENTIALS_STATE_KEY: { "access_token": "secret-token" },
+                            "visible": "ok"
+                        }
+                    }]))
+                }),
+            )
+            .layer(middleware::from_fn_with_state(
+                credentials.clone(),
+                enforce_api_user_cookie,
+            ));
+
+        let unauth = api_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/apps/adspace_agent/users/nate%40example.com/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let authed = api_app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/apps/adspace_agent/users/nate%40example.com/sessions")
+                    .header(header::COOKIE, format!("{USER_COOKIE_NAME}={cookie_val}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authed.status(), StatusCode::OK);
+        let scrubbed: serde_json::Value =
+            serde_json::from_slice(&to_bytes(authed.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert!(scrubbed[0]["state"].get(CREDENTIALS_STATE_KEY).is_none());
+        assert_eq!(scrubbed[0]["state"]["visible"], "ok");
+
+        // 6. `/oauth2/events` SSE stream closes immediately on `notify_shutdown()`.
         let resp = app
             .oneshot(
                 Request::builder()

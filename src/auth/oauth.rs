@@ -639,7 +639,9 @@ impl SessionCredentialManager {
     /// Returns `true` if the server opened (or will open) the URL via the
     /// local system browser fallback instead.
     pub fn ack_popup(&self, state: &str, opened: bool) -> bool {
-        if let Some(tx) = self.acks.lock().unwrap().get(state) {
+        if let Some(tx) = self.acks.lock().unwrap().get(state)
+            && *tx.borrow() != Some(true)
+        {
             let _ = tx.send(Some(opened));
         }
         !opened && self.should_fallback_to_system_browser()
@@ -842,15 +844,12 @@ impl SessionCredentialManager {
         if self.should_fallback_to_system_browser() {
             let url = auth_req.auth_url.clone();
             tokio::spawn(async move {
-                let opened_in_ui = match tokio::time::timeout(
+                let opened_in_ui = tokio::time::timeout(
                     Duration::from_millis(450),
-                    ack_rx.changed(),
+                    ack_rx.wait_for(|&v| v == Some(true)),
                 )
                 .await
-                {
-                    Ok(Ok(())) => *ack_rx.borrow() == Some(true),
-                    _ => false,
-                };
+                .is_ok();
                 if !opened_in_ui {
                     tracing::info!(
                         "Opening Google OAuth consent screen in system browser (popup blocked or no active UI ack)"

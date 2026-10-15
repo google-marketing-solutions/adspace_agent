@@ -138,7 +138,7 @@
   // Settings & Theme Management
   // ---------------------------------------------------------------------------
 
-  const applyPreferences = () => {
+  const applyPreferences = ({ rerender = true } = {}) => {
     if (prefs.theme === "light" || prefs.theme === "dark") {
       document.documentElement.setAttribute("data-theme", prefs.theme);
     } else {
@@ -169,8 +169,10 @@
       ? `Defaults: ${ids.join(" · ")} · Enter to send`
       : "Enter to send · Shift+Enter for new line";
 
-    renderTranscript();
-    renderCanvas();
+    if (rerender) {
+      renderTranscript();
+      renderCanvas();
+    }
   };
 
   const savedWidth = localStorage.getItem(STORAGE_KEYS.leftWidth);
@@ -208,6 +210,8 @@
 
   const handleAuthRequired = async (data) => {
     if (!data || !data.auth_url || !data.state) return;
+    if (!currentUser || !activeSession) return;
+    if (data.session_id && data.session_id !== activeSession.id) return;
     if (handledStates.has(data.state)) return;
     handledStates.add(data.state);
 
@@ -2033,7 +2037,7 @@
   const appendInlineWithCodeTable = (parent, text, codes) => {
     if (!text) return;
     const tokenRegex =
-      /(\u0000CODE(\d+)\u0000|\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+|\/[^\s)]+)\)|\*\*\*([\s\S]+?)\*\*\*|\*\*([\s\S]+?)\*\*|__(?=\S)([\s\S]*?\S)__|~~([\s\S]+?)~~|(?<!\*)\*(?=\S)([\s\S]*?\S)\*(?!\*)|(?<![a-zA-Z0-9_])_(?=\S)([\s\S]*?\S)_(?![a-zA-Z0-9_]))/g;
+      /(\u0000CODE(\d+)\u0000|\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+|\/(?!\/)[^\s)]*)\)|\*\*\*([\s\S]+?)\*\*\*|\*\*([\s\S]+?)\*\*|__(?=\S)([\s\S]*?\S)__|~~([\s\S]+?)~~|(?<!\*)\*(?=\S)([\s\S]*?\S)\*(?!\*)|(?<![a-zA-Z0-9_])_(?=\S)([\s\S]*?\S)_(?![a-zA-Z0-9_]))/g;
 
     let lastIdx = 0;
     let match;
@@ -2322,7 +2326,8 @@
 
   const rebuildFromSessionEvents = (events) => {
     currentEvents = Array.isArray(events) ? events : [];
-    canvasSurfaces = [];
+    const existingById = new Map(canvasSurfaces.map((s) => [s.id, s]));
+    const nextSurfaces = [];
 
     currentEvents.forEach((ev, idx) => {
       const parts = ev?.content?.parts || [];
@@ -2330,25 +2335,23 @@
         const uiResp = extractUiResponse(part);
         if (uiResp) {
           const surfaceId = `surface-${ev.id || idx}-${pIdx}`;
-          const built = buildStandaloneCards(uiResp);
-          canvasSurfaces.push({
-            id: surfaceId,
-            title: built.title,
-            eyebrow: built.eyebrow,
-            raw: uiResp,
-            cards: built.cards,
-          });
+          const prev = existingById.get(surfaceId);
+          if (prev) {
+            nextSurfaces.push(prev);
+          } else {
+            const built = buildStandaloneCards(uiResp);
+            nextSurfaces.push({
+              id: surfaceId,
+              title: built.title,
+              eyebrow: built.eyebrow,
+              raw: uiResp,
+              cards: built.cards,
+            });
+          }
         }
       });
     });
-
-    if (
-      prefs.canvasMode === "focused" &&
-      canvasSurfaces.length > 0 &&
-      (activeSurfaceId === "all" || !canvasSurfaces.some((s) => s.id === activeSurfaceId))
-    ) {
-      activeSurfaceId = canvasSurfaces[canvasSurfaces.length - 1].id;
-    }
+    canvasSurfaces = nextSurfaces;
 
     renderTranscript();
     renderCanvas();
@@ -2356,6 +2359,8 @@
 
   const focusSurfaceOnCanvas = (surfaceId) => {
     activeSurfaceId = surfaceId;
+    prefs.canvasMode = "focused";
+    applyPreferences({ rerender: false });
     renderCanvas();
     const target = document.querySelector(`[data-surface-id="${surfaceId}"]`);
     if (target) {
@@ -2496,7 +2501,14 @@
         const chip = document.createElement("button");
         chip.type = "button";
         chip.className = "canvas-jump-chip";
-        chip.innerHTML = `<span>✦ ${surf.eyebrow}: <strong>${surf.title}</strong></span><span>View on Canvas →</span>`;
+        const left = document.createElement("span");
+        left.textContent = `✦ ${surf.eyebrow}: `;
+        const strong = document.createElement("strong");
+        strong.textContent = surf.title;
+        left.appendChild(strong);
+        const right = document.createElement("span");
+        right.textContent = "View on Canvas →";
+        chip.append(left, right);
         chip.addEventListener("click", () => focusSurfaceOnCanvas(surf.id));
         article.appendChild(chip);
       }
@@ -2521,24 +2533,34 @@
       return;
     }
 
+    if (prefs.canvasMode === "stacked") {
+      activeSurfaceId = "all";
+    } else if (
+      activeSurfaceId === "all" ||
+      !canvasSurfaces.some((s) => s.id === activeSurfaceId)
+    ) {
+      activeSurfaceId = canvasSurfaces[canvasSurfaces.length - 1].id;
+    }
+
     canvasEmpty.classList.add("hidden");
     canvasTabs.classList.remove("hidden");
 
     const allBtn = document.createElement("button");
     allBtn.type = "button";
-    allBtn.className = `canvas-tab ${activeSurfaceId === "all" && prefs.canvasMode === "stacked" ? "active" : ""}`;
+    allBtn.className = `canvas-tab ${prefs.canvasMode === "stacked" ? "active" : ""}`;
     allBtn.textContent = `All Cards (${canvasSurfaces.length})`;
     allBtn.addEventListener("click", () => {
       activeSurfaceId = "all";
       prefs.canvasMode = "stacked";
-      applyPreferences();
+      applyPreferences({ rerender: false });
+      renderCanvas();
     });
     canvasTabs.appendChild(allBtn);
 
     canvasSurfaces.forEach((surf) => {
       const tab = document.createElement("button");
       tab.type = "button";
-      tab.className = `canvas-tab ${activeSurfaceId === surf.id ? "active" : ""}`;
+      tab.className = `canvas-tab ${prefs.canvasMode === "focused" && activeSurfaceId === surf.id ? "active" : ""}`;
       tab.textContent = `${surf.eyebrow}: ${surf.title}`;
       tab.addEventListener("click", () => {
         focusSurfaceOnCanvas(surf.id);
@@ -2555,9 +2577,7 @@
       const group = document.createElement("div");
       group.setAttribute("data-surface-id", surf.id);
       style(group, { display: "flex", flexDirection: "column", gap: "14px" });
-      // Rebuild cards fresh so interactive listeners & filters stay live
-      const fresh = buildStandaloneCards(surf.raw);
-      for (const card of fresh.cards) {
+      for (const card of surf.cards) {
         group.appendChild(card);
       }
       canvasSurfacesEl.appendChild(group);
@@ -2603,7 +2623,11 @@
     attachments.forEach((file, idx) => {
       const chip = document.createElement("button");
       chip.type = "button";
-      chip.innerHTML = `<span>${file.name}</span> <b>&times;</b>`;
+      const nameSpan = document.createElement("span");
+      nameSpan.textContent = file.name;
+      const closeB = document.createElement("b");
+      closeB.textContent = "×";
+      chip.append(nameSpan, " ", closeB);
       chip.addEventListener("click", () => {
         attachments.splice(idx, 1);
         renderAttachments();
@@ -2619,27 +2643,35 @@
     renderAttachments();
   });
 
+  const extractSseChunkData = (chunk) => {
+    const dataLines = chunk
+      .split("\n")
+      .filter((l) => l.startsWith("data:"))
+      .map((l) => l.slice(5).trimStart());
+    return dataLines.length ? dataLines.join("\n") : null;
+  };
+
   const parseSseStream = async function* (body) {
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     while (true) {
       const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      if (done) {
+        buffer += decoder.decode();
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
       let boundary;
       while ((boundary = buffer.indexOf("\n\n")) !== -1) {
         const chunk = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary + 2);
-        const dataLines = chunk
-          .split("\n")
-          .filter((l) => l.startsWith("data:"))
-          .map((l) => l.slice(5).trimStart());
-        if (dataLines.length) {
-          yield dataLines.join("\n");
-        }
+        const data = extractSseChunkData(chunk);
+        if (data) yield data;
       }
     }
+    const trailing = extractSseChunkData(buffer.replace(/\r\n/g, "\n"));
+    if (trailing) yield trailing;
   };
 
   const sendMessage = async (overrideText) => {
@@ -2819,12 +2851,12 @@
 
   $("setting-customer-id").addEventListener("input", (e) => {
     prefs.customerId = e.target.value.replace(/\D/g, "");
-    applyPreferences();
+    applyPreferences({ rerender: false });
   });
 
   $("setting-login-customer-id").addEventListener("input", (e) => {
     prefs.loginCustomerId = e.target.value.replace(/\D/g, "");
-    applyPreferences();
+    applyPreferences({ rerender: false });
   });
 
   // Split-Pane Resizer

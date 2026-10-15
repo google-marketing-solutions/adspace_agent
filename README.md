@@ -84,23 +84,18 @@ called on behalf of the signed-in user, and the credentials belong to the
 **chat session** — not to the server:
 
 1. Open the web UI; a session is created.
-2. The first time a tool needs Google access it returns
-   `status: "AUTH_REQUIRED"` with an authorization link that is bound to that
-   session (the OAuth `state` parameter is a signed claim naming the session).
-   In `/ui/`, the browser helper (`/oauth2/helper.js`) detects the consent URL
-   and opens a centered Google authorization popup automatically (or presents a
-   floating **Authorize Google access** card in the bottom-right corner if the
-   browser blocked the popup).
-3. The user grants access; Google redirects to
+2. The first time a tool needs Google access, `SessionCredentialManager::access_token`
+   broadcasts an `auth_required` event over `/oauth2/events` (SSE) and waits
+   in-flight while the browser helper (`/oauth2/helper.js`) automatically opens
+   a centered Google consent popup (with a local OS browser fallback if the
+   browser blocked `window.open`).
+3. The user grants access in the popup; Google redirects to
    `${PUBLIC_BASE_URL}/oauth2/callback`, which exchanges the code, writes the
-   tokens into the session's state (`CREDENTIALS_CACHE_KEY`, the same key the
-   Python agent used), notifies the `/ui/` tab over `BroadcastChannel` so it
-   dismisses the card and refreshes immediately, and closes the popup window.
-4. The server simultaneously resumes that chat on its own (a user-role turn
-   "Google access has been granted … continue"), so there is no "done" step:
-   the web UI shows the agent carrying on, and the tool reads the token from
-   the session state (refreshing it when expired). In console mode the REPL
-   only prints its own turns, so there you say "done".
+   tokens into the session's state (`CREDENTIALS_CACHE_KEY`), closes the popup
+   window, and wakes the waiting tool call directly.
+4. The tool immediately executes the Google API call in the same turn and
+   returns the result to the model — no "Please authorize access…" link or
+   "done" message is needed in the chat window.
 
 Add that redirect URI to the OAuth client in the Google Cloud Console.
 

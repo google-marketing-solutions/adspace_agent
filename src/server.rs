@@ -9,18 +9,22 @@
 //! have to come back and say "done" (the web UI polls the session and shows
 //! the continuation).
 
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use adk_rust::server::shutdown_signal;
 use adk_rust::session::SessionService;
 use adk_rust::{CacheCapable, Launcher};
-use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Query, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use futures::stream::Stream;
 
 use crate::agent::{AgentRuntime, TurnRunner};
 use crate::auth::oauth::OAUTH_CALLBACK_PATH;
@@ -85,15 +89,28 @@ fn spawn_resume(runner: Arc<TurnRunner>, session: SessionRef, token: &OAuthToken
 
 /// Path of the browser helper that turns auth links into a popup flow.
 pub const AUTH_HELPER_PATH: &str = "/oauth2/helper.js";
+/// Path of the SSE stream delivering real-time `auth_required` events to `/ui/`.
+pub const AUTH_EVENTS_PATH: &str = "/oauth2/events";
+/// Path where `/ui/` reports whether `window.open` succeeded.
+pub const AUTH_ACK_PATH: &str = "/oauth2/ack";
 /// The helper script (see the file for what it does in the UI).
 const AUTH_HELPER_JS: &str = include_str!("auth_helper.js");
 /// Tag injected into the web UI page.
 const AUTH_HELPER_TAG: &str = "<script src=\"/oauth2/helper.js\" defer></script>";
 
+/// Body of `POST /oauth2/ack`.
+#[derive(Debug, serde::Deserialize)]
+pub struct OAuthAckRequest {
+    /// Signed OAuth state parameter from the `auth_required` event.
+    pub state: String,
+    /// Whether `window.open` succeeded in the browser tab.
+    pub opened: bool,
+}
+
 /// Script run by the callback page: tells the chat tab how the authorization
 /// went — over a same-origin `BroadcastChannel`, because Google's sign-in
 /// pages set COOP `same-origin` and sever `window.opener` (kept as a second
-/// path) — and, on success, closes the popup.
+/// path) — and, on success, closes the popup immediately.
 fn callback_script(status: &str) -> String {
     format!(
         "(function(){{var m={{type:\"adspace:oauth\",status:\"{status}\"}};\
@@ -101,7 +118,7 @@ fn callback_script(status: &str) -> String {
          try{{if(window.opener&&!window.opener.closed){{window.opener.postMessage(m,location.origin);}}}}catch(e){{}}\
          {}}})();",
         if status == "ok" {
-            "setTimeout(function(){window.close();},1200);"
+            "try{window.close();}catch(e){}setTimeout(function(){window.close();},150);"
         } else {
             ""
         }
@@ -131,6 +148,37 @@ async fn auth_helper() -> Response {
         AUTH_HELPER_JS,
     )
         .into_response()
+}
+
+/// Streams real-time `auth_required` / `auth_completed` events to `/ui/` so a
+/// popup opens the instant an in-flight tool call needs Google OAuth consent.
+async fn oauth_events(
+    State(routes): State<OAuthRoutes>,
+) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    let rx = routes.credentials.subscribe_events();
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if let Ok(json) = serde_json::to_string(&event) {
+                        return Some((Ok(SseEvent::default().data(json)), rx));
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Records whether `/ui/` succeeded in opening the OAuth popup via `window.open`.
+async fn oauth_ack(
+    State(routes): State<OAuthRoutes>,
+    Json(req): Json<OAuthAckRequest>,
+) -> Json<serde_json::Value> {
+    let fallback_opened = routes.credentials.ack_popup(&req.state, req.opened);
+    Json(serde_json::json!({ "fallback_opened": fallback_opened }))
 }
 
 /// Inserts the helper `<script>` tag before `</body>` (or at the end).
@@ -179,6 +227,9 @@ pub async fn oauth_callback(
     Query(query): Query<OAuthCallbackQuery>,
 ) -> Html<String> {
     if let Some(error) = query.error {
+        if let Some(state) = query.state.as_deref() {
+            routes.credentials.fail_authorization(state, &error);
+        }
         return html_page(
             "Authorization failed",
             &format!(
@@ -210,26 +261,30 @@ pub async fn oauth_callback(
             );
         }
     };
+    let had_in_flight_waiter = routes.credentials.has_pending_waiter(&session);
     match routes
         .credentials
         .persist(routes.sessions.as_ref(), &session, &token)
         .await
     {
-        Ok(()) => match &routes.resume {
-            Some(runner) => {
+        Ok(()) => {
+            if !had_in_flight_waiter && let Some(runner) = &routes.resume {
                 spawn_resume(runner.clone(), session, &token);
+            }
+            if had_in_flight_waiter || routes.resume.is_some() {
                 html_page(
                     "Authorization complete",
                     "<p>Google access was granted to this chat session and the agent is continuing where it left off. This window closes by itself; otherwise you can close it and return to the chat.</p>",
                     "ok",
                 )
+            } else {
+                html_page(
+                    "Authorization complete",
+                    "<p>Google access was granted to this chat session. You can close this window, return to the chat and tell the agent to continue.</p>",
+                    "ok",
+                )
             }
-            None => html_page(
-                "Authorization complete",
-                "<p>Google access was granted to this chat session. You can close this window, return to the chat and tell the agent to continue.</p>",
-                "ok",
-            ),
-        },
+        }
         Err(e) => {
             tracing::error!("{e:#}");
             html_page(
@@ -241,11 +296,13 @@ pub async fn oauth_callback(
     }
 }
 
-/// Builds the router for the OAuth endpoints (callback + browser helper).
+/// Builds the router for the OAuth endpoints (callback, SSE events, ack, and browser helper).
 pub fn oauth_router(routes: OAuthRoutes) -> Router {
     Router::new()
         .route(OAUTH_CALLBACK_PATH, get(oauth_callback))
         .route(AUTH_HELPER_PATH, get(auth_helper))
+        .route(AUTH_EVENTS_PATH, get(oauth_events))
+        .route(AUTH_ACK_PATH, post(oauth_ack))
         .with_state(routes)
 }
 
@@ -295,6 +352,9 @@ fn launcher(runtime: &AgentRuntime) -> Launcher {
 ///
 /// Returns an error when the listener cannot be bound or the server fails.
 pub async fn serve(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Result<()> {
+    runtime
+        .credentials
+        .enable_interactive_wait(Duration::from_secs(300), true);
     let app = launcher(&runtime)
         .build_app()?
         .merge(oauth_router(runtime.oauth_routes(true)))

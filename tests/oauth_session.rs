@@ -22,7 +22,7 @@ use adk_rust::{
 };
 use adspace_agent::agent::TurnRunner;
 use adspace_agent::auth::{
-    CREDENTIALS_STATE_KEY, GoogleOAuthFlow, OAuthClientConfig, OAuthToken,
+    CREDENTIALS_STATE_KEY, GoogleOAuthFlow, OAuthClientConfig, OAuthToken, OAuthUiEvent,
     SessionCredentialManager, SessionRef, auth_required,
 };
 use adspace_agent::server::{OAuthRoutes, oauth_router, resume_message};
@@ -401,4 +401,113 @@ async fn oauth_callback_attaches_tokens_to_the_requesting_session() {
             .message
             .contains("active chat session")
     );
+}
+
+#[tokio::test]
+async fn in_flight_tool_waits_for_popup_callback_without_stopping_turn() {
+    let google = spawn(Router::new().route("/token", post(mock_token_endpoint))).await;
+    let flow = GoogleOAuthFlow::new(OAuthClientConfig {
+        client_id: "cid".into(),
+        client_secret: "secret".into(),
+        redirect_uri: "http://localhost:8000/oauth2/callback".into(),
+    })
+    .with_endpoints(format!("{google}/auth"), format!("{google}/token"));
+    let credentials = Arc::new(SessionCredentialManager::new(flow));
+    credentials.enable_interactive_wait(std::time::Duration::from_secs(5), false);
+
+    let sessions: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+    sessions
+        .create(CreateRequest {
+            app_name: "adspace_agent".into(),
+            user_id: "local-user".into(),
+            session_id: Some("s-popup".into()),
+            state: HashMap::new(),
+        })
+        .await
+        .unwrap();
+    let session = SessionRef {
+        app_name: "adspace_agent".into(),
+        user_id: "local-user".into(),
+        session_id: "s-popup".into(),
+    };
+
+    let llm = Arc::new(EchoLlm {
+        requests: Mutex::new(Vec::new()),
+    });
+    let chat_agent = Arc::new(
+        LlmAgentBuilder::new("adspace_agent")
+            .model(llm.clone())
+            .instruction("test agent")
+            .build()
+            .unwrap(),
+    );
+    let resume = TurnRunner::new(
+        chat_agent,
+        sessions.clone(),
+        Arc::new(InMemoryArtifactService::new()),
+        Arc::new(InMemoryMemoryService::new()),
+    );
+    let agent = spawn(oauth_router(OAuthRoutes {
+        credentials: credentials.clone(),
+        sessions: sessions.clone(),
+        resume: Some(Arc::new(resume)),
+    }))
+    .await;
+
+    let mut events_rx = credentials.subscribe_events();
+    let ctx = Arc::new(tool_context(sessions.as_ref(), &session).await);
+    let creds_for_tool = credentials.clone();
+    let ctx_for_tool = ctx.clone();
+
+    // Start the tool's access_token call: it stays in-flight awaiting the popup callback.
+    let token_task = tokio::spawn(async move {
+        creds_for_tool
+            .access_token(
+                ctx_for_tool.as_ref(),
+                &["https://www.googleapis.com/auth/adwords".to_string()],
+            )
+            .await
+    });
+
+    // The server immediately broadcasts AuthRequired so `/ui/` pops up the consent window.
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), events_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let OAuthUiEvent::AuthRequired {
+        state,
+        session_id,
+        auth_url,
+        scopes,
+    } = event
+    else {
+        panic!("expected AuthRequired, got {event:?}");
+    };
+    assert_eq!(session_id, "s-popup");
+    assert!(auth_url.starts_with(&format!("{google}/auth?")));
+    assert_eq!(scopes, vec!["https://www.googleapis.com/auth/adwords"]);
+
+    // Complete the OAuth redirect in the popup while `access_token` is still waiting.
+    let page = reqwest::get(format!(
+        "{agent}/oauth2/callback?code=the-code&state={state}"
+    ))
+    .await
+    .unwrap()
+    .text()
+    .await
+    .unwrap();
+    assert!(page.contains("Authorization complete"), "{page}");
+
+    // The in-flight `access_token` call resolves directly with the bearer token!
+    let access_token = tokio::time::timeout(std::time::Duration::from_secs(2), token_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(access_token, "ya29.session-token");
+
+    // And because the original tool call stayed alive and resumed in-place,
+    // no duplicate background `TurnRunner` turn was spawned.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(llm.requests.lock().unwrap().len(), 0);
 }

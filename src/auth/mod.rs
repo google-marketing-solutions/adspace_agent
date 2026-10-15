@@ -22,7 +22,7 @@ pub mod oauth;
 pub use adc::AdcTokenProvider;
 pub use oauth::{
     AuthRequired, CREDENTIALS_STATE_KEY, GoogleOAuthFlow, OAuthClientConfig, OAuthToken,
-    SessionCredentialManager, SessionRef, SessionTokenProvider, auth_required,
+    OAuthUiEvent, SessionCredentialManager, SessionRef, SessionTokenProvider, auth_required,
 };
 
 /// Something that can produce a valid OAuth 2.0 bearer access token.

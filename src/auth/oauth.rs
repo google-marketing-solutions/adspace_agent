@@ -17,7 +17,9 @@
 //!    session's state.
 //! 4. The next tool call of the session finds the stored token.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use adk_rust::session::{AppendEventRequest, SessionService};
@@ -29,6 +31,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::sync::{broadcast, watch};
 
 use super::AccessTokenProvider;
 
@@ -306,7 +309,7 @@ impl GoogleOAuthFlow {
 }
 
 /// Identity of the chat session a credential belongs to.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionRef {
     /// ADK app name.
     pub app_name: String,
@@ -346,6 +349,39 @@ impl std::fmt::Display for SessionRef {
     }
 }
 
+/// Real-time event broadcast to the web UI (`/oauth2/events`) so it can open
+/// the consent popup immediately while a tool call waits in-flight.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OAuthUiEvent {
+    /// A tool call is waiting for the user to grant `scopes` for `session_id`.
+    AuthRequired {
+        /// Signed state token identifying this authorization request.
+        state: String,
+        /// Session ID that requested authorization.
+        session_id: String,
+        /// Full Google OAuth 2.0 consent URL to open in a popup.
+        auth_url: String,
+        /// Requested OAuth scopes.
+        scopes: Vec<String>,
+    },
+    /// The authorization flow for `session_id` finished (`"ok"` or `"error"`).
+    AuthCompleted {
+        /// Session ID that requested authorization.
+        session_id: String,
+        /// `"ok"` or `"error"`.
+        status: String,
+    },
+}
+
+/// In-flight authorization state for a single session.
+#[derive(Clone)]
+struct PendingSessionAuth {
+    scopes: Vec<String>,
+    auth_required: AuthRequired,
+    tx: broadcast::Sender<Result<OAuthToken, String>>,
+}
+
 /// Claims carried by the signed OAuth `state` parameter.
 #[derive(Debug, Serialize, Deserialize)]
 struct StateClaims {
@@ -369,22 +405,91 @@ fn unb64(text: &str) -> anyhow::Result<Vec<u8>> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(text)?)
 }
 
+fn merge_tokens(older: &OAuthToken, newer: &OAuthToken) -> OAuthToken {
+    let mut scopes = older.scopes.clone();
+    for s in &newer.scopes {
+        if !scopes.contains(s) {
+            scopes.push(s.clone());
+        }
+    }
+    OAuthToken {
+        access_token: newer.access_token.clone(),
+        refresh_token: newer
+            .refresh_token
+            .clone()
+            .or_else(|| older.refresh_token.clone()),
+        expires_at: newer.expires_at.or(older.expires_at),
+        scopes,
+    }
+}
+
+/// Opens `url` in the system browser (used on localhost when the browser's
+/// popup blocker rejects `window.open`).
+fn open_in_system_browser(url: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("/usr/bin/open");
+        c.arg(url);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        c
+    };
+    match cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!("Could not open OAuth consent URL in system browser: {e}");
+            false
+        }
+    }
+}
+
 /// Google credentials attached to the chat session.
 ///
-/// Tokens are stored in the session state (key [`CREDENTIALS_STATE_KEY`]) and
-/// nowhere else: every session authorizes on its own, and the server keeps no
-/// credential store. The OAuth `state` parameter is a signed, short-lived
-/// claim naming the session, so the redirect handler can write the exchanged
-/// tokens straight into that session without any server-side pending map.
+/// Tokens are stored in the session state (key [`CREDENTIALS_STATE_KEY`]):
+/// every session authorizes on its own. The OAuth `state` parameter is a
+/// signed, short-lived claim naming the session, so the redirect handler can
+/// write the exchanged tokens straight into that session.
 ///
-/// Authorization is least-privilege: a consent link asks only for the scopes
-/// the calling tool needs. When a later tool needs more, Google's incremental
-/// authorization (`include_granted_scopes=true`) adds the new scope to the
-/// grants the session already has.
+/// When interactive waiting is enabled (`serve` mode), [`Self::access_token`]
+/// broadcasts an [`OAuthUiEvent::AuthRequired`] event to `/ui/` (which opens
+/// the consent popup immediately) and awaits the `/oauth2/callback` completion
+/// in-flight, so the calling tool finishes in the same turn without asking the
+/// LLM to print an authorization link in the chat window.
 pub struct SessionCredentialManager {
     flow: GoogleOAuthFlow,
     /// HMAC key for the `state` parameter (derived from the client secret).
     state_key: [u8; 32],
+    /// How long [`Self::access_token`] waits in-flight for the user to finish
+    /// OAuth consent in the popup before falling back to [`AuthRequired`].
+    wait_timeout: RwLock<Option<Duration>>,
+    /// Whether to fall back to the OS browser opener on localhost when the
+    /// browser tab reports that `window.open` was blocked (or no tab acks).
+    system_browser_fallback: AtomicBool,
+    /// Broadcast channel for real-time `/oauth2/events` SSE notifications.
+    ui_events: broadcast::Sender<OAuthUiEvent>,
+    /// In-flight authorizations keyed by session.
+    pending: Mutex<HashMap<SessionRef, PendingSessionAuth>>,
+    /// Popup-open acknowledgments keyed by signed `state`.
+    acks: Mutex<HashMap<String, watch::Sender<Option<bool>>>>,
+    /// Newly granted tokens for active sessions (bridges the gap between
+    /// `/oauth2/callback` persisting to `SessionService` and the in-flight
+    /// `ToolContext::session()` snapshot of the currently running turn).
+    live_tokens: Mutex<HashMap<SessionRef, OAuthToken>>,
 }
 
 impl std::fmt::Debug for SessionCredentialManager {
@@ -401,10 +506,53 @@ impl SessionCredentialManager {
         let mut hasher = Sha256::new();
         hasher.update(b"adspace-agent/oauth-state:");
         hasher.update(flow.config.client_secret.as_bytes());
+        let (ui_events, _) = broadcast::channel(64);
         Self {
             flow,
             state_key: hasher.finalize().into(),
+            wait_timeout: RwLock::new(None),
+            system_browser_fallback: AtomicBool::new(false),
+            ui_events,
+            pending: Mutex::new(HashMap::new()),
+            acks: Mutex::new(HashMap::new()),
+            live_tokens: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Enables in-flight waiting inside [`Self::access_token`] for up to
+    /// `timeout` while the popup consent flow completes. When
+    /// `system_browser_fallback` is `true` and the redirect URI points at
+    /// `localhost` / `127.0.0.1`, the server also opens the consent URL via
+    /// the OS browser opener if the web UI's `window.open` is blocked.
+    pub fn enable_interactive_wait(&self, timeout: Duration, system_browser_fallback: bool) {
+        *self.wait_timeout.write().unwrap() = Some(timeout);
+        self.system_browser_fallback
+            .store(system_browser_fallback, Ordering::Relaxed);
+    }
+
+    /// Subscribes to real-time UI authorization events (`/oauth2/events`).
+    pub fn subscribe_events(&self) -> broadcast::Receiver<OAuthUiEvent> {
+        self.ui_events.subscribe()
+    }
+
+    /// Records whether the web UI succeeded in opening the popup for `state`.
+    /// Returns `true` if the server opened (or will open) the URL via the
+    /// local system browser fallback instead.
+    pub fn ack_popup(&self, state: &str, opened: bool) -> bool {
+        if let Some(tx) = self.acks.lock().unwrap().get(state) {
+            let _ = tx.send(Some(opened));
+        }
+        !opened && self.should_fallback_to_system_browser()
+    }
+
+    fn should_fallback_to_system_browser(&self) -> bool {
+        if !self.system_browser_fallback.load(Ordering::Relaxed) {
+            return false;
+        }
+        url::Url::parse(&self.flow.config.redirect_uri)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+            .is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "::1")
     }
 
     /// The OAuth flow (for building URLs in UIs).
@@ -435,6 +583,17 @@ impl SessionCredentialManager {
         }
     }
 
+    fn current_token(&self, ctx: &dyn ToolContext, session: &SessionRef) -> Option<OAuthToken> {
+        let from_ctx = Self::stored_token(ctx);
+        let from_live = self.live_tokens.lock().unwrap().get(session).cloned();
+        match (from_ctx, from_live) {
+            (Some(a), Some(b)) => Some(merge_tokens(&a, &b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    }
+
     /// Writes (or, with `None`, clears) the token in the session state through
     /// the tool's event actions.
     pub fn store_token(ctx: &dyn ToolContext, token: Option<&OAuthToken>) {
@@ -451,51 +610,179 @@ impl SessionCredentialManager {
     /// Returns a valid access token for the invocation's session covering
     /// `scopes`, refreshing (and re-storing) it when expired.
     ///
+    /// When interactive waiting is enabled (`serve` mode), this triggers the
+    /// OAuth popup immediately and awaits the callback in-flight so the tool
+    /// call completes seamlessly in the same turn.
+    ///
     /// # Errors
     ///
-    /// Returns [`AuthRequired`] (wrapped in `anyhow`) when the user must
-    /// authorize this session first.
+    /// Returns [`AuthRequired`] (wrapped in `anyhow`) when interactive waiting
+    /// is disabled or when the user denies/times out the authorization.
     pub async fn access_token(
         &self,
         ctx: &dyn ToolContext,
         scopes: &[String],
     ) -> anyhow::Result<String> {
         let session = SessionRef::from_context(ctx);
-        if let Some(token) = Self::stored_token(ctx) {
-            if !token.covers(scopes) {
-                tracing::info!(
-                    "Credentials of session {session} lack required scopes; requesting re-authorization"
-                );
-                return Err(self.begin_authorization(&session, scopes).into());
-            }
-            if !token.is_expired() {
-                return Ok(token.access_token);
-            }
-            if token.refresh_token.is_some() {
-                match self.flow.refresh(&token).await {
-                    Ok(refreshed) => {
-                        Self::store_token(ctx, Some(&refreshed));
-                        return Ok(refreshed.access_token);
+        if let Some(token) = self.current_token(ctx, &session) {
+            if token.covers(scopes) {
+                if !token.is_expired() {
+                    if Self::stored_token(ctx).as_ref() != Some(&token) {
+                        Self::store_token(ctx, Some(&token));
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to refresh Google credentials of session {session}: {e}"
-                        );
-                        Self::store_token(ctx, None);
+                    return Ok(token.access_token);
+                }
+                if token.refresh_token.is_some() {
+                    match self.flow.refresh(&token).await {
+                        Ok(refreshed) => {
+                            let merged = merge_tokens(&token, &refreshed);
+                            self.live_tokens
+                                .lock()
+                                .unwrap()
+                                .insert(session.clone(), merged.clone());
+                            Self::store_token(ctx, Some(&merged));
+                            return Ok(merged.access_token);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to refresh Google credentials of session {session}: {e}"
+                            );
+                            self.live_tokens.lock().unwrap().remove(&session);
+                            Self::store_token(ctx, None);
+                        }
                     }
                 }
+            } else {
+                tracing::info!(
+                    "Credentials of session {session} lack required scopes; requesting authorization"
+                );
             }
         }
-        Err(self.begin_authorization(&session, scopes).into())
+
+        let wait_timeout = *self.wait_timeout.read().unwrap();
+        let Some(timeout) = wait_timeout else {
+            return Err(self.begin_authorization(&session, scopes).into());
+        };
+        if !self.flow.config.is_configured() || session.session_id.is_empty() || scopes.is_empty() {
+            return Err(self.begin_authorization(&session, scopes).into());
+        }
+
+        let (mut rx, auth_req) = self.start_or_join_pending(&session, scopes);
+        match tokio::time::timeout(timeout, rx.recv()).await {
+            Ok(Ok(Ok(token))) => {
+                Self::store_token(ctx, Some(&token));
+                Ok(token.access_token)
+            }
+            Ok(Ok(Err(reason))) => {
+                tracing::warn!("Google authorization for session {session} failed: {reason}");
+                Err(auth_req.into())
+            }
+            Ok(Err(_)) | Err(_) => {
+                self.pending.lock().unwrap().remove(&session);
+                Err(auth_req.into())
+            }
+        }
     }
 
-    /// Starts an authorization for `session` asking for exactly `scopes`
+    fn start_or_join_pending(
+        &self,
+        session: &SessionRef,
+        scopes: &[String],
+    ) -> (
+        broadcast::Receiver<Result<OAuthToken, String>>,
+        AuthRequired,
+    ) {
+        let mut pending = self.pending.lock().unwrap();
+        if let Some(existing) = pending.get(session)
+            && scopes.iter().all(|needed| {
+                existing
+                    .scopes
+                    .iter()
+                    .any(|granted| scope_covers(granted, needed))
+            })
+        {
+            return (existing.tx.subscribe(), existing.auth_required.clone());
+        }
+
+        let mut combined: Vec<String> = pending
+            .get(session)
+            .map(|p| p.scopes.clone())
+            .unwrap_or_default();
+        for scope in scopes {
+            if !combined.contains(scope) {
+                combined.push(scope.clone());
+            }
+        }
+        let (state, auth_req) = self.begin_authorization_with_state(session, &combined);
+        let tx = pending
+            .get(session)
+            .map(|p| p.tx.clone())
+            .unwrap_or_else(|| broadcast::channel(8).0);
+        let rx = tx.subscribe();
+        pending.insert(
+            session.clone(),
+            PendingSessionAuth {
+                scopes: combined.clone(),
+                auth_required: auth_req.clone(),
+                tx,
+            },
+        );
+        drop(pending);
+
+        let (ack_tx, mut ack_rx) = watch::channel(None);
+        self.acks.lock().unwrap().insert(state.clone(), ack_tx);
+
+        let _ = self.ui_events.send(OAuthUiEvent::AuthRequired {
+            state: state.clone(),
+            session_id: session.session_id.clone(),
+            auth_url: auth_req.auth_url.clone(),
+            scopes: auth_req.scopes.clone(),
+        });
+
+        if self.should_fallback_to_system_browser() {
+            let url = auth_req.auth_url.clone();
+            tokio::spawn(async move {
+                let opened_in_ui = match tokio::time::timeout(
+                    Duration::from_millis(450),
+                    ack_rx.changed(),
+                )
+                .await
+                {
+                    Ok(Ok(())) => *ack_rx.borrow() == Some(true),
+                    _ => false,
+                };
+                if !opened_in_ui {
+                    tracing::info!(
+                        "Opening Google OAuth consent screen in system browser (popup blocked or no active UI ack)"
+                    );
+                    open_in_system_browser(&url);
+                }
+            });
+        }
+
+        (rx, auth_req)
+    }
+
+    /// Starts an authorization for `session` asking for `scopes`
     /// (least privilege), returning the instructions.
     pub fn begin_authorization(&self, session: &SessionRef, scopes: &[String]) -> AuthRequired {
-        let unavailable = |message: &str| AuthRequired {
-            auth_url: String::new(),
-            scopes: Vec::new(),
-            message: message.to_string(),
+        self.begin_authorization_with_state(session, scopes).1
+    }
+
+    fn begin_authorization_with_state(
+        &self,
+        session: &SessionRef,
+        scopes: &[String],
+    ) -> (String, AuthRequired) {
+        let unavailable = |message: &str| {
+            (
+                String::new(),
+                AuthRequired {
+                    auth_url: String::new(),
+                    scopes: Vec::new(),
+                    message: message.to_string(),
+                },
+            )
         };
         if !self.flow.config.is_configured() {
             return unavailable(
@@ -516,21 +803,23 @@ impl SessionCredentialManager {
                 "This tool declares no OAuth scope, so no authorization can be requested for it.",
             );
         }
-        let auth_url = self
-            .flow
-            .authorization_url(&requested, &self.sign_state(session, &requested));
+        let state = self.sign_state(session, &requested);
+        let auth_url = self.flow.authorization_url(&requested, &state);
         let names: Vec<&str> = requested
             .iter()
             .map(|s| s.rsplit('/').next().unwrap_or(s))
             .collect();
-        AuthRequired {
-            auth_url: auth_url.clone(),
-            scopes: requested.clone(),
-            message: format!(
-                "Authorization required for this chat session (requested access: {}). Show the user this link as a markdown link labelled \"Authorize Google access\" and ask them to open it and grant the permission; the conversation resumes automatically once access is granted (if it does not, they can say \"done\"): {auth_url}",
-                names.join(", ")
-            ),
-        }
+        (
+            state,
+            AuthRequired {
+                auth_url: auth_url.clone(),
+                scopes: requested.clone(),
+                message: format!(
+                    "Authorization required for this chat session (requested access: {}). Show the user this link as a markdown link labelled \"Authorize Google access\" and ask them to open it and grant the permission; the conversation resumes automatically once access is granted (if it does not, they can say \"done\"): {auth_url}",
+                    names.join(", ")
+                ),
+            },
+        )
     }
 
     /// Completes an authorization from the redirect handler: validates the
@@ -546,13 +835,44 @@ impl SessionCredentialManager {
         state: &str,
         code: &str,
     ) -> anyhow::Result<(SessionRef, OAuthToken)> {
+        self.acks.lock().unwrap().remove(state);
         let claims = self.verify_state(state)?;
         let token = self.flow.exchange_code(code, &claims.scopes).await?;
-        Ok((claims.session, token))
+        let merged = match self.live_tokens.lock().unwrap().get(&claims.session) {
+            Some(existing) => merge_tokens(existing, &token),
+            None => token,
+        };
+        Ok((claims.session, merged))
+    }
+
+    /// Notifies any in-flight tool call waiting on `state` that authorization
+    /// was denied or failed.
+    pub fn fail_authorization(&self, state: &str, error: &str) {
+        self.acks.lock().unwrap().remove(state);
+        if let Ok(claims) = self.verify_state(state) {
+            if let Some(pending) = self.pending.lock().unwrap().remove(&claims.session) {
+                let _ = pending.tx.send(Err(error.to_string()));
+            }
+            let _ = self.ui_events.send(OAuthUiEvent::AuthCompleted {
+                session_id: claims.session.session_id,
+                status: "error".to_string(),
+            });
+        }
+    }
+
+    /// Whether an in-flight tool call is currently awaiting OAuth completion
+    /// for `session`.
+    pub fn has_pending_waiter(&self, session: &SessionRef) -> bool {
+        self.pending
+            .lock()
+            .unwrap()
+            .get(session)
+            .is_some_and(|p| p.tx.receiver_count() > 0)
     }
 
     /// Stores `token` in the state of `session` by appending a state-only
-    /// event, so the next turn of that chat finds it.
+    /// event, and wakes any in-flight tool call awaiting authorization for
+    /// that session.
     ///
     /// # Errors
     ///
@@ -578,6 +898,17 @@ impl SessionCredentialManager {
             .map_err(|e| {
                 anyhow::anyhow!("failed to store credentials in session {session}: {e}")
             })?;
+        self.live_tokens
+            .lock()
+            .unwrap()
+            .insert(session.clone(), token.clone());
+        if let Some(pending) = self.pending.lock().unwrap().remove(session) {
+            let _ = pending.tx.send(Ok(token.clone()));
+        }
+        let _ = self.ui_events.send(OAuthUiEvent::AuthCompleted {
+            session_id: session.session_id.clone(),
+            status: "ok".to_string(),
+        });
         tracing::info!("Stored Google credentials in session {session}");
         Ok(())
     }

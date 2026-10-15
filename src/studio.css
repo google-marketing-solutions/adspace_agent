@@ -1111,6 +1111,7 @@ select:focus-visible {
   align-items: center;
   gap: 6px;
   font-size: 11px;
+  line-height: 1;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
@@ -1140,26 +1141,28 @@ select:focus-visible {
 
 /* Slot-Machine / Odometer Rolling Digit Reels */
 .odometer {
+  --odometer-h: 16px;
+  --odometer-h: round(up, 1.35em, 2px);
   display: inline-flex;
   align-items: center;
-  vertical-align: -0.18em;
+  vertical-align: middle;
   font-variant-numeric: tabular-nums;
-  line-height: 1;
+  line-height: var(--odometer-h);
   white-space: pre;
 }
 
 .odometer-static {
-  display: inline-flex;
-  align-items: center;
-  height: 1.25em;
-  line-height: 1;
+  display: inline-block;
+  height: var(--odometer-h);
+  line-height: var(--odometer-h);
+  white-space: pre;
 }
 
 .odometer-digit {
   display: inline-block;
   width: 1ch;
-  height: 1.25em;
-  line-height: 1;
+  height: var(--odometer-h);
+  line-height: var(--odometer-h);
   overflow: hidden;
   position: relative;
   text-align: center;
@@ -1183,18 +1186,15 @@ select:focus-visible {
   display: flex;
   flex-direction: column;
   width: 100%;
-  height: 100%;
   will-change: transform;
 }
 
 .odometer-cell {
-  flex: 0 0 100%;
+  display: block;
+  flex: 0 0 var(--odometer-h);
   width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 1;
+  height: var(--odometer-h);
+  line-height: var(--odometer-h);
   text-align: center;
   user-select: none;
 }
@@ -1324,7 +1324,7 @@ select:focus-visible {
   color: var(--text-primary);
 }
 
-.usage-row-values span {
+.usage-row-values > span {
   font-size: 10px;
   color: var(--text-muted);
 }

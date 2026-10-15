@@ -2828,8 +2828,8 @@
     );
   };
 
-  // 22-cell vertical reel: top guard '9', first cycle '0'..'9' (indices 1..10),
-  // second cycle '0'..'9' (indices 11..20), bottom guard '0' (index 21).
+  // 23-cell vertical reel: top guard '9', first cycle '0'..'9' (indices 1..10),
+  // second cycle '0'..'9' (indices 11..20), bottom guards '0', '1' (indices 21..22).
   // Allows every digit to spin forward and overshoot/bounce without showing blank space.
   const SLOT_REEL_CELLS = [
     "9",
@@ -2854,9 +2854,21 @@
     "8",
     "9",
     "0",
+    "1",
   ];
 
-  const slotReelOffsetPct = (cellIdx) => `-${cellIdx * 100}%`;
+  const slotReelOffset = (cellIdx) => `calc(-${cellIdx} * var(--odometer-h))`;
+
+  const resetDigitReelNow = (digitEl, digit) => {
+    if (digitEl._resetTimer) {
+      clearTimeout(digitEl._resetTimer);
+      digitEl._resetTimer = null;
+    }
+    digitEl._digit = digit;
+    digitEl._inSecondCycle = false;
+    digitEl._ribbon.style.transition = "none";
+    digitEl._ribbon.style.transform = `translateY(${slotReelOffset(1 + digit)})`;
+  };
 
   const createSlotDigitEl = (initialDigit) => {
     const digitEl = document.createElement("span");
@@ -2870,13 +2882,12 @@
       ribbon.appendChild(cell);
     }
     const d = Math.max(0, Math.min(9, Number(initialDigit) || 0));
-    ribbon.style.transition = "none";
-    ribbon.style.transform = `translateY(${slotReelOffsetPct(1 + d)})`;
     digitEl.appendChild(ribbon);
     digitEl._ribbon = ribbon;
     digitEl._digit = d;
     digitEl._inSecondCycle = false;
     digitEl._resetTimer = null;
+    resetDigitReelNow(digitEl, d);
     return digitEl;
   };
 
@@ -2894,7 +2905,7 @@
 
     if (digitEl._inSecondCycle) {
       ribbon.style.transition = "none";
-      ribbon.style.transform = `translateY(${slotReelOffsetPct(1 + prevDigit)})`;
+      ribbon.style.transform = `translateY(${slotReelOffset(1 + prevDigit)})`;
       digitEl._inSecondCycle = false;
       void ribbon.offsetHeight;
     }
@@ -2906,7 +2917,7 @@
 
     // Ease-out with a slot-machine spring overshoot & bounce back into place
     ribbon.style.transition = `transform ${durationMs}ms cubic-bezier(0.22, 1.42, 0.36, 1)`;
-    ribbon.style.transform = `translateY(${slotReelOffsetPct(targetCellIdx)})`;
+    ribbon.style.transform = `translateY(${slotReelOffset(targetCellIdx)})`;
 
     if (useSecondCycle) {
       digitEl._inSecondCycle = true;
@@ -2914,7 +2925,7 @@
         digitEl._resetTimer = null;
         if (!digitEl._inSecondCycle) return;
         ribbon.style.transition = "none";
-        ribbon.style.transform = `translateY(${slotReelOffsetPct(1 + targetDigit)})`;
+        ribbon.style.transform = `translateY(${slotReelOffset(1 + targetDigit)})`;
         digitEl._inSecondCycle = false;
       }, durationMs + 30);
     }
@@ -2943,11 +2954,7 @@
             if (animate) {
               spinSlotDigit(digitEl, Number(ch), dIdx * 28, false);
             } else {
-              const d = Number(ch);
-              digitEl._digit = d;
-              digitEl._inSecondCycle = false;
-              digitEl._ribbon.style.transition = "none";
-              digitEl._ribbon.style.transform = `translateY(${slotReelOffsetPct(1 + d)})`;
+              resetDigitReelNow(digitEl, Number(ch));
             }
           }
           dIdx += 1;
@@ -2988,10 +2995,7 @@
             forceSpin: isNewReel,
           });
         } else if (!isNewReel) {
-          digitEl._digit = targetDigit;
-          digitEl._inSecondCycle = false;
-          digitEl._ribbon.style.transition = "none";
-          digitEl._ribbon.style.transform = `translateY(${slotReelOffsetPct(1 + targetDigit)})`;
+          resetDigitReelNow(digitEl, targetDigit);
         }
         dIdx += 1;
       } else {

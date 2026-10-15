@@ -47,8 +47,8 @@
     );
   --shadow-sm: 0 2px 8px rgba(15, 23, 42, 0.04), 0 1px 2px rgba(15, 23, 42, 0.03);
   --shadow-md: 0 16px 40px rgba(15, 23, 42, 0.1), 0 2px 8px rgba(15, 23, 42, 0.04);
-  --sans: "Google Sans", "Google Sans Text", "Inter", -apple-system, BlinkMacSystemFont,
-    "Segoe UI", Roboto, sans-serif;
+  --sans: "Google Sans Flex", "Google Sans", "Google Sans Text", "Inter", -apple-system,
+    BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --mono: "Google Sans Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco,
     Consolas, monospace;
   --left-pane-width: 44%;
@@ -166,10 +166,37 @@ body {
   background-attachment: fixed;
   color: var(--text-primary);
   font: 14px/1.55 var(--sans);
+  font-optical-sizing: auto;
   letter-spacing: -0.005em;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+.google-symbols {
+  font-family: "Google Symbols", sans-serif;
+  font-weight: 300;
+  font-style: normal;
+  font-size: 18px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  user-select: none;
+  flex-shrink: 0;
+  font-variation-settings: "FILL" 0, "wght" 300, "GRAD" 0, "opsz" 48, "ROND" 100;
+  -webkit-font-feature-settings: "liga";
+  font-feature-settings: "liga";
+  -webkit-font-smoothing: antialiased;
+}
+
+.google-symbols.filled {
+  font-variation-settings: "FILL" 1, "wght" 300, "GRAD" 0, "opsz" 48, "ROND" 100;
 }
 
 button,
@@ -273,9 +300,12 @@ select:focus-visible {
   flex-shrink: 0;
 }
 
-.brand-mark svg {
-  width: 15px;
-  height: 15px;
+.brand-mark svg,
+.brand-mark .google-symbols {
+  width: 16px;
+  height: 16px;
+  font-size: 16px;
+  color: #ffffff;
   fill: #ffffff;
   stroke: none;
 }
@@ -288,9 +318,11 @@ select:focus-visible {
   box-shadow: 0 6px 22px rgba(75, 144, 255, 0.32);
 }
 
-.brand-mark-lg svg {
+.brand-mark-lg svg,
+.brand-mark-lg .google-symbols {
   width: 24px;
   height: 24px;
+  font-size: 24px;
 }
 
 .top-divider {
@@ -401,8 +433,7 @@ select:focus-visible {
 .danger-button svg,
 .send-button svg,
 .attach-button svg,
-.developer-link svg,
-.chevron {
+.developer-link svg {
   width: 15px;
   height: 15px;
   fill: none;
@@ -410,6 +441,34 @@ select:focus-visible {
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 1.8;
+}
+
+.icon-button .google-symbols,
+.quiet-button .google-symbols,
+.primary-button .google-symbols,
+.danger-button .google-symbols,
+.developer-link .google-symbols {
+  font-size: 17px;
+}
+
+.attach-button .google-symbols {
+  font-size: 19px;
+}
+
+.send-button .google-symbols {
+  font-size: 19px;
+  font-variation-settings: "FILL" 0, "wght" 300, "GRAD" 0, "opsz" 48, "ROND" 100;
+}
+
+.send-button .google-symbols.filled {
+  font-variation-settings: "FILL" 1, "wght" 300, "GRAD" 0, "opsz" 48, "ROND" 100;
+}
+
+.chevron {
+  width: 15px;
+  height: 15px;
+  font-size: 17px;
+  color: var(--text-muted);
 }
 
 .icon-button {
@@ -534,12 +593,6 @@ select:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.chevron {
-  width: 13px;
-  height: 13px;
-  color: var(--text-muted);
 }
 
 .popover-card {
@@ -936,9 +989,31 @@ select:focus-visible {
 }
 
 .canvas-pane {
-  background-color: transparent;
-  background-image: radial-gradient(var(--border-default) 1px, transparent 1px);
-  background-size: 24px 24px;
+  background-color: var(--bg-canvas);
+}
+
+.canvas-stage-viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.stage {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.stage canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .pane-resizer {
@@ -1101,9 +1176,12 @@ select:focus-visible {
   background: var(--accent-wash);
 }
 
-.usage-pill svg {
-  width: 13px;
-  height: 13px;
+.usage-pill svg,
+.usage-pill .google-symbols {
+  width: 14px;
+  height: 14px;
+  font-size: 15px;
+  color: var(--accent-primary);
   fill: none;
   stroke: var(--accent-primary);
   stroke-width: 1.9;
@@ -1303,9 +1381,11 @@ select:focus-visible {
   object-fit: cover;
 }
 
-.avatar svg {
-  width: 15px;
-  height: 15px;
+.avatar svg,
+.avatar .google-symbols {
+  width: 16px;
+  height: 16px;
+  font-size: 16px;
   fill: currentColor;
   stroke: none;
 }
@@ -1699,6 +1779,8 @@ select:focus-visible {
 }
 
 .canvas-body {
+  position: relative;
+  z-index: 1;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -1729,16 +1811,21 @@ select:focus-visible {
   display: grid;
   place-items: center;
   border-radius: 16px;
-  border: 1px solid color-mix(in srgb, var(--accent-primary) 30%, var(--border-default));
-  background: var(--gemini-gradient-subtle);
+  border: 1px solid color-mix(in srgb, var(--accent-primary) 35%, var(--border-default));
+  background: color-mix(in srgb, var(--surface-card) 75%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   color: var(--accent-primary);
   font-size: 22px;
   box-shadow: var(--shadow-sm);
 }
 
-.empty-mark svg {
-  width: 24px;
-  height: 24px;
+.empty-mark svg,
+.empty-mark .google-symbols {
+  width: 26px;
+  height: 26px;
+  font-size: 26px;
+  color: var(--accent-primary);
   fill: var(--accent-primary);
   stroke: none;
 }
@@ -1778,8 +1865,10 @@ select:focus-visible {
 .starter-card {
   padding: 15px 16px;
   border-radius: 16px;
-  border: 1px solid var(--border-default);
-  background: var(--surface-card);
+  border: 1px solid var(--border-strong);
+  background: color-mix(in srgb, var(--surface-card) 78%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   color: var(--text-primary);
   box-shadow: var(--shadow-sm);
   display: flex;
@@ -1789,8 +1878,8 @@ select:focus-visible {
 }
 
 .starter-card:hover {
-  border-color: color-mix(in srgb, var(--accent-primary) 55%, var(--border-default));
-  background: color-mix(in srgb, var(--accent-wash) 35%, var(--surface-card));
+  border-color: color-mix(in srgb, var(--accent-primary) 60%, var(--border-default));
+  background: color-mix(in srgb, var(--surface-card) 92%, transparent);
   transform: translateY(-2px);
   box-shadow: var(--shadow-md);
 }

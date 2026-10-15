@@ -108,6 +108,8 @@ const STUDIO_HTML: &str = include_str!("studio.html");
 const STUDIO_CSS: &str = include_str!("studio.css");
 /// Custom AdSpace Agent studio interface JS (`/app/app.js`).
 const STUDIO_JS: &str = include_str!("studio.js");
+/// Custom AdSpace Agent Interactive Canvas WebGL stage shader (`/app/stage.js`).
+const STUDIO_STAGE_JS: &str = include_str!("stage.js");
 
 /// Body of `POST /oauth2/ack`.
 #[derive(Debug, serde::Deserialize)]
@@ -292,6 +294,21 @@ async fn studio_js() -> Response {
             (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
         ],
         STUDIO_JS,
+    )
+        .into_response()
+}
+
+/// Serves the Interactive Canvas WebGL stage effect (`/app/stage.js`).
+async fn studio_stage_js() -> Response {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/javascript; charset=utf-8"),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+        ],
+        STUDIO_STAGE_JS,
     )
         .into_response()
 }
@@ -663,6 +680,7 @@ pub fn oauth_router(routes: OAuthRoutes) -> Router {
         .route("/app/", get(studio_index))
         .route("/app/app.css", get(studio_css))
         .route("/app/app.js", get(studio_js))
+        .route("/app/stage.js", get(studio_stage_js))
         .with_state(routes)
 }
 

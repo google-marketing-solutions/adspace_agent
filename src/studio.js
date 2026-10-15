@@ -294,6 +294,9 @@
     if (syncPricing && typeof syncPricingControls === "function") {
       syncPricingControls();
     }
+    if (typeof syncCanvasStageTheme === "function") {
+      syncCanvasStageTheme();
+    }
 
     const ids = [prefs.model];
     if (prefs.customerId) ids.push(`CID: ${prefs.customerId}`);
@@ -3505,9 +3508,7 @@
         avatar.textContent = initialsOf(authorLabel);
       }
     } else {
-      avatar.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 2.5C12 7.75 16.25 12 21.5 12C16.25 12 12 16.25 12 21.5C12 16.25 7.75 12 2.5 12C7.75 12 12 7.75 12 2.5Z" fill="currentColor" stroke="none"></path>
-      </svg>`;
+      avatar.innerHTML = `<span class="google-symbols filled" aria-hidden="true">spark</span>`;
     }
     return avatar;
   };
@@ -4016,6 +4017,10 @@
     isRunning = true;
     setStatus("running", "streaming");
     sendBtn.classList.add("stop-button");
+    if ($("send-icon")) {
+      $("send-icon").textContent = "stop";
+      $("send-icon").classList.add("filled");
+    }
     abortController = new AbortController();
 
     try {
@@ -4077,6 +4082,10 @@
       isRunning = false;
       abortController = null;
       sendBtn.classList.remove("stop-button");
+      if ($("send-icon")) {
+        $("send-icon").textContent = "arrow_upward";
+        $("send-icon").classList.remove("filled");
+      }
       setStatus("ready", "ready");
     }
   };
@@ -4344,7 +4353,82 @@
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // Interactive Canvas Stage (Google DeepMind Gemini 4 Argon WebGL Stage)
+  // ---------------------------------------------------------------------------
+  let canvasStageInstance = null;
+  let canvasStageAbort = null;
+
+  const getEffectiveColorMode = () => {
+    if (prefs.theme === "dark") return "dark";
+    if (prefs.theme === "light") return "light";
+    return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+  };
+
+  function syncCanvasStageTheme() {
+    if (canvasStageInstance && typeof canvasStageInstance.update === "function") {
+      canvasStageInstance.update({ colorMode: getEffectiveColorMode() });
+    }
+  }
+
+  const initCanvasStage = async () => {
+    const stageEl = $("canvas-stage");
+    const stageMod = window.AdSpaceStage;
+    if (!stageEl || !stageMod || typeof stageMod.mount !== "function") return;
+
+    if (canvasStageAbort) canvasStageAbort.abort();
+    canvasStageAbort = new AbortController();
+
+    try {
+      const instance = await stageMod.mount({
+        root: stageEl,
+        colorMode: getEffectiveColorMode(),
+        signal: canvasStageAbort.signal,
+        config: {
+          dark_mode_preset: "argon-dark",
+          light_mode_preset: "argon-light",
+          mesh_1_text: "4",
+          mesh_1_depth: 41,
+          mesh_1_pos_x: 18,
+          mesh_1_pos_y: 33,
+          mesh_2_text: "4",
+          mesh_2_depth: 80,
+          mesh_2_pos_x: -50,
+          mesh_2_pos_y: -43,
+          spark_prominence: 24,
+          show_hero_motif: true,
+          hero_motif_symbol: "spark",
+          motif_scale: 115,
+          motif_opacity: 28,
+          motif_pos_x: 0,
+          motif_pos_y: -6,
+          motif_idle_evap: 65,
+          motif_hover_evap: 80,
+          seed: 10,
+          grain: 14,
+          animate_grain: false,
+        },
+      });
+      canvasStageInstance = instance;
+      if (!prefersReducedMotion() && typeof instance.resume === "function") {
+        instance.resume();
+      }
+    } catch {
+      /* fallback silently to CSS background if WebGL2 is unavailable */
+    }
+  };
+
+  if (window.matchMedia) {
+    const darkMq = window.matchMedia("(prefers-color-scheme: dark)");
+    if (typeof darkMq.addEventListener === "function") {
+      darkMq.addEventListener("change", () => {
+        if (prefs.theme === "system") syncCanvasStageTheme();
+      });
+    }
+  }
+
   // Initialize
   applyPreferences();
+  initCanvasStage();
   checkAuthStatus();
 })();

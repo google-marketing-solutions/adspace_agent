@@ -4,6 +4,26 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AdSpace Agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Google+Symbols:opsz,wght,FILL,GRAD,ROND@48,100..300,0..1,0,100&amp;display=swap"
+      as="style"
+      rel="preload"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Google+Symbols:opsz,wght,FILL,GRAD,ROND@48,100..300,0..1,0,100&amp;display=swap"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Google+Sans+Flex:opsz,wght@6..144,1..1000&amp;display=swap"
+      as="style"
+      rel="preload"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Google+Sans+Flex:opsz,wght@6..144,1..1000&amp;display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/app/app.css" />
   </head>
   <body>
@@ -12,9 +32,7 @@
       <header class="topbar">
         <a class="brand" href="/app/">
           <span class="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 24 24">
-              <path d="M12 2C12 7.52 16.48 12 22 12C16.48 12 12 16.48 12 22C12 16.48 7.52 12 2 12C7.52 12 12 7.52 12 2Z" />
-            </svg>
+            <span class="google-symbols filled">spark</span>
           </span>
           <span><b>AdSpace</b> Agent</span>
         </a>
@@ -29,7 +47,7 @@
           <label for="session-select">Session</label>
           <select id="session-select" aria-label="Select chat session"></select>
           <button id="new-session-btn" type="button" class="primary-button" title="Start a new chat session">
-            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+            <span class="google-symbols" aria-hidden="true">add</span>
             <span>New Session</span>
           </button>
         </div>
@@ -39,10 +57,7 @@
         <!-- Settings Menu -->
         <div class="popover-anchor">
           <button id="settings-btn" type="button" class="icon-button" aria-label="Workspace settings" title="Settings">
-            <svg viewBox="0 0 24 24">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-            </svg>
+            <span class="google-symbols" aria-hidden="true">tune</span>
           </button>
 
           <div id="settings-menu" class="popover-card settings-popover hidden" role="dialog" aria-label="Workspace settings">
@@ -223,7 +238,7 @@
             <div class="popover-footer">
               <a href="/ui/" target="_blank" rel="noreferrer" class="developer-link">
                 <span>Open ADK Developer Inspector (`/ui/`)</span>
-                <svg viewBox="0 0 24 24"><path d="M7 17L17 7M7 7h10v10" /></svg>
+                <span class="google-symbols" aria-hidden="true">north_east</span>
               </a>
             </div>
           </div>
@@ -235,7 +250,7 @@
             <img id="user-avatar-img" class="user-avatar hidden" alt="" referrerpolicy="no-referrer" />
             <span id="user-avatar-fallback" class="user-avatar-fallback">U</span>
             <span id="user-name" class="user-pill-name">User</span>
-            <svg class="chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></svg>
+            <span class="google-symbols chevron" aria-hidden="true">keyboard_arrow_down</span>
           </button>
 
           <div id="user-menu" class="popover-card user-popover hidden" role="dialog" aria-label="Account menu">
@@ -270,7 +285,7 @@
                 Clear Current Session
               </button>
               <button id="logout-btn" type="button" class="danger-button full-width">
-                <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" /></svg>
+                <span class="google-symbols" aria-hidden="true">logout</span>
                 <span>Log out</span>
               </button>
             </div>
@@ -290,9 +305,7 @@
         <div class="auth-card">
           <div class="auth-brand-row">
             <span class="brand-mark brand-mark-lg" aria-hidden="true">
-              <svg viewBox="0 0 24 24">
-                <path d="M12 2C12 7.52 16.48 12 22 12C16.48 12 12 16.48 12 22C12 16.48 7.52 12 2 12C7.52 12 12 7.52 12 2Z" />
-              </svg>
+              <span class="google-symbols filled">spark</span>
             </span>
             <div>
               <div class="eyebrow">Google Marketing &amp; Analytics Workspace</div>
@@ -340,10 +353,7 @@
                   title="Session token usage &amp; estimated cost (adk_telemetry)"
                   aria-label="Session token usage and estimated cost"
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-                    <circle cx="12" cy="12" r="4" />
-                  </svg>
+                  <span class="google-symbols filled" aria-hidden="true">bolt</span>
                   <span id="session-usage-tokens">0 tok</span>
                   <span id="session-usage-sep" class="usage-pill-sep">·</span>
                   <span id="session-usage-cost" class="usage-pill-cost">$0.00</span>
@@ -444,7 +454,7 @@
               </div>
 
               <button id="refresh-session-btn" type="button" class="quiet-button" title="Refresh session">
-                <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" /></svg>
+                <span class="google-symbols" aria-hidden="true">refresh</span>
                 <span>Refresh</span>
               </button>
             </div>
@@ -457,9 +467,7 @@
             <div class="composer">
               <label class="attach-button" title="Attach file (CSV, image, PDF…)">
                 <input id="file-input" type="file" multiple />
-                <svg viewBox="0 0 24 24">
-                  <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-                </svg>
+                <span class="google-symbols" aria-hidden="true">attach_file</span>
                 <span class="sr-only">Attach file</span>
               </label>
               <textarea
@@ -469,7 +477,7 @@
                 aria-label="Message agent"
               ></textarea>
               <button id="send-btn" type="button" class="send-button" aria-label="Send message">
-                <svg id="send-icon" viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>
+                <span id="send-icon" class="google-symbols" aria-hidden="true">arrow_upward</span>
               </button>
             </div>
             <div class="composer-hint">
@@ -501,12 +509,13 @@
 
           <div id="canvas-tabs" class="canvas-tabs hidden" role="tablist"></div>
 
-          <div id="canvas-body" class="canvas-body">
-            <div id="canvas-empty" class="canvas-empty">
+          <div class="canvas-stage-viewport">
+            <div id="canvas-stage" class="stage" aria-hidden="true"></div>
+
+            <div id="canvas-body" class="canvas-body">
+              <div id="canvas-empty" class="canvas-empty">
               <div class="empty-mark" aria-hidden="true">
-                <svg viewBox="0 0 24 24">
-                  <path d="M12 2C12 7.52 16.48 12 22 12C16.48 12 12 16.48 12 22C12 16.48 7.52 12 2 12C7.52 12 12 7.52 12 2Z" />
-                </svg>
+                <span class="google-symbols filled">spark</span>
               </div>
               <h3>Interactive UI Canvas</h3>
               <p>
@@ -554,12 +563,14 @@
               </div>
             </div>
 
-            <div id="canvas-surfaces" class="canvas-surfaces"></div>
+              <div id="canvas-surfaces" class="canvas-surfaces"></div>
+            </div>
           </div>
         </section>
       </main>
     </div>
 
+    <script src="/app/stage.js" defer></script>
     <script src="/app/app.js" defer></script>
   </body>
 </html>

@@ -3513,9 +3513,156 @@
     return avatar;
   };
 
+  const parseUiEventMessage = (text) => {
+    if (typeof text !== "string" || !text.startsWith("[UI Event:")) return null;
+    const match = text.match(/^\[UI Event:\s*([^\]]+)\]\s*(?:\r?\n|$)([\s\S]*)$/);
+    if (!match) return null;
+    const eventType = match[1].trim();
+    const rest = match[2] || "";
+    let action = "";
+    const fields = [];
+    let inData = false;
+    for (const rawLine of rest.split(/\r?\n/)) {
+      if (!rawLine.trim()) continue;
+      if (!inData && rawLine.startsWith("Action:")) {
+        action = rawLine.slice("Action:".length).trim();
+        continue;
+      }
+      if (!inData && rawLine.trim() === "Data:") {
+        inData = true;
+        continue;
+      }
+      const kv = rawLine.match(/^\s*([^:]+):\s*(.*)$/);
+      if (kv) {
+        fields.push({ key: kv[1].trim(), value: kv[2].trim() });
+      }
+    }
+    return { eventType, action, fields };
+  };
+
+  const renderUiEventInto = (container, parsed) => {
+    container.replaceChildren();
+    const wrap = document.createElement("div");
+    wrap.className = "ui-event-card";
+
+    const header = document.createElement("div");
+    header.className = "ui-event-header";
+
+    const badge = document.createElement("span");
+    badge.className = "ui-event-badge";
+    const icon = document.createElement("span");
+    icon.className = "google-symbols";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = /form/i.test(parsed.eventType) ? "fact_check" : "ads_click";
+    const title = document.createElement("span");
+    title.className = "ui-event-title";
+    title.textContent = parsed.eventType;
+    badge.append(icon, title);
+    header.appendChild(badge);
+
+    if (parsed.action) {
+      const actionCode = document.createElement("code");
+      actionCode.className = "ui-event-action";
+      actionCode.textContent = parsed.action;
+      header.appendChild(actionCode);
+    }
+    wrap.appendChild(header);
+
+    if (parsed.fields.length > 0) {
+      const grid = document.createElement("div");
+      grid.className = "ui-event-fields";
+      for (const f of parsed.fields) {
+        const row = document.createElement("div");
+        row.className = "ui-event-field";
+        const keyEl = document.createElement("span");
+        keyEl.className = "ui-event-key";
+        keyEl.textContent = f.key;
+        const valEl = document.createElement("code");
+        valEl.className = "ui-event-val";
+        valEl.textContent = f.value || "—";
+        row.append(keyEl, valEl);
+        grid.appendChild(row);
+      }
+      wrap.appendChild(grid);
+    }
+
+    container.appendChild(wrap);
+  };
+
+  const updateUsageFooter = (parentEl, { isUser, usage }) => {
+    const usageSig =
+      !isUser && usage && prefs.showMessageUsage
+        ? `${usage.totalTokens}:${usage.inputTokens}:${usage.outputTokens}:${usage.thinkingTokens}:${usage.cacheReadTokens}:${prefs.showCost ? usage.totalCost.toFixed(6) : "nocost"}`
+        : "";
+    if (parentEl.dataset.usageSig === usageSig) return;
+    parentEl.dataset.usageSig = usageSig;
+
+    let usageEl = parentEl.querySelector(":scope > .message-usage");
+    if (usageSig && usage) {
+      if (!usageEl) {
+        usageEl = document.createElement("div");
+        usageEl.className = "message-usage";
+        usageEl.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (sessionUsagePopover && prefs.showSessionUsage) {
+            settingsMenu.classList.add("hidden");
+            userMenu.classList.add("hidden");
+            updateSessionUsageUi();
+            sessionUsagePopover.classList.remove("hidden");
+          }
+        });
+        parentEl.appendChild(usageEl);
+      }
+      let leftSpan = usageEl.querySelector(":scope > .message-usage-tokens");
+      if (!leftSpan) {
+        leftSpan = document.createElement("span");
+        leftSpan.className = "message-usage-tokens";
+        usageEl.prepend(leftSpan);
+      }
+      animateCounter(
+        leftSpan,
+        usage.totalTokens,
+        (v) => {
+          const r = usage.totalTokens > 0 ? v / usage.totalTokens : 1;
+          const detailParts = [
+            `${formatExactInt(usage.inputTokens * r)} in`,
+            `${formatExactInt(usage.outputTokens * r)} out`,
+          ];
+          if (usage.thinkingTokens > 0) {
+            detailParts.push(`${formatExactInt(usage.thinkingTokens * r)} thinking`);
+          }
+          if (usage.cacheReadTokens > 0) {
+            detailParts.push(`${formatExactInt(usage.cacheReadTokens * r)} cached`);
+          }
+          return `${formatExactInt(v)} tok (${detailParts.join(" · ")})`;
+        },
+        {
+          formatSig: `${usage.inputTokens}:${usage.outputTokens}:${usage.thinkingTokens}:${usage.cacheReadTokens}`,
+          pulseOnMount: true,
+        }
+      );
+      usageEl.title = `gen_ai.request.model=${usage.model} · gen_ai.usage.input_tokens=${usage.inputTokens} · gen_ai.usage.output_tokens=${usage.outputTokens} · gen_ai.usage.total_tokens=${usage.totalTokens}`;
+      let rightSpan = usageEl.querySelector(":scope > .message-usage-cost");
+      if (prefs.showCost) {
+        if (!rightSpan) {
+          rightSpan = document.createElement("span");
+          rightSpan.className = "message-usage-cost";
+          usageEl.appendChild(rightSpan);
+        }
+        animateCounter(rightSpan, usage.totalCost, formatUsdShort, {
+          pulseOnMount: true,
+        });
+      } else if (rightSpan) {
+        rightSpan.remove();
+      }
+    } else if (usageEl) {
+      usageEl.remove();
+    }
+  };
+
   const updateMessageArticle = (
     article,
-    { isUser, partial, textContent, visibleTools, surfaceRefs, usage }
+    { isUser, partial, textContent, visibleTools, usage }
   ) => {
     // 1. Streaming indicator
     let st = article.querySelector(":scope > .streaming-tag");
@@ -3546,15 +3693,25 @@
       }
       if (textEl.dataset.renderedText !== textContent) {
         textEl.dataset.renderedText = textContent;
-        if (isUser) {
-          textEl.textContent = textContent;
+        const parsedUiEvent = isUser ? parseUiEventMessage(textContent) : null;
+        if (parsedUiEvent) {
+          article.classList.add("message-ui-event");
+          textEl.classList.add("message-text-ui-event");
+          renderUiEventInto(textEl, parsedUiEvent);
         } else {
-          textEl.replaceChildren();
-          parseMarkdownBlocksInto(textEl, textContent);
+          article.classList.remove("message-ui-event");
+          textEl.classList.remove("message-text-ui-event");
+          if (isUser) {
+            textEl.textContent = textContent;
+          } else {
+            textEl.replaceChildren();
+            parseMarkdownBlocksInto(textEl, textContent);
+          }
         }
       }
-    } else if (textEl) {
-      textEl.remove();
+    } else {
+      article.classList.remove("message-ui-event");
+      if (textEl) textEl.remove();
     }
 
     // 3. Tool calls container (updated only when tool calls changed)
@@ -3562,9 +3719,7 @@
     if (article.dataset.toolsSig !== toolsSig) {
       article.dataset.toolsSig = toolsSig;
       article.querySelectorAll(":scope > details.tool-call").forEach((el) => el.remove());
-      const beforeEl =
-        article.querySelector(":scope > .canvas-jump-chip") ||
-        article.querySelector(":scope > .message-usage");
+      const beforeEl = article.querySelector(":scope > .message-usage");
       for (const tp of visibleTools) {
         const details = document.createElement("details");
         details.className = "tool-call";
@@ -3589,100 +3744,75 @@
       }
     }
 
-    // 4. Canvas jump chips (updated only when surface refs changed)
-    const surfacesSig = surfaceRefs.map((s) => s.id).join("|");
-    if (article.dataset.surfacesSig !== surfacesSig) {
-      article.dataset.surfacesSig = surfacesSig;
-      article.querySelectorAll(":scope > .canvas-jump-chip").forEach((el) => el.remove());
-      const usageFooter = article.querySelector(":scope > .message-usage");
-      for (const surf of surfaceRefs) {
-        const chip = document.createElement("button");
-        chip.type = "button";
-        chip.className = "canvas-jump-chip";
-        const left = document.createElement("span");
-        left.textContent = `✦ ${surf.eyebrow}: `;
-        const strong = document.createElement("strong");
-        strong.textContent = surf.title;
-        left.appendChild(strong);
-        const right = document.createElement("span");
-        right.textContent = "View on Canvas →";
-        chip.append(left, right);
-        chip.addEventListener("click", () => focusSurfaceOnCanvas(surf.id));
-        if (usageFooter) {
-          article.insertBefore(chip, usageFooter);
-        } else {
-          article.appendChild(chip);
-        }
+    // 4. Per-turn token telemetry & cost footer inside bubble
+    updateUsageFooter(article, { isUser, usage });
+  };
+
+  const updateMessageCol = (col, item) => {
+    const hasBubble =
+      item.partial || Boolean(item.textContent) || item.visibleTools.length > 0;
+    let article = col.querySelector(":scope > article.message");
+
+    if (hasBubble) {
+      if (!article) {
+        article = document.createElement("article");
+        article.className = `message ${item.isUser ? "message-user" : "message-agent"}`;
+        col.prepend(article);
       }
+      updateMessageArticle(article, item);
+      // Clear any standalone usage on col when bubble owns the usage footer
+      updateUsageFooter(col, { isUser: true, usage: null });
+    } else {
+      if (article) article.remove();
+      updateUsageFooter(col, { isUser: item.isUser, usage: item.usage });
     }
 
-    // 5. Per-turn token telemetry & cost footer (live during streaming and after completion)
-    const usageSig =
-      !isUser && usage && prefs.showMessageUsage
-        ? `${usage.totalTokens}:${usage.inputTokens}:${usage.outputTokens}:${usage.thinkingTokens}:${usage.cacheReadTokens}:${prefs.showCost ? usage.totalCost.toFixed(6) : "nocost"}`
-        : "";
-    if (article.dataset.usageSig !== usageSig) {
-      article.dataset.usageSig = usageSig;
-      let usageEl = article.querySelector(":scope > .message-usage");
-      if (usageSig && usage) {
-        if (!usageEl) {
-          usageEl = document.createElement("div");
-          usageEl.className = "message-usage";
-          usageEl.addEventListener("click", (e) => {
-            e.stopPropagation();
-            if (sessionUsagePopover && prefs.showSessionUsage) {
-              settingsMenu.classList.add("hidden");
-              userMenu.classList.add("hidden");
-              updateSessionUsageUi();
-              sessionUsagePopover.classList.remove("hidden");
-            }
-          });
-          article.appendChild(usageEl);
-        }
-        let leftSpan = usageEl.querySelector(":scope > .message-usage-tokens");
-        if (!leftSpan) {
-          leftSpan = document.createElement("span");
-          leftSpan.className = "message-usage-tokens";
-          usageEl.prepend(leftSpan);
-        }
-        animateCounter(
-          leftSpan,
-          usage.totalTokens,
-          (v) => {
-            const r = usage.totalTokens > 0 ? v / usage.totalTokens : 1;
-            const detailParts = [
-              `${formatExactInt(usage.inputTokens * r)} in`,
-              `${formatExactInt(usage.outputTokens * r)} out`,
-            ];
-            if (usage.thinkingTokens > 0) {
-              detailParts.push(`${formatExactInt(usage.thinkingTokens * r)} thinking`);
-            }
-            if (usage.cacheReadTokens > 0) {
-              detailParts.push(`${formatExactInt(usage.cacheReadTokens * r)} cached`);
-            }
-            return `${formatExactInt(v)} tok (${detailParts.join(" · ")})`;
-          },
-          {
-            formatSig: `${usage.inputTokens}:${usage.outputTokens}:${usage.thinkingTokens}:${usage.cacheReadTokens}`,
-            pulseOnMount: true,
+    // Canvas jump buttons live outside the chat bubble (styled like .cover__buttons)
+    const surfacesSig = item.surfaceRefs.map((s) => s.id).join("|");
+    if (col.dataset.surfacesSig !== surfacesSig) {
+      col.dataset.surfacesSig = surfacesSig;
+      let btnGroup = col.querySelector(":scope > .chat-canvas-buttons");
+      if (item.surfaceRefs.length === 0) {
+        if (btnGroup) btnGroup.remove();
+      } else {
+        if (!btnGroup) {
+          btnGroup = document.createElement("div");
+          btnGroup.className = "chat-canvas-buttons";
+          const standaloneUsage = col.querySelector(":scope > .message-usage");
+          if (standaloneUsage) {
+            col.insertBefore(btnGroup, standaloneUsage);
+          } else {
+            col.appendChild(btnGroup);
           }
-        );
-        usageEl.title = `gen_ai.request.model=${usage.model} · gen_ai.usage.input_tokens=${usage.inputTokens} · gen_ai.usage.output_tokens=${usage.outputTokens} · gen_ai.usage.total_tokens=${usage.totalTokens}`;
-        let rightSpan = usageEl.querySelector(":scope > .message-usage-cost");
-        if (prefs.showCost) {
-          if (!rightSpan) {
-            rightSpan = document.createElement("span");
-            rightSpan.className = "message-usage-cost";
-            usageEl.appendChild(rightSpan);
-          }
-          animateCounter(rightSpan, usage.totalCost, formatUsdShort, {
-            pulseOnMount: true,
-          });
-        } else if (rightSpan) {
-          rightSpan.remove();
         }
-      } else if (usageEl) {
-        usageEl.remove();
+        btnGroup.replaceChildren();
+        for (const surf of item.surfaceRefs) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "button button--protected canvas-jump-btn";
+
+          const icon = document.createElement("span");
+          icon.className = "google-symbols filled canvas-jump-icon";
+          icon.setAttribute("aria-hidden", "true");
+          icon.textContent = "spark";
+
+          const label = document.createElement("span");
+          label.className = "button__label canvas-jump-label";
+          const eyebrow = document.createElement("span");
+          eyebrow.className = "canvas-jump-eyebrow";
+          eyebrow.textContent = `${surf.eyebrow}: `;
+          const strong = document.createElement("strong");
+          strong.textContent = surf.title;
+          label.append(eyebrow, strong);
+
+          const cta = document.createElement("span");
+          cta.className = "canvas-jump-cta";
+          cta.textContent = "View on Canvas →";
+
+          btn.append(icon, label, cta);
+          btn.addEventListener("click", () => focusSurfaceOnCanvas(surf.id));
+          btnGroup.appendChild(btn);
+        }
       }
     }
   };
@@ -3693,9 +3823,17 @@
 
     currentEvents.forEach((ev, idx) => {
       const parts = ev?.content?.parts || [];
+      const hasToolOrUi = parts.some(
+        (p) =>
+          "functionCall" in p ||
+          "function_call" in p ||
+          "functionResponse" in p ||
+          "function_response" in p
+      );
       const isUser =
-        (ev?.content?.role || (ev?.author === "user" ? "user" : "model")) === "user" ||
-        ev?.author === "user";
+        !hasToolOrUi &&
+        ((ev?.content?.role || (ev?.author === "user" ? "user" : "model")) === "user" ||
+          ev?.author === "user");
 
       const textContent = parts
         .map((p) => (typeof p.text === "string" ? p.text : ""))
@@ -3780,9 +3918,9 @@
         newRow.dataset.authorLabel = item.authorLabel;
 
         const avatar = createAvatarElement(item.isUser, item.authorLabel);
-        const article = document.createElement("article");
-        article.className = `message ${item.isUser ? "message-user" : "message-agent"}`;
-        newRow.append(avatar, article);
+        const col = document.createElement("div");
+        col.className = "message-col";
+        newRow.append(avatar, col);
 
         if (row) {
           chatTranscript.replaceChild(newRow, row);
@@ -3792,8 +3930,8 @@
         row = newRow;
       }
 
-      const article = row.querySelector(":scope > article.message");
-      updateMessageArticle(article, item);
+      const col = row.querySelector(":scope > .message-col");
+      updateMessageCol(col, item);
     });
 
     while (chatTranscript.children.length > visibleItems.length) {

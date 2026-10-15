@@ -72,6 +72,62 @@
             </div>
 
             <div class="popover-section">
+              <div class="popover-label">ADK &amp; Generative Media Models</div>
+              <div class="settings-inputs">
+                <label>
+                  <span>Agent Model (ADK LLM)</span>
+                  <select id="setting-model-select" aria-label="Agent Model">
+                    <option value="gemini-3.8-flash">gemini-3.8-flash</option>
+                    <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite</option>
+                    <option value="gemini-4-argon">gemini-4-argon</option>
+                    <option value="__custom__">Custom…</option>
+                  </select>
+                  <input
+                    id="setting-model-custom"
+                    type="text"
+                    class="custom-model-input hidden"
+                    placeholder="e.g. gemini-3.8-flash"
+                    aria-label="Custom Agent Model"
+                  />
+                </label>
+
+                <label>
+                  <span>Image Generation Model</span>
+                  <select id="setting-image-model-select" aria-label="Image Generation Model">
+                    <option value="gemini-3.1-flash-image">gemini-3.1-flash-image</option>
+                    <option value="imagen-4.0-generate-001">imagen-4.0-generate-001</option>
+                    <option value="imagen-4.0-fast-generate-001">imagen-4.0-fast-generate-001</option>
+                    <option value="__custom__">Custom…</option>
+                  </select>
+                  <input
+                    id="setting-image-model-custom"
+                    type="text"
+                    class="custom-model-input hidden"
+                    placeholder="e.g. gemini-3.1-flash-image"
+                    aria-label="Custom Image Model"
+                  />
+                </label>
+
+                <label>
+                  <span>Video Generation Model</span>
+                  <select id="setting-video-model-select" aria-label="Video Generation Model">
+                    <option value="veo-3.1-fast-generate-001">veo-3.1-fast-generate-001</option>
+                    <option value="veo-3.1-generate-001">veo-3.1-generate-001</option>
+                    <option value="veo-3.0-generate-001">veo-3.0-generate-001</option>
+                    <option value="__custom__">Custom…</option>
+                  </select>
+                  <input
+                    id="setting-video-model-custom"
+                    type="text"
+                    class="custom-model-input hidden"
+                    placeholder="e.g. veo-3.1-fast-generate-001"
+                    aria-label="Custom Video Model"
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div class="popover-section">
               <div class="popover-label">Default Google Ads Account (Optional)</div>
               <div class="settings-inputs">
                 <label>

@@ -18,6 +18,27 @@ pub const DEFAULT_VIDEO_MODEL: &str = "veo-3.1-fast-generate-001";
 /// Default image generation model.
 pub const DEFAULT_IMAGE_MODEL: &str = "gemini-3.1-flash-image";
 
+/// Preset agent LLM models exposed in the Studio settings selector.
+pub const PRESET_MODELS: &[&str] = &[
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-4-argon",
+];
+
+/// Preset Veo video generation models exposed in the Studio settings selector.
+pub const PRESET_VIDEO_MODELS: &[&str] = &[
+    "veo-3.1-fast-generate-001",
+    "veo-3.1-generate-001",
+    "veo-3.0-generate-001",
+];
+
+/// Preset image generation models exposed in the Studio settings selector.
+pub const PRESET_IMAGE_MODELS: &[&str] = &[
+    "gemini-3.1-flash-image",
+    "imagen-4.0-generate-001",
+    "imagen-4.0-fast-generate-001",
+];
+
 /// Default events-compaction interval (in invocations).
 pub const DEFAULT_COMPACTION_INTERVAL: u64 = 3;
 /// Default events-compaction overlap size (in invocations).
@@ -536,6 +557,115 @@ impl Settings {
     /// Returns true when the named toolset is enabled.
     pub fn is_toolset_enabled(&self, name: &str) -> bool {
         self.enabled_toolsets.iter().any(|t| t == name)
+    }
+}
+
+/// Snapshot of the currently active model identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ActiveModels {
+    /// Active ADK LLM model identifier.
+    pub model: String,
+    /// Active video generation model identifier.
+    pub video_model: String,
+    /// Active image generation model identifier.
+    pub image_model: String,
+}
+
+impl Default for ActiveModels {
+    fn default() -> Self {
+        Self {
+            model: DEFAULT_MODEL.to_string(),
+            video_model: DEFAULT_VIDEO_MODEL.to_string(),
+            image_model: DEFAULT_IMAGE_MODEL.to_string(),
+        }
+    }
+}
+
+/// Validates a model identifier string.
+pub fn validate_model_name(raw: &str) -> anyhow::Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("model identifier cannot be empty");
+    }
+    if trimmed.len() > 128 {
+        anyhow::bail!("model identifier cannot exceed 128 characters");
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':'))
+    {
+        anyhow::bail!("model identifier '{trimmed}' contains invalid characters");
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Runtime hook allowing the HTTP server and tools to read or hot-swap the
+/// active agent, video, and image models.
+pub trait ModelController: Send + Sync {
+    /// Returns the currently active model identifiers.
+    fn active_models(&self) -> ActiveModels;
+
+    /// Updates any supplied model identifiers and returns the updated snapshot.
+    fn update_models(
+        &self,
+        model: Option<&str>,
+        video_model: Option<&str>,
+        image_model: Option<&str>,
+    ) -> anyhow::Result<ActiveModels>;
+}
+
+/// In-memory [`ModelController`] used when no live LLM factory is attached.
+pub struct SimpleModelController {
+    state: std::sync::RwLock<ActiveModels>,
+}
+
+impl SimpleModelController {
+    /// Creates a controller with the given initial model names.
+    pub fn new(
+        model: impl Into<String>,
+        video_model: impl Into<String>,
+        image_model: impl Into<String>,
+    ) -> Self {
+        Self {
+            state: std::sync::RwLock::new(ActiveModels {
+                model: model.into(),
+                video_model: video_model.into(),
+                image_model: image_model.into(),
+            }),
+        }
+    }
+}
+
+impl Default for SimpleModelController {
+    fn default() -> Self {
+        Self {
+            state: std::sync::RwLock::new(ActiveModels::default()),
+        }
+    }
+}
+
+impl ModelController for SimpleModelController {
+    fn active_models(&self) -> ActiveModels {
+        self.state.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn update_models(
+        &self,
+        model: Option<&str>,
+        video_model: Option<&str>,
+        image_model: Option<&str>,
+    ) -> anyhow::Result<ActiveModels> {
+        let mut guard = self.state.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = model {
+            guard.model = validate_model_name(m)?;
+        }
+        if let Some(v) = video_model {
+            guard.video_model = validate_model_name(v)?;
+        }
+        if let Some(i) = image_model {
+            guard.image_model = validate_model_name(i)?;
+        }
+        Ok(guard.clone())
     }
 }
 

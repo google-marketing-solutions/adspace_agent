@@ -32,7 +32,7 @@ use crate::auth::{
     AuthenticatedUser, CREDENTIALS_STATE_KEY, LOGIN_SENTINEL_APP, OAuthToken,
     SessionCredentialManager, SessionRef,
 };
-use crate::config::APP_NAME;
+use crate::config::{APP_NAME, PRESET_IMAGE_MODELS, PRESET_MODELS, PRESET_VIDEO_MODELS};
 
 /// Query parameters Google sends to the OAuth redirect URI.
 #[derive(Debug, serde::Deserialize)]
@@ -425,19 +425,82 @@ fn extract_cookie_user(
     None
 }
 
+fn models_payload(routes: &OAuthRoutes) -> serde_json::Value {
+    let active = routes.credentials.model_controller().active_models();
+    serde_json::json!({
+        "model": active.model,
+        "video_model": active.video_model,
+        "image_model": active.image_model,
+        "presets": {
+            "models": PRESET_MODELS,
+            "video_models": PRESET_VIDEO_MODELS,
+            "image_models": PRESET_IMAGE_MODELS,
+        }
+    })
+}
+
 /// Returns the currently signed-in Google user for `/app/`.
 async fn auth_me(State(routes): State<OAuthRoutes>, headers: HeaderMap) -> Json<serde_json::Value> {
     let oauth_configured = routes.credentials.flow().config().is_configured();
+    let models = models_payload(&routes);
     match extract_cookie_user(&headers, &routes.credentials) {
         Some(user) => Json(serde_json::json!({
             "authenticated": true,
             "oauth_configured": oauth_configured,
             "user": user,
+            "models": models,
         })),
         None => Json(serde_json::json!({
             "authenticated": false,
             "oauth_configured": oauth_configured,
+            "models": models,
         })),
+    }
+}
+
+/// Request payload for `POST /auth/models`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct UpdateModelsRequest {
+    /// Optional new ADK LLM model identifier.
+    pub model: Option<String>,
+    /// Optional new Veo video model identifier.
+    pub video_model: Option<String>,
+    /// Optional new image generation model identifier.
+    pub image_model: Option<String>,
+}
+
+/// Returns the active LLM, video, and image models alongside their preset lists.
+async fn get_models(State(routes): State<OAuthRoutes>) -> Json<serde_json::Value> {
+    Json(models_payload(&routes))
+}
+
+/// Updates the active LLM, video, and/or image models at runtime.
+async fn update_models(
+    State(routes): State<OAuthRoutes>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateModelsRequest>,
+) -> Response {
+    if routes.credentials.flow().config().is_configured()
+        && extract_cookie_user(&headers, &routes.credentials).is_none()
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "Authentication required" })),
+        )
+            .into_response();
+    }
+
+    match routes.credentials.model_controller().update_models(
+        body.model.as_deref(),
+        body.video_model.as_deref(),
+        body.image_model.as_deref(),
+    ) {
+        Ok(_) => Json(models_payload(&routes)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -595,6 +658,7 @@ pub fn oauth_router(routes: OAuthRoutes) -> Router {
         .route("/auth/login", get(auth_login))
         .route("/auth/me", get(auth_me))
         .route("/auth/logout", post(auth_logout))
+        .route("/auth/models", get(get_models).post(update_models))
         .route("/app", get(|| async { Redirect::to("/app/") }))
         .route("/app/", get(studio_index))
         .route("/app/app.css", get(studio_css))
@@ -638,7 +702,7 @@ fn launcher(runtime: &AgentRuntime) -> Launcher {
         .with_compaction(runtime.compaction_config())
         .with_context_cache(
             runtime.context_cache_config(),
-            runtime.model.clone() as Arc<dyn CacheCapable>,
+            runtime.models.clone() as Arc<dyn CacheCapable>,
         )
 }
 
@@ -964,7 +1028,45 @@ mod tests {
         assert!(scrubbed[0]["state"].get(CREDENTIALS_STATE_KEY).is_none());
         assert_eq!(scrubbed[0]["state"]["visible"], "ok");
 
-        // 6. `/oauth2/events` SSE stream closes immediately on `notify_shutdown()`.
+        // 6. `/auth/models` allows authenticated updates to agent, image, and video models.
+        let unauth_models = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/auth/models")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"model":"gemini-4-argon"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth_models.status(), StatusCode::UNAUTHORIZED);
+
+        let update_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/auth/models")
+                    .header(header::COOKIE, format!("{USER_COOKIE_NAME}={cookie_val}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gemini-4-argon","image_model":"imagen-4.0-generate-001","video_model":"veo-3.1-generate-001"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let updated_models: serde_json::Value =
+            serde_json::from_slice(&to_bytes(update_resp.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(updated_models["model"], "gemini-4-argon");
+        assert_eq!(updated_models["image_model"], "imagen-4.0-generate-001");
+        assert_eq!(updated_models["video_model"], "veo-3.1-generate-001");
+
+        // 7. `/oauth2/events` SSE stream closes immediately on `notify_shutdown()`.
         let resp = app
             .oneshot(
                 Request::builder()

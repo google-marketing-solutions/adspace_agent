@@ -7,6 +7,7 @@ use adk_rust::{AdkError, Part, Result, Tool, ToolContext};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use crate::config::{ModelController, SimpleModelController};
 use crate::genai::{GenAiClient, GeneratedMedia};
 
 /// Builds a Python-compatible error payload.
@@ -41,7 +42,7 @@ async fn save_media_artifact(
 /// Asks a question about a YouTube video.
 pub struct GetInfoAboutYoutubeVideoTool {
     client: GenAiClient,
-    model: String,
+    models: Arc<dyn ModelController>,
 }
 
 #[async_trait]
@@ -97,10 +98,11 @@ impl Tool for GetInfoAboutYoutubeVideoTool {
         if video_id.is_empty() {
             return Err(AdkError::tool("youtube_video_id is required"));
         }
+        let model = self.models.active_models().model;
         Ok(
             match self
                 .client
-                .ask_youtube_video(&self.model, &video_id, &prompt)
+                .ask_youtube_video(&model, &video_id, &prompt)
                 .await
             {
                 Ok(text) => json!({ "status": "SUCCESS", "response": text }),
@@ -113,7 +115,7 @@ impl Tool for GetInfoAboutYoutubeVideoTool {
 /// Generates a video with Veo and stores it as an artifact.
 pub struct GenerateVideoTool {
     client: GenAiClient,
-    model: String,
+    models: Arc<dyn ModelController>,
 }
 
 #[async_trait]
@@ -147,7 +149,8 @@ impl Tool for GenerateVideoTool {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let media = match self.client.generate_video(&self.model, &prompt).await {
+        let video_model = self.models.active_models().video_model;
+        let media = match self.client.generate_video(&video_model, &prompt).await {
             Ok(media) => media,
             Err(e) => return Ok(error_response(format!("{e:#}"))),
         };
@@ -164,7 +167,7 @@ impl Tool for GenerateVideoTool {
 /// Generates an image and stores it as an artifact.
 pub struct GenerateImageTool {
     client: GenAiClient,
-    model: String,
+    models: Arc<dyn ModelController>,
 }
 
 #[async_trait]
@@ -198,7 +201,8 @@ impl Tool for GenerateImageTool {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let media = match self.client.generate_image(&self.model, &prompt).await {
+        let image_model = self.models.active_models().image_model;
+        let media = match self.client.generate_image(&image_model, &prompt).await {
             Ok(media) => media,
             Err(e) => return Ok(error_response(format!("{e:#}"))),
         };
@@ -231,21 +235,29 @@ pub fn google_genai_toolset(
     video_model: impl Into<String>,
     image_model: impl Into<String>,
 ) -> BasicToolset {
+    let controller: Arc<dyn ModelController> =
+        Arc::new(SimpleModelController::new(model, video_model, image_model));
+    google_genai_toolset_with_controller(client, controller)
+}
+
+/// Builds the Google GenAI toolset backed by a dynamic [`ModelController`] so
+/// model changes made in the Studio settings take effect immediately.
+pub fn google_genai_toolset_with_controller(
+    client: GenAiClient,
+    models: Arc<dyn ModelController>,
+) -> BasicToolset {
     BasicToolset::new(
         "google_genai",
         vec![
             Arc::new(GetInfoAboutYoutubeVideoTool {
                 client: client.clone(),
-                model: model.into(),
+                models: models.clone(),
             }),
             Arc::new(GenerateVideoTool {
                 client: client.clone(),
-                model: video_model.into(),
+                models: models.clone(),
             }),
-            Arc::new(GenerateImageTool {
-                client,
-                model: image_model.into(),
-            }),
+            Arc::new(GenerateImageTool { client, models }),
         ],
     )
 }

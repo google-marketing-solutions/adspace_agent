@@ -417,7 +417,9 @@ select:focus-visible {
 }
 
 .settings-popover {
-  width: 315px;
+  width: 330px;
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
 }
 
 .popover-section {
@@ -483,7 +485,9 @@ select:focus-visible {
   color: var(--text-secondary);
 }
 
-.settings-inputs input {
+.settings-inputs input,
+.settings-inputs select {
+  width: 100%;
   padding: 5px 8px;
   border-radius: 6px;
   border: 1px solid var(--border-default);
@@ -491,6 +495,10 @@ select:focus-visible {
   color: var(--text-primary);
   font-family: var(--mono);
   font-size: 11.5px;
+}
+
+.custom-model-input {
+  margin-top: 3px;
 }
 
 .popover-footer {

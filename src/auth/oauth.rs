@@ -578,6 +578,9 @@ pub struct SessionCredentialManager {
     /// `/oauth2/callback` persisting to `SessionService` and the in-flight
     /// `ToolContext::session()` snapshot of the currently running turn).
     live_tokens: Mutex<HashMap<SessionRef, OAuthToken>>,
+    /// Runtime model controller allowing the Studio UI to inspect and switch
+    /// the active LLM, video, and image models.
+    models: RwLock<Arc<dyn crate::config::ModelController>>,
 }
 
 impl std::fmt::Debug for SessionCredentialManager {
@@ -606,7 +609,21 @@ impl SessionCredentialManager {
             pending: Mutex::new(HashMap::new()),
             acks: Mutex::new(HashMap::new()),
             live_tokens: Mutex::new(HashMap::new()),
+            models: RwLock::new(Arc::new(crate::config::SimpleModelController::default())),
         }
+    }
+
+    /// Returns the runtime model controller attached to this credential manager.
+    pub fn model_controller(&self) -> Arc<dyn crate::config::ModelController> {
+        self.models
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Attaches a runtime model controller (e.g. [`crate::agent::RuntimeModelConfig`]).
+    pub fn set_model_controller(&self, controller: Arc<dyn crate::config::ModelController>) {
+        *self.models.write().unwrap_or_else(|e| e.into_inner()) = controller;
     }
 
     /// Enables in-flight waiting inside [`Self::access_token`] for up to

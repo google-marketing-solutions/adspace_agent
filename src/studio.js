@@ -25,6 +25,29 @@
     customerId: "adspace.studio.customerId",
     loginCustomerId: "adspace.studio.loginCustomerId",
     leftWidth: "adspace.studio.leftWidth",
+    model: "adspace.studio.model",
+    imageModel: "adspace.studio.imageModel",
+    videoModel: "adspace.studio.videoModel",
+  };
+
+  const DEFAULT_MODELS = {
+    model: "gemini-3.8-flash",
+    imageModel: "gemini-3.1-flash-image",
+    videoModel: "veo-3.1-fast-generate-001",
+  };
+
+  const PRESET_MODEL_OPTIONS = {
+    model: ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-argon"],
+    imageModel: [
+      "gemini-3.1-flash-image",
+      "imagen-4.0-generate-001",
+      "imagen-4.0-fast-generate-001",
+    ],
+    videoModel: [
+      "veo-3.1-fast-generate-001",
+      "veo-3.1-generate-001",
+      "veo-3.0-generate-001",
+    ],
   };
 
   const PALETTE = [
@@ -58,6 +81,9 @@
     autoScroll: localStorage.getItem(STORAGE_KEYS.autoScroll) === "true",
     customerId: localStorage.getItem(STORAGE_KEYS.customerId) || "",
     loginCustomerId: localStorage.getItem(STORAGE_KEYS.loginCustomerId) || "",
+    model: localStorage.getItem(STORAGE_KEYS.model) || DEFAULT_MODELS.model,
+    imageModel: localStorage.getItem(STORAGE_KEYS.imageModel) || DEFAULT_MODELS.imageModel,
+    videoModel: localStorage.getItem(STORAGE_KEYS.videoModel) || DEFAULT_MODELS.videoModel,
   };
 
   // DOM Elements
@@ -138,7 +164,64 @@
   // Settings & Theme Management
   // ---------------------------------------------------------------------------
 
-  const applyPreferences = ({ rerender = true } = {}) => {
+  const syncModelControl = (selectEl, customEl, presets, value, forceCustom = false) => {
+    if (!selectEl || !customEl) return;
+    const isPreset = !forceCustom && presets.includes(value);
+    if (isPreset) {
+      selectEl.value = value;
+      customEl.classList.add("hidden");
+      customEl.value = value;
+    } else {
+      selectEl.value = "__custom__";
+      customEl.classList.remove("hidden");
+      if (document.activeElement !== customEl) {
+        customEl.value = value;
+      }
+    }
+  };
+
+  const syncAllModelControls = () => {
+    syncModelControl(
+      $("setting-model-select"),
+      $("setting-model-custom"),
+      PRESET_MODEL_OPTIONS.model,
+      prefs.model
+    );
+    syncModelControl(
+      $("setting-image-model-select"),
+      $("setting-image-model-custom"),
+      PRESET_MODEL_OPTIONS.imageModel,
+      prefs.imageModel
+    );
+    syncModelControl(
+      $("setting-video-model-select"),
+      $("setting-video-model-custom"),
+      PRESET_MODEL_OPTIONS.videoModel,
+      prefs.videoModel
+    );
+  };
+
+  const pushModelsToServer = async () => {
+    try {
+      const resp = await fetch("/auth/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: prefs.model,
+          image_model: prefs.imageModel,
+          video_model: prefs.videoModel,
+        }),
+      });
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        if (errData.error) showError(`Could not update model: ${errData.error}`);
+      }
+    } catch {
+      /* ignore offline / unauthenticated state */
+    }
+  };
+
+  const applyPreferences = ({ rerender = true, syncModels = true } = {}) => {
     if (prefs.theme === "light" || prefs.theme === "dark") {
       document.documentElement.setAttribute("data-theme", prefs.theme);
     } else {
@@ -150,6 +233,9 @@
     localStorage.setItem(STORAGE_KEYS.autoScroll, String(prefs.autoScroll));
     localStorage.setItem(STORAGE_KEYS.customerId, prefs.customerId);
     localStorage.setItem(STORAGE_KEYS.loginCustomerId, prefs.loginCustomerId);
+    localStorage.setItem(STORAGE_KEYS.model, prefs.model);
+    localStorage.setItem(STORAGE_KEYS.imageModel, prefs.imageModel);
+    localStorage.setItem(STORAGE_KEYS.videoModel, prefs.videoModel);
 
     document.querySelectorAll("#theme-segmented button").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.themeChoice === prefs.theme);
@@ -161,13 +247,14 @@
     $("setting-autoscroll").checked = prefs.autoScroll;
     $("setting-customer-id").value = prefs.customerId;
     $("setting-login-customer-id").value = prefs.loginCustomerId;
+    if (syncModels) {
+      syncAllModelControls();
+    }
 
-    const ids = [];
+    const ids = [prefs.model];
     if (prefs.customerId) ids.push(`CID: ${prefs.customerId}`);
     if (prefs.loginCustomerId) ids.push(`MCC: ${prefs.loginCustomerId}`);
-    composerContextHint.textContent = ids.length
-      ? `Defaults: ${ids.join(" · ")} · Enter to send`
-      : "Enter to send · Shift+Enter for new line";
+    composerContextHint.textContent = `${ids.join(" · ")} · Enter to send`;
 
     if (rerender) {
       renderTranscript();
@@ -345,6 +432,26 @@
 
         setAvatarImage($("user-avatar-img"), $("user-avatar-fallback"), currentUser);
         setAvatarImage($("menu-avatar-img"), $("menu-avatar-fallback"), currentUser);
+
+        if (data.models) {
+          if (!localStorage.getItem(STORAGE_KEYS.model) && data.models.model) {
+            prefs.model = data.models.model;
+          }
+          if (!localStorage.getItem(STORAGE_KEYS.imageModel) && data.models.image_model) {
+            prefs.imageModel = data.models.image_model;
+          }
+          if (!localStorage.getItem(STORAGE_KEYS.videoModel) && data.models.video_model) {
+            prefs.videoModel = data.models.video_model;
+          }
+          applyPreferences({ rerender: false });
+          if (
+            data.models.model !== prefs.model ||
+            data.models.image_model !== prefs.imageModel ||
+            data.models.video_model !== prefs.videoModel
+          ) {
+            await pushModelsToServer();
+          }
+        }
 
         await loadUserSessions();
       } catch (err) {
@@ -3052,9 +3159,67 @@
   });
 
   $("setting-login-customer-id").addEventListener("input", (e) => {
+    prefs.customerId = $("setting-customer-id").value.replace(/\D/g, "");
     prefs.loginCustomerId = e.target.value.replace(/\D/g, "");
     applyPreferences({ rerender: false });
   });
+
+  const bindModelPicker = (prefKey, selectId, customId, defaultVal) => {
+    const selectEl = $(selectId);
+    const customEl = $(customId);
+    if (!selectEl || !customEl) return;
+
+    selectEl.addEventListener("change", () => {
+      if (selectEl.value === "__custom__") {
+        customEl.classList.remove("hidden");
+        customEl.value = prefs[prefKey] || defaultVal;
+        customEl.focus();
+        customEl.select();
+      } else {
+        customEl.classList.add("hidden");
+        prefs[prefKey] = selectEl.value;
+        applyPreferences({ rerender: false });
+        pushModelsToServer();
+      }
+    });
+
+    const commitCustom = () => {
+      const cleaned = customEl.value.trim();
+      if (!cleaned) {
+        customEl.value = prefs[prefKey] || defaultVal;
+        return;
+      }
+      if (cleaned !== prefs[prefKey]) {
+        prefs[prefKey] = cleaned;
+        applyPreferences({ rerender: false, syncModels: false });
+        pushModelsToServer();
+      }
+    };
+
+    customEl.addEventListener("change", commitCustom);
+    customEl.addEventListener("blur", commitCustom);
+    customEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        commitCustom();
+        customEl.blur();
+      }
+    });
+  };
+
+  bindModelPicker("model", "setting-model-select", "setting-model-custom", DEFAULT_MODELS.model);
+  bindModelPicker(
+    "imageModel",
+    "setting-image-model-select",
+    "setting-image-model-custom",
+    DEFAULT_MODELS.imageModel
+  );
+  bindModelPicker(
+    "videoModel",
+    "setting-video-model-select",
+    "setting-video-model-custom",
+    DEFAULT_MODELS.videoModel
+  );
 
   // Split-Pane Resizer
   let isResizing = false;

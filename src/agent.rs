@@ -24,8 +24,9 @@ use crate::auth::{
     AdcTokenProvider, GoogleOAuthFlow, OAuthClientConfig, SessionCredentialManager, SessionRef,
 };
 use crate::config::{
-    self, APP_NAME, DISPLAY_VIDEO_360_TOOL_FILTER, DRIVE_TOOL_FILTER, GOOGLE_ADS_API_VERSION,
-    STORAGE_TOOL_FILTER, Settings, YOUTUBE_TOOL_FILTER,
+    self, APP_NAME, ActiveModels, DISPLAY_VIDEO_360_TOOL_FILTER, DRIVE_TOOL_FILTER,
+    GOOGLE_ADS_API_VERSION, ModelController, STORAGE_TOOL_FILTER, Settings, SimpleModelController,
+    YOUTUBE_TOOL_FILTER, validate_model_name,
 };
 use crate::gcs::GcsClient;
 use crate::genai::GenAiClient;
@@ -34,7 +35,7 @@ use crate::services;
 use crate::tools::cm360_trafficking::{Cm360Services, Cm360TraffickingToolset};
 use crate::tools::data_analysis::{PythonExecutorKind, data_analysis_toolset};
 use crate::tools::gemini_builtins::{GeminiBuiltinTool, gemini_builtin_toolset};
-use crate::tools::genai::google_genai_toolset;
+use crate::tools::genai::google_genai_toolset_with_controller;
 use crate::tools::lazy::{EnableToolsetsTool, LazyToolset, LazyToolsetEntry};
 use crate::tools::skills::{SkillSources, SkillsToolset};
 use crate::tools::ui::ui_toolset;
@@ -64,14 +65,201 @@ use `render_chart` (bar/line/area/pie), `render_table` (with `sortable: true` an
 followed by a concise written takeaway (never dump raw component JSON in text). Use `render_form` when collecting structured \
 campaign parameters or missing IDs, and `render_confirm` / `render_card` before executing write/trafficking actions.";
 
+fn intern_model_name(name: &str) -> &'static str {
+    static INTERNED: std::sync::LazyLock<Mutex<HashSet<&'static str>>> =
+        std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+    let mut set = INTERNED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&existing) = set.get(name) {
+        return existing;
+    }
+    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    set.insert(leaked);
+    leaked
+}
+
+type LlmFactory = Box<
+    dyn Fn(&str) -> anyhow::Result<(Arc<dyn adk_rust::Llm>, Option<Arc<dyn CacheCapable>>)>
+        + Send
+        + Sync,
+>;
+
+/// Hot-swappable model configuration implementing [`adk_rust::Llm`],
+/// [`CacheCapable`], and [`ModelController`].
+pub struct RuntimeModelConfig {
+    schema_source: Arc<dyn adk_rust::Llm>,
+    llm_name: std::sync::RwLock<&'static str>,
+    llm: std::sync::RwLock<Arc<dyn adk_rust::Llm>>,
+    cache_capable: std::sync::RwLock<Option<Arc<dyn CacheCapable>>>,
+    video_model: std::sync::RwLock<String>,
+    image_model: std::sync::RwLock<String>,
+    factory: LlmFactory,
+}
+
+impl RuntimeModelConfig {
+    /// Creates a dynamic model configuration backed by [`GeminiModel::from_env`].
+    pub fn from_gemini(
+        initial: Arc<GeminiModel>,
+        video_model: impl Into<String>,
+        image_model: impl Into<String>,
+    ) -> Self {
+        let initial_name = intern_model_name(adk_rust::Llm::name(initial.as_ref()));
+        let llm: Arc<dyn adk_rust::Llm> = initial.clone();
+        let cache: Arc<dyn CacheCapable> = initial;
+        Self {
+            schema_source: llm.clone(),
+            llm_name: std::sync::RwLock::new(initial_name),
+            llm: std::sync::RwLock::new(llm),
+            cache_capable: std::sync::RwLock::new(Some(cache)),
+            video_model: std::sync::RwLock::new(video_model.into()),
+            image_model: std::sync::RwLock::new(image_model.into()),
+            factory: Box::new(|model_name| {
+                let built = Arc::new(
+                    GeminiModel::from_env(model_name).map_err(|e| anyhow::anyhow!("{e}"))?,
+                );
+                Ok((
+                    built.clone() as Arc<dyn adk_rust::Llm>,
+                    Some(built as Arc<dyn CacheCapable>),
+                ))
+            }),
+        }
+    }
+}
+
+impl ModelController for RuntimeModelConfig {
+    fn active_models(&self) -> ActiveModels {
+        ActiveModels {
+            model: (*self.llm_name.read().unwrap_or_else(|e| e.into_inner())).to_string(),
+            video_model: self
+                .video_model
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            image_model: self
+                .image_model
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        }
+    }
+
+    fn update_models(
+        &self,
+        model: Option<&str>,
+        video_model: Option<&str>,
+        image_model: Option<&str>,
+    ) -> anyhow::Result<ActiveModels> {
+        let validated_model = model.map(validate_model_name).transpose()?;
+        let validated_video = video_model.map(validate_model_name).transpose()?;
+        let validated_image = image_model.map(validate_model_name).transpose()?;
+
+        if let Some(new_model) = validated_model {
+            let current = *self.llm_name.read().unwrap_or_else(|e| e.into_inner());
+            if new_model != current {
+                let (new_llm, new_cache) = (self.factory)(&new_model)?;
+                *self.llm.write().unwrap_or_else(|e| e.into_inner()) = new_llm;
+                *self
+                    .cache_capable
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner()) = new_cache;
+                *self.llm_name.write().unwrap_or_else(|e| e.into_inner()) =
+                    intern_model_name(&new_model);
+                tracing::info!("Switched active agent LLM model to {new_model}");
+            }
+        }
+        if let Some(new_video) = validated_video {
+            let mut guard = self.video_model.write().unwrap_or_else(|e| e.into_inner());
+            if *guard != new_video {
+                tracing::info!("Switched active video model to {new_video}");
+                *guard = new_video;
+            }
+        }
+        if let Some(new_image) = validated_image {
+            let mut guard = self.image_model.write().unwrap_or_else(|e| e.into_inner());
+            if *guard != new_image {
+                tracing::info!("Switched active image model to {new_image}");
+                *guard = new_image;
+            }
+        }
+        Ok(self.active_models())
+    }
+}
+
+#[async_trait]
+impl adk_rust::Llm for RuntimeModelConfig {
+    fn name(&self) -> &str {
+        *self.llm_name.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn schema_adapter(&self) -> &dyn adk_rust::SchemaAdapter {
+        self.schema_source.schema_adapter()
+    }
+
+    fn uses_interactions_api(&self) -> bool {
+        self.llm
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .uses_interactions_api()
+    }
+
+    async fn generate_content(
+        &self,
+        mut req: adk_rust::LlmRequest,
+        stream: bool,
+    ) -> AdkResult<adk_rust::LlmResponseStream> {
+        let active = self.llm.read().unwrap_or_else(|e| e.into_inner()).clone();
+        req.model = active.name().to_string();
+        active.generate_content(req, stream).await
+    }
+}
+
+#[async_trait]
+impl CacheCapable for RuntimeModelConfig {
+    async fn create_cache(
+        &self,
+        system_instruction: &str,
+        tools: &std::collections::HashMap<String, serde_json::Value>,
+        ttl_seconds: u32,
+    ) -> AdkResult<String> {
+        let active = self
+            .cache_capable
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match active {
+            Some(cache) => {
+                cache
+                    .create_cache(system_instruction, tools, ttl_seconds)
+                    .await
+            }
+            None => Err(adk_rust::AdkError::model(
+                "Active model does not support context caching",
+            )),
+        }
+    }
+
+    async fn delete_cache(&self, name: &str) -> AdkResult<()> {
+        let active = self
+            .cache_capable
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match active {
+            Some(cache) => cache.delete_cache(name).await,
+            None => Ok(()),
+        }
+    }
+}
+
 /// Everything needed to run the agent (console, server or Agent Engine).
 pub struct AgentRuntime {
     /// Resolved settings.
     pub settings: Settings,
     /// Root agent (LLM agent wrapped with memory persistence).
     pub agent: Arc<dyn Agent>,
-    /// Gemini model (also used for compaction summaries and context caching).
+    /// Initial Gemini model.
     pub model: Arc<GeminiModel>,
+    /// Hot-swappable model controller (LLM, video, and image models).
+    pub models: Arc<RuntimeModelConfig>,
     /// Session-bound Google credentials (OAuth client + state signing).
     pub credentials: Arc<SessionCredentialManager>,
     /// Session service.
@@ -89,7 +277,7 @@ impl AgentRuntime {
         EventsCompactionConfig {
             compaction_interval: c.compaction_interval.min(u32::MAX as u64) as u32,
             overlap_size: c.overlap_size.min(u32::MAX as u64) as u32,
-            summarizer: Arc::new(LlmEventSummarizer::new(self.model.clone())),
+            summarizer: Arc::new(LlmEventSummarizer::new(self.models.clone())),
         }
     }
 
@@ -122,7 +310,7 @@ impl AgentRuntime {
         .with_compaction(self.compaction_config())
         .with_context_cache(
             self.context_cache_config(),
-            self.model.clone() as Arc<dyn CacheCapable>,
+            self.models.clone() as Arc<dyn CacheCapable>,
         )
     }
 }
@@ -228,7 +416,13 @@ pub fn build_credential_manager(settings: &Settings) -> Arc<SessionCredentialMan
         client_secret: settings.client_secret.clone(),
         ..OAuthClientConfig::from_env()
     };
-    Arc::new(SessionCredentialManager::new(GoogleOAuthFlow::new(config)))
+    let manager = Arc::new(SessionCredentialManager::new(GoogleOAuthFlow::new(config)));
+    manager.set_model_controller(Arc::new(SimpleModelController::new(
+        settings.model.clone(),
+        settings.video_model.clone(),
+        settings.image_model.clone(),
+    )));
+    manager
 }
 
 /// Builds the Discovery-based Google API toolset configs for the enabled
@@ -591,11 +785,9 @@ pub async fn create_agent(
 
     if settings.is_toolset_enabled("google_genai") {
         match GenAiClient::from_settings(settings) {
-            Ok(client) => toolsets.push(Arc::new(google_genai_toolset(
+            Ok(client) => toolsets.push(Arc::new(google_genai_toolset_with_controller(
                 client,
-                settings.model.clone(),
-                settings.video_model.clone(),
-                settings.image_model.clone(),
+                credentials.model_controller(),
             ))),
             Err(e) => tracing::warn!("Google GenAI toolset disabled: {e:#}"),
         }
@@ -643,13 +835,19 @@ pub fn build_model(settings: &Settings) -> anyhow::Result<Arc<GeminiModel>> {
 pub async fn build_runtime() -> anyhow::Result<AgentRuntime> {
     let settings = Settings::from_env()?;
     let model = build_model(&settings)?;
+    let models = Arc::new(RuntimeModelConfig::from_gemini(
+        model.clone(),
+        settings.video_model.clone(),
+        settings.image_model.clone(),
+    ));
     let credentials = build_credential_manager(&settings);
+    credentials.set_model_controller(models.clone());
     let session_service = services::build_session_service().await?;
     let artifact_service = services::build_artifact_service()?;
     let memory_service = services::build_memory_service()?;
     let agent = create_agent(
         &settings,
-        model.clone() as Arc<dyn adk_rust::Llm>,
+        models.clone() as Arc<dyn adk_rust::Llm>,
         credentials.clone(),
         memory_service.clone(),
     )
@@ -658,6 +856,7 @@ pub async fn build_runtime() -> anyhow::Result<AgentRuntime> {
         settings,
         agent,
         model,
+        models,
         credentials,
         session_service,
         artifact_service,

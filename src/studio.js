@@ -2769,7 +2769,7 @@
       triggerPulseClass(el, "counter-tick");
     }
 
-    const duration = options.duration ?? 360;
+    const duration = options.duration ?? 640;
     const nowInit = performance.now();
 
     if (el._counterRaf) {
@@ -2784,14 +2784,22 @@
     el._counterStartTime = nowInit;
     el._counterLastFrameTime = null;
 
+    // Ease-out with a gentle spring overshoot (easeOutBack) so numbers
+    // rush quickly toward the target, slightly overshoot, and settle softly.
+    const easeOutBounceSpring = (t) => {
+      const c1 = 1.28;
+      const c3 = c1 + 1;
+      return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+    };
+
     const step = (now) => {
       el._counterLastFrameTime = now;
       const startVal = el._counterStartValue ?? 0;
       const endVal = el._counterTarget ?? 0;
       const elapsed = Math.max(0, now - (el._counterStartTime ?? now));
       const t = Math.min(1, elapsed / duration);
-      const eased = 1 - Math.pow(1 - t, 3);
-      const current = startVal + (endVal - startVal) * eased;
+      const eased = easeOutBounceSpring(t);
+      const current = Math.max(0, startVal + (endVal - startVal) * eased);
       el._counterValue = t >= 1 ? endVal : current;
       const fmt = el._counterFormatFn || formatter;
       el.textContent = fmt(el._counterValue);

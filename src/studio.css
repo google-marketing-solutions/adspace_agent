@@ -864,20 +864,29 @@ select:focus-visible {
 }
 
 .usage-pill.usage-pill-bump {
-  animation: usagePillPulse 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+  animation: usagePillPulse 0.64s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 @keyframes usagePillPulse {
   0% {
+    transform: translateY(0) scale(1);
     border-color: var(--border-default);
     box-shadow: 0 0 0 0 transparent;
   }
-  35% {
+  28% {
+    transform: translateY(-1.5px) scale(1.035);
     border-color: var(--accent-primary);
     background: var(--accent-wash);
-    box-shadow: 0 0 0 3px var(--ring);
+    box-shadow: 0 3px 10px -2px var(--ring), 0 0 0 3px var(--ring);
+  }
+  58% {
+    transform: translateY(0.6px) scale(0.99);
+  }
+  80% {
+    transform: translateY(-0.4px) scale(1.008);
   }
   100% {
+    transform: translateY(0) scale(1);
     border-color: var(--border-default);
     box-shadow: 0 0 0 0 transparent;
   }
@@ -887,9 +896,15 @@ select:focus-visible {
   0% {
     transform: translateY(0) scale(1);
   }
-  35% {
-    transform: translateY(-1px) scale(1.04);
+  28% {
+    transform: translateY(-3px) scale(1.085);
     color: var(--accent-primary);
+  }
+  56% {
+    transform: translateY(1.2px) scale(0.97);
+  }
+  78% {
+    transform: translateY(-0.8px) scale(1.02);
   }
   100% {
     transform: translateY(0) scale(1);
@@ -899,7 +914,9 @@ select:focus-visible {
 .counter-tick {
   display: inline-block;
   font-variant-numeric: tabular-nums;
-  animation: counterTick 0.48s cubic-bezier(0.22, 1, 0.36, 1);
+  transform-origin: center center;
+  will-change: transform;
+  animation: counterTick 0.62s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .usage-pill:hover {

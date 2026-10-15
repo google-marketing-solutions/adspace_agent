@@ -839,7 +839,7 @@ select:focus-visible {
   margin-top: 2px;
   display: grid;
   place-items: center;
-  border-radius: 8px;
+  border-radius: 50%;
   background: var(--accent-wash);
   border: 1px solid color-mix(in srgb, var(--accent-primary) 35%, var(--border-default));
   color: var(--accent-primary);
@@ -847,10 +847,6 @@ select:focus-visible {
   font-weight: 750;
   overflow: hidden;
   box-shadow: var(--shadow-sm);
-}
-
-.avatar-user {
-  border-radius: 50%;
 }
 
 .avatar img {

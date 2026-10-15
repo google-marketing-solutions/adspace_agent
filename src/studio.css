@@ -859,6 +859,16 @@ select:focus-visible {
   object-fit: cover;
 }
 
+.avatar svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .streaming-tag {
   padding: 6px 13px 0;
   color: var(--accent-primary);

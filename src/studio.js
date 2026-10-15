@@ -2229,17 +2229,26 @@
       const avatar = document.createElement("span");
       avatar.className = `avatar ${isUser ? "avatar-user" : "avatar-agent"}`;
       avatar.title = authorLabel;
-      if (isUser && currentUser?.picture) {
-        const img = document.createElement("img");
-        img.src = currentUser.picture;
-        img.alt = authorLabel;
-        img.referrerPolicy = "no-referrer";
-        img.onerror = () => {
+      if (isUser) {
+        if (currentUser?.picture) {
+          const img = document.createElement("img");
+          img.src = currentUser.picture;
+          img.alt = authorLabel;
+          img.referrerPolicy = "no-referrer";
+          img.onerror = () => {
+            avatar.textContent = initialsOf(authorLabel);
+          };
+          avatar.appendChild(img);
+        } else {
           avatar.textContent = initialsOf(authorLabel);
-        };
-        avatar.appendChild(img);
+        }
       } else {
-        avatar.textContent = isUser ? initialsOf(authorLabel) : "A";
+        avatar.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="4" y="8" width="16" height="12" rx="4"></rect>
+          <path d="M12 3v5M9.5 3h5M2 13v2M22 13v2M9.5 17h5"></path>
+          <circle cx="9.5" cy="13" r="1.35" fill="currentColor" stroke="none"></circle>
+          <circle cx="14.5" cy="13" r="1.35" fill="currentColor" stroke="none"></circle>
+        </svg>`;
       }
 
       const article = document.createElement("article");

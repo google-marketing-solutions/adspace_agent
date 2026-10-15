@@ -47,9 +47,14 @@
         <div id="session-controls" class="session-picker hidden">
           <label for="session-select">Session</label>
           <select id="session-select" aria-label="Select chat session"></select>
-          <button id="new-session-btn" type="button" class="primary-button" title="Start a new chat session">
+          <button
+            id="new-session-btn"
+            type="button"
+            class="button button--primary primary-button"
+            title="Start a new chat session"
+          >
             <span class="google-symbols" aria-hidden="true">add</span>
-            <span>New Session</span>
+            <span class="button__label">New Session</span>
           </button>
         </div>
 
@@ -521,7 +526,12 @@
                 data-lpignore="true"
                 data-form-type="other"
               ></textarea>
-              <button id="send-btn" type="button" class="send-button" aria-label="Send message">
+              <button
+                id="send-btn"
+                type="button"
+                class="button button--primary send-button"
+                aria-label="Send message"
+              >
                 <span id="send-icon" class="google-symbols" aria-hidden="true">arrow_upward</span>
               </button>
             </div>

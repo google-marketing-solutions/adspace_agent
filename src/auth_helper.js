@@ -41,6 +41,18 @@
     for (const [k, v] of Object.entries(props)) el.style[k] = v;
   };
 
+  // Prevent `/ui/`'s 4-second session poll (`useEffect([events])`) from yanking
+  // `.transcript` to the bottom via `C.current.scrollTo({ top: scrollHeight })`.
+  const origScrollTo = Element.prototype.scrollTo;
+  if (typeof origScrollTo === "function") {
+    Element.prototype.scrollTo = function (...args) {
+      if (this && this.classList && this.classList.contains("transcript")) {
+        return;
+      }
+      return origScrollTo.apply(this, args);
+    };
+  }
+
   const svgEl = (tag, attrs = {}) => {
     const el = document.createElementNS(SVG_NS, tag);
     for (const [k, v] of Object.entries(attrs)) {

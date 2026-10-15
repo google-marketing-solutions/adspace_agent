@@ -439,6 +439,7 @@ mod tests {
         assert!(AUTH_HELPER_JS.contains("const CHANNEL = \"adspace:oauth\""));
         assert!(AUTH_HELPER_JS.contains("adk-ui-surface"));
         assert!(AUTH_HELPER_JS.contains("extractUiResponse"));
+        assert!(AUTH_HELPER_JS.contains("Element.prototype.scrollTo"));
         // Must match the text `resume_message` produces.
         let marker = "Google access has been granted for this chat";
         assert!(AUTH_HELPER_JS.contains(marker));

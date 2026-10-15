@@ -568,6 +568,8 @@ pub struct SessionCredentialManager {
     system_browser_fallback: AtomicBool,
     /// Broadcast channel for real-time `/oauth2/events` SSE notifications.
     ui_events: broadcast::Sender<OAuthUiEvent>,
+    /// Signals open `/oauth2/events` SSE streams to close when the server shuts down.
+    shutdown: watch::Sender<bool>,
     /// In-flight authorizations keyed by session.
     pending: Mutex<HashMap<SessionRef, PendingSessionAuth>>,
     /// Popup-open acknowledgments keyed by signed `state`.
@@ -593,12 +595,14 @@ impl SessionCredentialManager {
         hasher.update(b"adspace-agent/oauth-state:");
         hasher.update(flow.config.client_secret.as_bytes());
         let (ui_events, _) = broadcast::channel(64);
+        let (shutdown, _) = watch::channel(false);
         Self {
             flow,
             state_key: hasher.finalize().into(),
             wait_timeout: RwLock::new(None),
             system_browser_fallback: AtomicBool::new(false),
             ui_events,
+            shutdown,
             pending: Mutex::new(HashMap::new()),
             acks: Mutex::new(HashMap::new()),
             live_tokens: Mutex::new(HashMap::new()),
@@ -619,6 +623,16 @@ impl SessionCredentialManager {
     /// Subscribes to real-time UI authorization events (`/oauth2/events`).
     pub fn subscribe_events(&self) -> broadcast::Receiver<OAuthUiEvent> {
         self.ui_events.subscribe()
+    }
+
+    /// Subscribes to the server shutdown signal so long-lived SSE streams can exit immediately.
+    pub fn subscribe_shutdown(&self) -> watch::Receiver<bool> {
+        self.shutdown.subscribe()
+    }
+
+    /// Signals all open `/oauth2/events` SSE streams to close immediately.
+    pub fn notify_shutdown(&self) {
+        let _ = self.shutdown.send(true);
     }
 
     /// Records whether the web UI succeeded in opening the popup for `state`.

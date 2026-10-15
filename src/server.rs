@@ -166,12 +166,20 @@ async fn oauth_events(
     State(routes): State<OAuthRoutes>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let rx = routes.credentials.subscribe_events();
-    let stream = futures::stream::unfold(rx, |mut rx| async move {
+    let shutdown = routes.credentials.subscribe_shutdown();
+    let stream = futures::stream::unfold((rx, shutdown), |(mut rx, mut shutdown)| async move {
+        if *shutdown.borrow() {
+            return None;
+        }
         loop {
-            match rx.recv().await {
+            let next = tokio::select! {
+                _ = shutdown.changed() => None,
+                res = rx.recv() => Some(res),
+            };
+            match next? {
                 Ok(event) => {
                     if let Ok(json) = serde_json::to_string(&event) {
-                        return Some((Ok(SseEvent::default().data(json)), rx));
+                        return Some((Ok(SseEvent::default().data(json)), (rx, shutdown)));
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -537,9 +545,26 @@ pub async fn serve(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Resu
         "AdSpace Agent listening on http://{host}:{port}  (studio: http://{host}:{port}/app/  ·  dev UI: http://{host}:{port}/ui/)"
     );
     runtime.log_redirect_uri();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+
+    let credentials = runtime.credentials.clone();
+    let mut graceful_rx = credentials.subscribe_shutdown();
+    let mut force_rx = credentials.subscribe_shutdown();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        credentials.notify_shutdown();
+    });
+
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        let _ = graceful_rx.wait_for(|&v| v).await;
+    });
+
+    tokio::select! {
+        res = server => res?,
+        _ = async move {
+            let _ = force_rx.wait_for(|&v| v).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        } => {}
+    }
     Ok(())
 }
 
@@ -749,5 +774,26 @@ mod tests {
             serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
         assert_eq!(body["authenticated"], true);
         assert_eq!(body["user"]["email"], "nate@example.com");
+
+        // 4. `/oauth2/events` SSE stream closes immediately on `notify_shutdown()`.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(AUTH_EVENTS_PATH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        credentials.notify_shutdown();
+        let bytes = tokio::time::timeout(
+            Duration::from_millis(200),
+            to_bytes(resp.into_body(), usize::MAX),
+        )
+        .await
+        .expect("SSE stream must close immediately on shutdown")
+        .unwrap();
+        assert!(bytes.is_empty());
     }
 }

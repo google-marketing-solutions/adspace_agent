@@ -3604,7 +3604,7 @@
         avatar.textContent = initialsOf(authorLabel);
       }
     } else {
-      avatar.innerHTML = `<span class="google-symbols filled" aria-hidden="true">spark</span>`;
+      avatar.innerHTML = `<span class="google-symbols filled" aria-hidden="true">smart_toy</span>`;
     }
     return avatar;
   };

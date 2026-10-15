@@ -110,15 +110,15 @@ const STUDIO_CSS: &str = include_str!("studio.css");
 const STUDIO_JS: &str = include_str!("studio.js");
 /// Custom AdSpace Agent Interactive Canvas WebGL stage shader (`/app/stage.js`).
 const STUDIO_STAGE_JS: &str = include_str!("stage.js");
-/// Inline Gemini spark SVG favicon served at `/favicon.svg` and `/favicon.ico`.
-const STUDIO_FAVICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\">\
-<defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"32\" y2=\"32\" gradientUnits=\"userSpaceOnUse\">\
+/// Inline robot SVG favicon served at `/favicon.svg` and `/favicon.ico`.
+const STUDIO_FAVICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 -960 960 960\">\
+<defs><linearGradient id=\"g\" x1=\"120\" y1=\"-840\" x2=\"840\" y2=\"-120\" gradientUnits=\"userSpaceOnUse\">\
 <stop offset=\"0%\" stop-color=\"#1a73e8\"/>\
 <stop offset=\"40%\" stop-color=\"#5b6cf9\"/>\
 <stop offset=\"75%\" stop-color=\"#9b72cb\"/>\
 <stop offset=\"100%\" stop-color=\"#d96570\"/>\
 </linearGradient></defs>\
-<path fill=\"url(#g)\" d=\"M16 2C16.6 10.1 21.9 15.4 30 16C21.9 16.6 16.6 21.9 16 30C15.4 21.9 10.1 16.6 2 16C10.1 15.4 15.4 10.1 16 2Z\"/>\
+<path fill=\"url(#g)\" d=\"M409.5-510.59q20.5-20.59 20.5-49.5t-20.59-49.41q-20.59-20.5-49.5-20.5t-49.41 20.59q-20.5 20.59-20.5 49.5t20.59 49.41q20.59 20.5 49.5 20.5t49.41-20.59Zm240 0q20.5-20.59 20.5-49.5t-20.59-49.41q-20.59-20.5-49.5-20.5t-49.41 20.59q-20.5 20.59-20.5 49.5t20.59 49.41q20.59 20.5 49.5 20.5t49.41-20.59ZM350-120v-170h100v170H350Zm160 0v-170h100v170H510Zm-330 0q-24.75 0-42.37-17.63Q120-155.25 120-180v-420q0-100 70-170t170-70h240q100 0 170 70t70 170v420q0 24.75-17.62 42.37Q804.75-120 780-120H670v-170q0-24.75-17.62-42.38Q634.75-350 610-350H350q-24.75 0-42.37 17.62Q290-314.75 290-290v170H180Z\"/>\
 </svg>";
 
 /// Body of `POST /oauth2/ack`.
@@ -323,7 +323,7 @@ async fn studio_stage_js() -> Response {
         .into_response()
 }
 
-/// Serves the Gemini spark SVG favicon (`/favicon.svg` and `/favicon.ico`).
+/// Serves the robot SVG favicon (`/favicon.svg` and `/favicon.ico`).
 async fn studio_favicon() -> Response {
     (
         [

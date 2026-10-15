@@ -1876,8 +1876,15 @@ select:focus-visible {
 }
 
 .send-button.stop-button {
-  background: var(--accent-warning);
+  background: #000000;
+  color: #ffffff;
+  border: 1px solid var(--border-strong);
   box-shadow: none;
+}
+
+.send-button.stop-button:hover {
+  background: #1a1f2e;
+  box-shadow: var(--shadow-sm);
 }
 
 .composer-hint {

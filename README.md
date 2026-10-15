@@ -132,7 +132,7 @@ characters), so the existing `*_TOOL_FILTER` lists work unchanged.
 | `campaign_manager_360` (additionally) | `parse_sheet_tool` / `traffic_campaigns_in_cm360_tool` (`src/tools/cm360_trafficking`). The trafficking workflow instructions ship with the toolset itself — no separate skill is needed. |
 | `bigquery` | adk-rust `BigQueryToolset` (Application Default Credentials, read-only by default; `BIGQUERY_READ_ONLY=false` to allow DML) |
 | `google_genai` | `get_info_about_youtube_video` and `generate_image` through adk-rust's Gemini client (Imagen via `:predict`), `generate_video` (Veo long-running operation) — results are saved as session artifacts |
-| always on | Python execution (see below), `list_user_files`, adk-rust's built-in `load_artifacts` and `preload_memory`, adk-rust's progressive skills (`list_skills`, `load_skill`, `load_skill_resource`) plus `reload_skills` |
+| always on | Python execution (see below), `list_user_files`, adk-rust's built-in `load_artifacts` and `preload_memory`, adk-rust's progressive skills (`list_skills`, `load_skill`, `load_skill_resource`) plus `reload_skills`, and `adk-ui` generative UI tools (`render_chart`, `render_table`, `render_layout`, `render_card`, `render_form`, `render_confirm`, `render_modal`, `render_alert`, `render_progress`, `render_toast`) rendered live inside `/ui/` |
 | Gemini built-ins (`GEMINI_BUILTIN_TOOLS`) | `google_search`, `url_context`, `google_maps` by default (`none` disables). These run server-side inside Gemini, as does the default `gemini_code_execution`. |
 
 ### Python data analysis

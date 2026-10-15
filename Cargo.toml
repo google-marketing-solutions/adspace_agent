@@ -39,6 +39,7 @@ adk-rust = { version = "2.3.0", default-features = false, features = [
 axum = "0.8"
 adk-session = { version = "2.3.0", features = ["sqlite"] }
 adk-gemini = { version = "2.3.0", features = ["vertex"] }
+adk-ui = { version = "2.2.0", features = ["adk-core"] }
 
 anyhow = "1.0"
 async-trait = "0.1"

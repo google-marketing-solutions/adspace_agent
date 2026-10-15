@@ -6,4 +6,5 @@ pub mod gemini_builtins;
 pub mod genai;
 pub mod lazy;
 pub mod skills;
+pub mod ui;
 pub mod utilities;

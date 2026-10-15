@@ -37,6 +37,7 @@ use crate::tools::gemini_builtins::{GeminiBuiltinTool, gemini_builtin_toolset};
 use crate::tools::genai::google_genai_toolset;
 use crate::tools::lazy::{EnableToolsetsTool, LazyToolset, LazyToolsetEntry};
 use crate::tools::skills::{SkillSources, SkillsToolset};
+use crate::tools::ui::ui_toolset;
 use crate::tools::utilities::utilities_toolset;
 
 /// Agent description (shown in the UI and A2A card).
@@ -56,7 +57,12 @@ AUTHORIZATION: Google API tools act on behalf of the signed-in user. When a tool
 the `auth_url` as a clickable link, ask them to complete the authorization, and retry the same tool call after they confirm. \
 FILES: files the user uploads are saved as session artifacts; use `list_user_files` to see them and `load_artifacts` to read them. \
 RESEARCH: use `google_search` for current information from the web, `url_context` to read pages the user links to, and \
-`google_maps` for places, routes and local context.";
+`google_maps` for places, routes and local context. \
+UI RENDERING (`render_*` tools): when presenting campaign metrics, rankings, time-series trends, or multi-metric comparisons, \
+use `render_chart` (bar/line/area/pie), `render_table` (with `sortable: true` and `striped: true`), or `render_layout` \
+(combining `stats`, `chart`, and `table` sections into an executive dashboard) so the user gets an interactive visual in the UI, \
+followed by a concise written takeaway (never dump raw component JSON in text). Use `render_form` when collecting structured \
+campaign parameters or missing IDs, and `render_confirm` / `render_card` before executing write/trafficking actions.";
 
 /// Everything needed to run the agent (console, server or Agent Engine).
 pub struct AgentRuntime {
@@ -533,6 +539,7 @@ pub async fn create_agent(
         Err(e) => tracing::warn!("Gemini built-in tools disabled: {e:#}"),
     }
     toolsets.push(Arc::new(utilities_toolset()));
+    toolsets.push(Arc::new(ui_toolset()));
     toolsets.push(Arc::new(
         SkillsToolset::load(SkillSources::from_env(gcs_client.clone())).await,
     ));

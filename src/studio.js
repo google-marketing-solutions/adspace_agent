@@ -3879,6 +3879,9 @@
             const parsed = JSON.parse(dataStr);
             const ev = parsed.event ?? parsed;
             if (ev && typeof ev === "object") {
+              if (ev.error_message || ev.errorMessage) {
+                showError(`Agent error: ${ev.error_message || ev.errorMessage}`);
+              }
               const existingIdx = currentEvents.findIndex((e) => e.id && e.id === ev.id);
               if (existingIdx !== -1) {
                 currentEvents[existingIdx] = mergeStreamedEvent(currentEvents[existingIdx], ev);

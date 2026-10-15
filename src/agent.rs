@@ -209,6 +209,7 @@ impl adk_rust::Llm for RuntimeModelConfig {
         let active = self.llm.read().unwrap_or_else(|e| e.into_inner()).clone();
         let model_name = active.name().to_string();
         req.model = model_name.clone();
+        req.contents = normalize_gemini_request_contents(req.contents);
         let usage_span = adk_rust::telemetry::llm_generate_span("gemini", &model_name, stream);
         let response_stream = active.generate_content(req, stream).await?;
         Ok(track_stream_token_usage(
@@ -217,6 +218,159 @@ impl adk_rust::Llm for RuntimeModelConfig {
             model_name,
         ))
     }
+}
+
+/// Normalizes [`adk_rust::LlmRequest::contents`] before sending to Gemini:
+///
+/// 1. **Coalesces consecutive `role == "function"` turns:** `LlmAgent` emits each
+///    tool result as a separate `Content { role: "function", parts: [1 part] }`,
+///    which `adk-model` would otherwise serialize as separate `Content` turns.
+///    Gemini's `StreamGenerateContent` preprocessor requires all `functionResponse`
+///    parts for a multi-tool `model` turn to be grouped into a single `Content`
+///    turn with `function_response` count equal to `function_call` count.
+/// 2. **Strips empty `Part::Text` from multi-part `model` turns:** removes trailing
+///    `Part::Text { text: "" }` parts accumulated from final streaming chunks.
+/// 3. **Aligns `FunctionResponse` parts 1-to-1 with `FunctionCall` parts:** matches
+///    responses by `id` (or `name`) in exact `FunctionCall` order, synthesizes an
+///    interrupted placeholder if a previous turn was aborted mid-batch, and drops
+///    orphaned `function` turns.
+/// 4. **Prevents back-to-back `function` -> `user` turns:** if a historical turn
+///    failed after tool execution before the model responded and is now followed by
+///    a `user` turn, inserts a synthetic `model` acknowledgment turn so Gemini
+///    never sees consecutive `Role::User` turns after a `FunctionResponse`.
+fn normalize_gemini_request_contents(contents: Vec<adk_rust::Content>) -> Vec<adk_rust::Content> {
+    // Pass 1: Coalesce consecutive `role == "function"` Content entries.
+    let mut coalesced: Vec<adk_rust::Content> = Vec::with_capacity(contents.len());
+    for content in contents {
+        if content.role == "function"
+            && let Some(last) = coalesced.last_mut()
+            && last.role == "function"
+        {
+            last.parts.extend(content.parts);
+            continue;
+        }
+        coalesced.push(content);
+    }
+
+    // Pass 2: Enforce 1-to-1 FunctionCall <-> FunctionResponse pairing and turn alternation.
+    let mut normalized: Vec<adk_rust::Content> = Vec::with_capacity(coalesced.len());
+    let mut idx = 0;
+    while idx < coalesced.len() {
+        let mut current = coalesced[idx].clone();
+        idx += 1;
+
+        if current.role == "model" {
+            if current.parts.len() > 1 {
+                current
+                    .parts
+                    .retain(|p| !matches!(p, adk_rust::Part::Text { text } if text.is_empty()));
+            }
+
+            let fc_calls: Vec<(String, Option<String>)> = current
+                .parts
+                .iter()
+                .filter_map(|p| {
+                    if let adk_rust::Part::FunctionCall { name, id, .. } = p {
+                        Some((name.clone(), id.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if current.parts.is_empty() {
+                continue;
+            }
+            normalized.push(current);
+
+            if !fc_calls.is_empty() {
+                let mut avail_responses: Vec<adk_rust::Part> =
+                    if idx < coalesced.len() && coalesced[idx].role == "function" {
+                        let fn_content = coalesced[idx].clone();
+                        idx += 1;
+                        fn_content
+                            .parts
+                            .into_iter()
+                            .filter(|p| matches!(p, adk_rust::Part::FunctionResponse { .. }))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                let mut matched_parts = Vec::with_capacity(fc_calls.len());
+                for (fc_name, fc_id) in fc_calls {
+                    let pos = avail_responses
+                        .iter()
+                        .position(|p| {
+                            if let adk_rust::Part::FunctionResponse { id: resp_id, .. } = p {
+                                fc_id.is_some() && resp_id == &fc_id
+                            } else {
+                                false
+                            }
+                        })
+                        .or_else(|| {
+                            avail_responses.iter().position(|p| {
+                                if let adk_rust::Part::FunctionResponse {
+                                    function_response, ..
+                                } = p
+                                {
+                                    function_response.name == fc_name
+                                } else {
+                                    false
+                                }
+                            })
+                        });
+
+                    if let Some(found_idx) = pos {
+                        let mut part = avail_responses.remove(found_idx);
+                        if let adk_rust::Part::FunctionResponse { ref mut id, .. } = part
+                            && id.is_none()
+                        {
+                            *id = fc_id;
+                        }
+                        matched_parts.push(part);
+                    } else {
+                        matched_parts.push(adk_rust::Part::FunctionResponse {
+                            function_response: adk_rust::FunctionResponseData::new(
+                                fc_name,
+                                serde_json::json!({
+                                    "status": "interrupted",
+                                    "message": "Tool execution did not complete in the previous turn."
+                                }),
+                            ),
+                            id: fc_id,
+                            annotations: None,
+                        });
+                    }
+                }
+
+                normalized.push(adk_rust::Content {
+                    role: "function".to_string(),
+                    parts: matched_parts,
+                });
+
+                // If the turn immediately following the function responses is not a `model`
+                // turn (e.g. a `user` turn after a previous failed invocation), insert a
+                // synthetic `model` turn so `function` (sent as Role::User) is not directly
+                // followed by another `user` turn.
+                if idx < coalesced.len() && coalesced[idx].role != "model" {
+                    normalized.push(adk_rust::Content {
+                        role: "model".to_string(),
+                        parts: vec![adk_rust::Part::Text {
+                            text: "Tool results received.".to_string(),
+                        }],
+                    });
+                }
+            }
+        } else if current.role == "function" {
+            // Drop orphaned function responses not preceded by a model FunctionCall turn.
+            continue;
+        } else {
+            normalized.push(current);
+        }
+    }
+
+    normalized
 }
 
 /// Counts character lengths of text/tool parts and thinking parts in `content`.
@@ -1270,5 +1424,112 @@ mod tests {
         assert!(u2.candidates_token_count > u1.candidates_token_count);
         assert_eq!(u2.total_token_count, 1_000 + u2.candidates_token_count);
         assert!(u2.cost.unwrap_or(0.0) > u1.cost.unwrap_or(0.0));
+    }
+
+    #[test]
+    fn normalize_gemini_contents_coalesces_parallel_function_responses() {
+        let contents = vec![
+            Content::new("user").with_text("Build a dashboard"),
+            Content {
+                role: "model".to_string(),
+                parts: vec![
+                    Part::FunctionCall {
+                        name: "list_skills".to_string(),
+                        args: serde_json::json!({}),
+                        id: Some("call_1".to_string()),
+                        thought_signature: Some("sig1".to_string()),
+                    },
+                    Part::FunctionCall {
+                        name: "list_user_files".to_string(),
+                        args: serde_json::json!({}),
+                        id: Some("call_2".to_string()),
+                        thought_signature: None,
+                    },
+                    Part::Text {
+                        text: String::new(),
+                    },
+                ],
+            },
+            Content {
+                role: "function".to_string(),
+                parts: vec![Part::FunctionResponse {
+                    function_response: adk_rust::FunctionResponseData::new(
+                        "list_skills",
+                        serde_json::json!([]),
+                    ),
+                    id: Some("call_1".to_string()),
+                    annotations: None,
+                }],
+            },
+            Content {
+                role: "function".to_string(),
+                parts: vec![Part::FunctionResponse {
+                    function_response: adk_rust::FunctionResponseData::new(
+                        "list_user_files",
+                        serde_json::json!("You have no saved artifacts."),
+                    ),
+                    id: Some("call_2".to_string()),
+                    annotations: None,
+                }],
+            },
+        ];
+
+        let normalized = normalize_gemini_request_contents(contents);
+        assert_eq!(normalized.len(), 3);
+        assert_eq!(normalized[0].role, "user");
+        assert_eq!(normalized[1].role, "model");
+        // Empty trailing Part::Text is stripped from the model FunctionCall turn.
+        assert_eq!(normalized[1].parts.len(), 2);
+        // Both FunctionResponse parts are coalesced into a single `function` turn.
+        assert_eq!(normalized[2].role, "function");
+        assert_eq!(normalized[2].parts.len(), 2);
+    }
+
+    #[test]
+    fn normalize_gemini_contents_heals_interrupted_tool_turn_before_user_message() {
+        let contents = vec![
+            Content::new("user").with_text("First prompt"),
+            Content {
+                role: "model".to_string(),
+                parts: vec![
+                    Part::FunctionCall {
+                        name: "list_skills".to_string(),
+                        args: serde_json::json!({}),
+                        id: Some("call_1".to_string()),
+                        thought_signature: None,
+                    },
+                    Part::FunctionCall {
+                        name: "list_user_files".to_string(),
+                        args: serde_json::json!({}),
+                        id: Some("call_2".to_string()),
+                        thought_signature: None,
+                    },
+                ],
+            },
+            Content {
+                role: "function".to_string(),
+                parts: vec![Part::FunctionResponse {
+                    function_response: adk_rust::FunctionResponseData::new(
+                        "list_skills",
+                        serde_json::json!([]),
+                    ),
+                    id: Some("call_1".to_string()),
+                    annotations: None,
+                }],
+            },
+            Content::new("user").with_text("Follow-up prompt after error"),
+        ];
+
+        let normalized = normalize_gemini_request_contents(contents);
+        assert_eq!(normalized.len(), 5);
+        assert_eq!(normalized[0].role, "user");
+        assert_eq!(normalized[1].role, "model");
+        assert_eq!(normalized[1].parts.len(), 2);
+        assert_eq!(normalized[2].role, "function");
+        // Missing second FunctionResponse is synthesized so count matches FunctionCall count.
+        assert_eq!(normalized[2].parts.len(), 2);
+        // Synthetic model turn separates the function response turn from the next user turn.
+        assert_eq!(normalized[3].role, "model");
+        assert_eq!(normalized[4].role, "user");
     }
 }

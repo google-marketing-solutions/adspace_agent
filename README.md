@@ -87,15 +87,20 @@ called on behalf of the signed-in user, and the credentials belong to the
 2. The first time a tool needs Google access it returns
    `status: "AUTH_REQUIRED"` with an authorization link that is bound to that
    session (the OAuth `state` parameter is a signed claim naming the session).
+   In `/ui/`, the browser helper (`/oauth2/helper.js`) detects the consent URL
+   and opens a centered Google authorization popup automatically (or presents a
+   floating **Authorize Google access** card in the bottom-right corner if the
+   browser blocked the popup).
 3. The user grants access; Google redirects to
-   `${PUBLIC_BASE_URL}/oauth2/callback`, which exchanges the code and writes
-   the tokens into the session's state (`CREDENTIALS_CACHE_KEY`, the same key
-   the Python agent used).
-4. The server then resumes that chat on its own (a user-role turn "Google
-   access has been granted … continue"), so there is no "done" step: the web
-   UI polls the session and shows the agent carrying on, and the tool reads
-   the token from the session state (refreshing it when expired). In console
-   mode the REPL only prints its own turns, so there you say "done".
+   `${PUBLIC_BASE_URL}/oauth2/callback`, which exchanges the code, writes the
+   tokens into the session's state (`CREDENTIALS_CACHE_KEY`, the same key the
+   Python agent used), notifies the `/ui/` tab over `BroadcastChannel` so it
+   dismisses the card and refreshes immediately, and closes the popup window.
+4. The server simultaneously resumes that chat on its own (a user-role turn
+   "Google access has been granted … continue"), so there is no "done" step:
+   the web UI shows the agent carrying on, and the tool reads the token from
+   the session state (refreshing it when expired). In console mode the REPL
+   only prints its own turns, so there you say "done".
 
 Add that redirect URI to the OAuth client in the Google Cloud Console.
 

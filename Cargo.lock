@@ -507,6 +507,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tower 0.5.3",
  "tracing",
  "url",
  "uuid",

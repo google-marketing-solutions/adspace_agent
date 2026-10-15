@@ -15,8 +15,11 @@ use adk_rust::server::shutdown_signal;
 use adk_rust::session::SessionService;
 use adk_rust::{CacheCapable, Launcher};
 use axum::Router;
-use axum::extract::{Query, State};
-use axum::response::Html;
+use axum::body::{Body, to_bytes};
+use axum::extract::{Query, Request, State};
+use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 
 use crate::agent::{AgentRuntime, TurnRunner};
@@ -80,13 +83,93 @@ fn spawn_resume(runner: Arc<TurnRunner>, session: SessionRef, token: &OAuthToken
     });
 }
 
-fn html_page(title: &str, body: &str) -> Html<String> {
+/// Path of the browser helper that turns auth links into a popup flow.
+pub const AUTH_HELPER_PATH: &str = "/oauth2/helper.js";
+/// The helper script (see the file for what it does in the UI).
+const AUTH_HELPER_JS: &str = include_str!("auth_helper.js");
+/// Tag injected into the web UI page.
+const AUTH_HELPER_TAG: &str = "<script src=\"/oauth2/helper.js\" defer></script>";
+
+/// Script run by the callback page: tells the chat tab how the authorization
+/// went — over a same-origin `BroadcastChannel`, because Google's sign-in
+/// pages set COOP `same-origin` and sever `window.opener` (kept as a second
+/// path) — and, on success, closes the popup.
+fn callback_script(status: &str) -> String {
+    format!(
+        "(function(){{var m={{type:\"adspace:oauth\",status:\"{status}\"}};\
+         try{{if(\"BroadcastChannel\" in window){{new BroadcastChannel(\"adspace:oauth\").postMessage(m);}}}}catch(e){{}}\
+         try{{if(window.opener&&!window.opener.closed){{window.opener.postMessage(m,location.origin);}}}}catch(e){{}}\
+         {}}})();",
+        if status == "ok" {
+            "setTimeout(function(){window.close();},1200);"
+        } else {
+            ""
+        }
+    )
+}
+
+fn html_page(title: &str, body: &str, status: &str) -> Html<String> {
     Html(format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title>\
          <style>body{{font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem;color:#202124}}\
          h1{{font-size:1.4rem}}code{{background:#f1f3f4;padding:.1rem .3rem;border-radius:4px}}</style></head>\
-         <body><h1>{title}</h1>{body}</body></html>"
+         <body><h1>{title}</h1>{body}<script>{}</script></body></html>",
+        callback_script(status)
     ))
+}
+
+/// Serves the browser helper.
+async fn auth_helper() -> Response {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/javascript; charset=utf-8"),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+        ],
+        AUTH_HELPER_JS,
+    )
+        .into_response()
+}
+
+/// Inserts the helper `<script>` tag before `</body>` (or at the end).
+pub fn inject_auth_helper_tag(html: &str) -> String {
+    match html.rfind("</body>").or_else(|| html.rfind("</BODY>")) {
+        Some(at) => format!("{}{AUTH_HELPER_TAG}{}", &html[..at], &html[at..]),
+        None => format!("{html}{AUTH_HELPER_TAG}"),
+    }
+}
+
+/// Middleware that injects the helper into the web UI's HTML page (and only
+/// there: assets and API responses pass through untouched).
+pub async fn inject_auth_helper(req: Request, next: Next) -> Response {
+    let is_ui_page = req.method() == Method::GET
+        && (req.uri().path() == "/ui" || req.uri().path().starts_with("/ui/"));
+    let response = next.run(req).await;
+    let is_html = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/html"));
+    if !is_ui_page || !is_html || !response.status().is_success() {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let bytes = match to_bytes(body, 8 * 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!("Could not read the web UI page to inject the auth helper: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let html = inject_auth_helper_tag(&String::from_utf8_lossy(&bytes));
+    parts.headers.remove(header::ETAG);
+    parts.headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&html.len().to_string()).expect("ascii length"),
+    );
+    Response::from_parts(parts, Body::from(html))
 }
 
 /// Handles the Google OAuth redirect: exchanges the code and stores the
@@ -101,12 +184,14 @@ pub async fn oauth_callback(
             &format!(
                 "<p>Google reported: <code>{error}</code>. Return to the chat and try again.</p>"
             ),
+            "error",
         );
     }
     let (Some(code), Some(state)) = (query.code, query.state) else {
         return html_page(
             "Authorization failed",
             "<p>Missing <code>code</code> or <code>state</code> parameter.</p>",
+            "error",
         );
     };
     let (session, token) = match routes
@@ -121,6 +206,7 @@ pub async fn oauth_callback(
                 &format!(
                     "<p>{e}</p><p>Return to the chat and ask the agent to start the authorization again.</p>"
                 ),
+                "error",
             );
         }
     };
@@ -134,12 +220,14 @@ pub async fn oauth_callback(
                 spawn_resume(runner.clone(), session, &token);
                 html_page(
                     "Authorization complete",
-                    "<p>Google access was granted to this chat session and the agent is continuing where it left off. You can close this window and return to the chat.</p>",
+                    "<p>Google access was granted to this chat session and the agent is continuing where it left off. This window closes by itself; otherwise you can close it and return to the chat.</p>",
+                    "ok",
                 )
             }
             None => html_page(
                 "Authorization complete",
                 "<p>Google access was granted to this chat session. You can close this window, return to the chat and tell the agent to continue.</p>",
+                "ok",
             ),
         },
         Err(e) => {
@@ -147,15 +235,17 @@ pub async fn oauth_callback(
             html_page(
                 "Authorization failed",
                 "<p>The chat session that requested access could not be found. Return to the chat and ask the agent to start the authorization again.</p>",
+                "error",
             )
         }
     }
 }
 
-/// Builds the router for the OAuth endpoints.
+/// Builds the router for the OAuth endpoints (callback + browser helper).
 pub fn oauth_router(routes: OAuthRoutes) -> Router {
     Router::new()
         .route(OAUTH_CALLBACK_PATH, get(oauth_callback))
+        .route(AUTH_HELPER_PATH, get(auth_helper))
         .with_state(routes)
 }
 
@@ -207,7 +297,8 @@ fn launcher(runtime: &AgentRuntime) -> Launcher {
 pub async fn serve(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Result<()> {
     let app = launcher(&runtime)
         .build_app()?
-        .merge(oauth_router(runtime.oauth_routes(true)));
+        .merge(oauth_router(runtime.oauth_routes(true)))
+        .layer(middleware::from_fn(inject_auth_helper));
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     tracing::info!(
         "AdSpace Agent listening on http://{host}:{port}  (web UI: http://{host}:{port}/ui/)"
@@ -246,4 +337,105 @@ pub async fn console(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Re
     }
     launcher(&runtime).run_console_directly().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helper_tag_goes_before_body_end_or_at_the_end() {
+        let page = "<html><body><div id=\"root\"></div></body></html>";
+        let injected = inject_auth_helper_tag(page);
+        assert_eq!(
+            injected,
+            format!("<html><body><div id=\"root\"></div>{AUTH_HELPER_TAG}</body></html>")
+        );
+        assert_eq!(
+            inject_auth_helper_tag("<p>no body tag</p>"),
+            format!("<p>no body tag</p>{AUTH_HELPER_TAG}")
+        );
+        // The tag loads the helper from our own origin (the UI's CSP is `script-src 'self'`).
+        assert!(AUTH_HELPER_TAG.contains(AUTH_HELPER_PATH));
+    }
+
+    #[test]
+    fn callback_script_reports_to_the_opener_and_closes_only_on_success() {
+        let ok = callback_script("ok");
+        assert!(ok.contains("new BroadcastChannel(\"adspace:oauth\").postMessage"));
+        assert!(ok.contains("window.opener.postMessage"));
+        assert!(ok.contains("status:\"ok\""));
+        assert!(ok.contains("window.close()"));
+        let error = callback_script("error");
+        assert!(error.contains("status:\"error\""));
+        assert!(!error.contains("window.close()"));
+    }
+
+    #[test]
+    fn helper_script_targets_google_auth_links_and_the_resume_turn() {
+        assert!(AUTH_HELPER_JS.contains("https://accounts.google.com/o/oauth2/"));
+        assert!(AUTH_HELPER_JS.contains("window.open("));
+        assert!(AUTH_HELPER_JS.contains("new BroadcastChannel(CHANNEL)"));
+        assert!(AUTH_HELPER_JS.contains("const CHANNEL = \"adspace:oauth\""));
+        // Must match the text `resume_message` produces.
+        let marker = "Google access has been granted for this chat";
+        assert!(AUTH_HELPER_JS.contains(marker));
+        let token = OAuthToken {
+            access_token: String::new(),
+            refresh_token: None,
+            expires_at: None,
+            scopes: vec![],
+        };
+        assert!(resume_message(&token).starts_with(marker));
+    }
+
+    #[tokio::test]
+    async fn middleware_injects_only_into_the_ui_html_page() {
+        use axum::routing::get;
+        use tower::ServiceExt as _;
+
+        let app = Router::new()
+            .route(
+                "/ui/",
+                get(|| async { Html("<html><body><div id=\"root\"></div></body></html>") }),
+            )
+            .route(
+                "/ui/assets/app.js",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "application/javascript")],
+                        "console.log(1)",
+                    )
+                }),
+            )
+            .route(
+                "/api/page",
+                get(|| async { Html("<html><body>api</body></html>") }),
+            )
+            .layer(middleware::from_fn(inject_auth_helper));
+
+        let get_body = |path: &'static str| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                let length = response
+                    .headers()
+                    .get(header::CONTENT_LENGTH)
+                    .map(|v| v.to_str().unwrap().parse::<usize>().unwrap());
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                (String::from_utf8(body.to_vec()).unwrap(), length)
+            }
+        };
+
+        let (page, length) = get_body("/ui/").await;
+        assert!(page.contains(AUTH_HELPER_TAG), "{page}");
+        assert_eq!(length, Some(page.len()));
+        let (asset, _) = get_body("/ui/assets/app.js").await;
+        assert_eq!(asset, "console.log(1)");
+        let (api, _) = get_body("/api/page").await;
+        assert!(!api.contains(AUTH_HELPER_TAG));
+    }
 }

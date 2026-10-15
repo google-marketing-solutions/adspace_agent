@@ -120,6 +120,10 @@
                     class="custom-model-input hidden"
                     placeholder="e.g. gemini-3.8-flash"
                     aria-label="Custom Agent Model"
+                    autocomplete="off"
+                    data-1p-ignore
+                    data-lpignore="true"
+                    data-form-type="other"
                   />
                 </label>
 
@@ -137,6 +141,10 @@
                     class="custom-model-input hidden"
                     placeholder="e.g. gemini-3.1-flash-image"
                     aria-label="Custom Image Model"
+                    autocomplete="off"
+                    data-1p-ignore
+                    data-lpignore="true"
+                    data-form-type="other"
                   />
                 </label>
 
@@ -154,6 +162,10 @@
                     class="custom-model-input hidden"
                     placeholder="e.g. veo-3.1-fast-generate-001"
                     aria-label="Custom Video Model"
+                    autocomplete="off"
+                    data-1p-ignore
+                    data-lpignore="true"
+                    data-form-type="other"
                   />
                 </label>
               </div>
@@ -194,6 +206,10 @@
                       min="0"
                       placeholder="0.75"
                       aria-label="Input price per 1M tokens in USD"
+                      autocomplete="off"
+                      data-1p-ignore
+                      data-lpignore="true"
+                      data-form-type="other"
                     />
                   </label>
                   <label>
@@ -205,6 +221,10 @@
                       min="0"
                       placeholder="0.075"
                       aria-label="Cached input price per 1M tokens in USD"
+                      autocomplete="off"
+                      data-1p-ignore
+                      data-lpignore="true"
+                      data-form-type="other"
                     />
                   </label>
                   <label>
@@ -216,6 +236,10 @@
                       min="0"
                       placeholder="3.75"
                       aria-label="Output price per 1M tokens in USD"
+                      autocomplete="off"
+                      data-1p-ignore
+                      data-lpignore="true"
+                      data-form-type="other"
                     />
                   </label>
                 </div>
@@ -227,11 +251,27 @@
               <div class="settings-inputs">
                 <label>
                   <span>Customer ID</span>
-                  <input id="setting-customer-id" type="text" placeholder="e.g. 1382274117" />
+                  <input
+                    id="setting-customer-id"
+                    type="text"
+                    placeholder="e.g. 1382274117"
+                    autocomplete="off"
+                    data-1p-ignore
+                    data-lpignore="true"
+                    data-form-type="other"
+                  />
                 </label>
                 <label>
                   <span>Login Customer ID (MCC)</span>
-                  <input id="setting-login-customer-id" type="text" placeholder="e.g. 8056520078" />
+                  <input
+                    id="setting-mcc-customer-id"
+                    type="text"
+                    placeholder="e.g. 8056520078"
+                    autocomplete="off"
+                    data-1p-ignore
+                    data-lpignore="true"
+                    data-form-type="other"
+                  />
                 </label>
               </div>
             </div>
@@ -476,6 +516,10 @@
                 rows="1"
                 placeholder="Message AdSpace Agent…"
                 aria-label="Message agent"
+                autocomplete="off"
+                data-1p-ignore
+                data-lpignore="true"
+                data-form-type="other"
               ></textarea>
               <button id="send-btn" type="button" class="send-button" aria-label="Send message">
                 <span id="send-icon" class="google-symbols" aria-hidden="true">arrow_upward</span>

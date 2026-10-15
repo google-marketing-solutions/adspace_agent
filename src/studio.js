@@ -287,7 +287,7 @@
     }
     $("setting-autoscroll").checked = prefs.autoScroll;
     $("setting-customer-id").value = prefs.customerId;
-    $("setting-login-customer-id").value = prefs.loginCustomerId;
+    $("setting-mcc-customer-id").value = prefs.loginCustomerId;
     if (syncModels) {
       syncAllModelControls();
     }
@@ -4202,7 +4202,7 @@
     applyPreferences({ rerender: false });
   });
 
-  $("setting-login-customer-id").addEventListener("input", (e) => {
+  $("setting-mcc-customer-id").addEventListener("input", (e) => {
     prefs.customerId = $("setting-customer-id").value.replace(/\D/g, "");
     prefs.loginCustomerId = e.target.value.replace(/\D/g, "");
     applyPreferences({ rerender: false });

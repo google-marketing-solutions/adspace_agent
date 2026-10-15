@@ -229,7 +229,15 @@
     }
   };
 
+  let lastOAuthCompletion = { status: null, at: 0 };
+
   const handleOAuthCompletion = async (status) => {
+    const now = Date.now();
+    if (lastOAuthCompletion.status === status && now - lastOAuthCompletion.at < 1500) {
+      return;
+    }
+    lastOAuthCompletion = { status, at: now };
+
     if (popup && !popup.closed) {
       try {
         popup.close();
@@ -2741,7 +2749,7 @@
         signal: abortController.signal,
         headers: {
           "Content-Type": "application/json",
-          "x-adk-ui-protocol": "adk_ui",
+          "x-adk-ui-protocol": "a2ui",
         },
         body: JSON.stringify({
           appName: APP_NAME,

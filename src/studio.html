@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AdSpace Agent</title>
+    <link rel="stylesheet" href="/app/app.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <!-- Top Navigation Bar -->
+      <header class="topbar">
+        <a class="brand" href="/app/">
+          <span class="brand-mark">A</span>
+          <span><b>AdSpace</b> Agent</span>
+        </a>
+        <span class="top-divider"></span>
+
+        <span id="status-pill" class="status status-ready">
+          <i></i>
+          <span id="status-text">ready</span>
+        </span>
+
+        <div id="session-controls" class="session-picker hidden">
+          <label for="session-select">Session</label>
+          <select id="session-select" aria-label="Select chat session"></select>
+          <button id="new-session-btn" type="button" class="primary-button" title="Start a new chat session">
+            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+            <span>New Session</span>
+          </button>
+        </div>
+
+        <div class="top-grow"></div>
+
+        <!-- Settings Menu -->
+        <div class="popover-anchor">
+          <button id="settings-btn" type="button" class="icon-button" aria-label="Workspace settings" title="Settings">
+            <svg viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
+
+          <div id="settings-menu" class="popover-card settings-popover hidden" role="dialog" aria-label="Workspace settings">
+            <div class="popover-section">
+              <div class="popover-label">Appearance</div>
+              <div class="segmented" id="theme-segmented">
+                <button type="button" data-theme-choice="system">System</button>
+                <button type="button" data-theme-choice="light">Light</button>
+                <button type="button" data-theme-choice="dark">Dark</button>
+              </div>
+            </div>
+
+            <div class="popover-section">
+              <div class="popover-label">Interactive UI Canvas Mode</div>
+              <div class="segmented" id="canvas-mode-segmented">
+                <button type="button" data-canvas-mode="stacked">All Cards</button>
+                <button type="button" data-canvas-mode="focused">Focused Tab</button>
+              </div>
+            </div>
+
+            <div class="popover-section">
+              <div class="popover-label">Conversation Preferences</div>
+              <label class="toggle-row">
+                <span>Show tool calls in chat</span>
+                <input id="setting-show-tools" type="checkbox" checked />
+              </label>
+              <label class="toggle-row">
+                <span>Auto-scroll chat on new messages</span>
+                <input id="setting-autoscroll" type="checkbox" />
+              </label>
+            </div>
+
+            <div class="popover-section">
+              <div class="popover-label">Default Google Ads Account (Optional)</div>
+              <div class="settings-inputs">
+                <label>
+                  <span>Customer ID</span>
+                  <input id="setting-customer-id" type="text" placeholder="e.g. 1382274117" />
+                </label>
+                <label>
+                  <span>Login Customer ID (MCC)</span>
+                  <input id="setting-login-customer-id" type="text" placeholder="e.g. 8056520078" />
+                </label>
+              </div>
+            </div>
+
+            <div class="popover-footer">
+              <a href="/ui/" target="_blank" rel="noreferrer" class="developer-link">
+                <span>Open ADK Developer Inspector (`/ui/`)</span>
+                <svg viewBox="0 0 24 24"><path d="M7 17L17 7M7 7h10v10" /></svg>
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <!-- Logged-In User Avatar & Menu -->
+        <div id="user-menu-anchor" class="popover-anchor hidden">
+          <button id="user-btn" type="button" class="user-pill" aria-label="Account menu">
+            <img id="user-avatar-img" class="user-avatar hidden" alt="" referrerpolicy="no-referrer" />
+            <span id="user-avatar-fallback" class="user-avatar-fallback">U</span>
+            <span id="user-name" class="user-pill-name">User</span>
+            <svg class="chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></svg>
+          </button>
+
+          <div id="user-menu" class="popover-card user-popover hidden" role="dialog" aria-label="Account menu">
+            <div class="user-profile-header">
+              <img id="menu-avatar-img" class="user-avatar-lg hidden" alt="" referrerpolicy="no-referrer" />
+              <span id="menu-avatar-fallback" class="user-avatar-lg-fallback">U</span>
+              <div class="user-profile-meta">
+                <strong id="menu-user-name">User</strong>
+                <span id="menu-user-email">user@example.com</span>
+              </div>
+            </div>
+            <div class="popover-section user-session-meta">
+              <div>
+                <span class="meta-key">User ID</span>
+                <code id="menu-user-id">—</code>
+              </div>
+              <div>
+                <span class="meta-key">Active Session</span>
+                <code id="menu-session-id">—</code>
+              </div>
+            </div>
+            <div class="popover-actions">
+              <button id="delete-session-btn" type="button" class="quiet-button full-width">
+                Clear Current Session
+              </button>
+              <button id="logout-btn" type="button" class="danger-button full-width">
+                <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" /></svg>
+                <span>Log out</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- Error / Notification Banner -->
+      <div id="error-banner" class="error-banner hidden" role="alert">
+        <strong>Notice</strong>
+        <span id="error-banner-text"></span>
+        <button id="error-banner-close" type="button" aria-label="Dismiss">&times;</button>
+      </div>
+
+      <!-- Google Sign-In Gate (shown when unauthenticated) -->
+      <main id="auth-gate" class="auth-gate hidden">
+        <div class="auth-card">
+          <div class="auth-brand-row">
+            <span class="brand-mark brand-mark-lg">A</span>
+            <div>
+              <div class="eyebrow">Google Marketing &amp; Analytics Workspace</div>
+              <h1>AdSpace Agent</h1>
+            </div>
+          </div>
+          <p class="auth-copy">
+            Sign in with your Google account to launch a personal workspace session tied to your identity.
+            Chat with the agent on the left and explore live, interactive <code>adk-ui</code> dashboards,
+            charts, sortable tables, and forms on the right.
+          </p>
+          <div class="auth-features">
+            <span>Least-Privilege OAuth 2.0</span>
+            <span>Session-Scoped Credentials</span>
+            <span>Interactive Generative UI</span>
+          </div>
+          <button id="google-login-btn" type="button" class="google-signin-button">
+            <svg class="google-g" viewBox="0 0 24 24">
+              <path fill="#4285F4" d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.56-5.17 3.56-8.82z"/>
+              <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96H1.29v3.09C3.26 21.3 7.31 24 12 24z"/>
+              <path fill="#FBBC05" d="M5.27 14.29c-.25-.72-.38-1.49-.38-2.29s.13-1.57.38-2.29V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.98-3.09z"/>
+              <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.98 3.09c.95-2.85 3.6-4.96 6.73-4.96z"/>
+            </svg>
+            <span>Sign in with Google</span>
+          </button>
+          <p id="auth-gate-hint" class="auth-hint"></p>
+        </div>
+      </main>
+
+      <!-- Main Split Workspace: Chat on Left, Interactive ADK-UI Canvas on Right -->
+      <main id="workspace" class="studio-workspace hidden">
+        <!-- Left Pane: Chat Interface -->
+        <section class="chat-pane" aria-label="Conversation">
+          <div class="pane-header">
+            <div>
+              <div class="eyebrow">Conversation</div>
+              <h2 id="chat-session-title">Session</h2>
+            </div>
+            <div class="pane-header-actions">
+              <button id="refresh-session-btn" type="button" class="quiet-button" title="Refresh session">
+                <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" /></svg>
+                <span>Refresh</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="chat-transcript" class="transcript" aria-live="polite"></div>
+
+          <div class="composer-wrap">
+            <div id="attachment-chips" class="attachment-chips hidden"></div>
+            <div class="composer">
+              <label class="attach-button" title="Attach file (CSV, image, PDF…)">
+                <input id="file-input" type="file" multiple />
+                <svg viewBox="0 0 24 24">
+                  <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                </svg>
+                <span class="sr-only">Attach file</span>
+              </label>
+              <textarea
+                id="chat-input"
+                rows="2"
+                placeholder="Message AdSpace Agent…"
+                aria-label="Message agent"
+              ></textarea>
+              <button id="send-btn" type="button" class="send-button" aria-label="Send message">
+                <svg id="send-icon" viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>
+              </button>
+            </div>
+            <div class="composer-hint">
+              <span id="composer-context-hint">Enter to send · Shift+Enter for new line</span>
+              <span id="composer-user-hint"></span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Resizable Split Divider -->
+        <div id="pane-resizer" class="pane-resizer" role="separator" aria-orientation="vertical" title="Drag to resize panes"></div>
+
+        <!-- Right Pane: Interactive ADK-UI Canvas -->
+        <section class="canvas-pane" aria-label="Interactive UI Canvas">
+          <div class="pane-header canvas-header">
+            <div>
+              <div class="eyebrow">Generative UI · adk-ui</div>
+              <h2>Interactive Canvas <small id="canvas-count-badge" class="count-badge">0</small></h2>
+            </div>
+            <div class="pane-header-actions">
+              <button id="export-ui-btn" type="button" class="quiet-button" title="Download active UI specification as JSON">
+                <span>Export JSON</span>
+              </button>
+              <button id="clear-ui-btn" type="button" class="quiet-button" title="Clear canvas">
+                <span>Clear</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="canvas-tabs" class="canvas-tabs hidden" role="tablist"></div>
+
+          <div id="canvas-body" class="canvas-body">
+            <div id="canvas-empty" class="canvas-empty">
+              <div class="empty-mark">✦</div>
+              <h3>Interactive UI Canvas</h3>
+              <p>
+                Charts, sortable tables, KPI dashboards, and two-way forms generated by
+                <code>render_layout</code>, <code>render_chart</code>, <code>render_table</code>, and
+                <code>render_form</code> appear here as interactive cards.
+              </p>
+              <div class="starter-grid">
+                <button
+                  type="button"
+                  class="starter-card"
+                  data-prompt="Build an executive dashboard for my top 10 Google Ads campaigns by impressions with KPI stat cards for total impressions, clicks, and CTR, a bar chart of top campaigns, and a sortable table."
+                >
+                  <span class="starter-tag">Dashboard · render_layout</span>
+                  <strong>Executive Campaign Performance</strong>
+                  <span>KPI stat tiles + grouped bar chart + sortable campaign table</span>
+                </button>
+                <button
+                  type="button"
+                  class="starter-card"
+                  data-prompt="Render a pie chart of impression share across my active Google Ads campaigns alongside a sortable table comparing impressions, clicks, and cost."
+                >
+                  <span class="starter-tag">Chart · render_chart</span>
+                  <strong>Impression Share Donut &amp; Breakdown</strong>
+                  <span>Interactive donut chart with percentage legend and metrics table</span>
+                </button>
+                <button
+                  type="button"
+                  class="starter-card"
+                  data-prompt="Render an interactive campaign brief form where I can choose a campaign name, objective, daily budget, start date, and channels so you can generate a media plan from my submission."
+                >
+                  <span class="starter-tag">Form · render_form</span>
+                  <strong>Interactive Campaign Brief Builder</strong>
+                  <span>Two-way form that submits your inputs straight back to the agent</span>
+                </button>
+                <button
+                  type="button"
+                  class="starter-card"
+                  data-prompt="Audit my active Google Ads campaigns for zero-click or low-CTR outliers, highlight findings with alert banners, and chart CTR across the top campaigns."
+                >
+                  <span class="starter-tag">Audit · render_alert + render_chart</span>
+                  <strong>Campaign Anomaly &amp; CTR Audit</strong>
+                  <span>Severity alert cards paired with comparative CTR visualizations</span>
+                </button>
+              </div>
+            </div>
+
+            <div id="canvas-surfaces" class="canvas-surfaces"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app/app.js" defer></script>
+  </body>
+</html>

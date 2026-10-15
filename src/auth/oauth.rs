@@ -43,11 +43,44 @@ pub const GOOGLE_AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/
 pub const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 /// Google's OAuth 2.0 revocation endpoint.
 pub const GOOGLE_REVOKE_ENDPOINT: &str = "https://oauth2.googleapis.com/revoke";
+/// Google OpenID Connect userinfo endpoint.
+pub const GOOGLE_USERINFO_ENDPOINT: &str = "https://openidconnect.googleapis.com/v1/userinfo";
 /// Path of the OAuth redirect handler served by the agent.
 pub const OAUTH_CALLBACK_PATH: &str = "/oauth2/callback";
+/// Sentinel `app_name` in [`SessionRef`] indicating a user Google Sign-In flow
+/// (rather than a tool scope authorization for an existing chat session).
+pub const LOGIN_SENTINEL_APP: &str = "__adspace_login__";
 /// Session-state key holding the session's Google credentials (same name the
 /// Python agent used).
 pub const CREDENTIALS_STATE_KEY: &str = "CREDENTIALS_CACHE_KEY";
+
+/// Signed-in Google user profile for the custom AdSpace Agent web interface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthenticatedUser {
+    /// Stable user identifier (Google email address when available, else `sub`).
+    pub id: String,
+    /// Google account email address.
+    pub email: String,
+    /// Display name.
+    pub name: String,
+    /// Profile avatar URL (`picture` claim from Google userinfo).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
+    /// Issued-at Unix timestamp.
+    pub iat: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleUserInfoResponse {
+    #[serde(default)]
+    sub: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    picture: Option<String>,
+}
 
 /// How long before expiry a token is treated as expired.
 const EXPIRY_SKEW: Duration = Duration::from_secs(60);
@@ -243,6 +276,59 @@ impl GoogleOAuthFlow {
             .append_pair("include_granted_scopes", "true")
             .append_pair("state", state);
         url.to_string()
+    }
+
+    /// Builds a Google Sign-In URL (`openid email profile`) using the same
+    /// registered redirect URI (`/oauth2/callback`).
+    pub fn login_authorization_url(&self, state: &str) -> String {
+        let mut url = url::Url::parse(&self.auth_endpoint).expect("valid auth endpoint");
+        url.query_pairs_mut()
+            .append_pair("client_id", &self.config.client_id)
+            .append_pair("redirect_uri", &self.config.redirect_uri)
+            .append_pair("response_type", "code")
+            .append_pair("scope", "openid email profile")
+            .append_pair("prompt", "select_account")
+            .append_pair("state", state);
+        url.to_string()
+    }
+
+    /// Fetches the user's Google profile (`sub`, `email`, `name`, `picture`)
+    /// from OpenID Connect userinfo using `access_token`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the userinfo request fails.
+    pub async fn fetch_user_info(&self, access_token: &str) -> anyhow::Result<AuthenticatedUser> {
+        let resp = self
+            .http
+            .get(GOOGLE_USERINFO_ENDPOINT)
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+        let status = resp.status();
+        let body = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("Google userinfo request failed ({status}): {body}");
+        }
+        let info: GoogleUserInfoResponse = serde_json::from_str(&body)?;
+        let email = if info.email.is_empty() {
+            info.sub.clone()
+        } else {
+            info.email
+        };
+        let id = email.clone();
+        let name = if info.name.is_empty() {
+            email.split('@').next().unwrap_or("User").to_string()
+        } else {
+            info.name
+        };
+        Ok(AuthenticatedUser {
+            id,
+            email,
+            name,
+            picture: info.picture.filter(|p| !p.is_empty()),
+            iat: Utc::now().timestamp(),
+        })
     }
 
     /// Exchanges an authorization code for tokens.
@@ -950,6 +1036,59 @@ impl SessionCredentialManager {
             return Err(invalid());
         }
         Ok(claims)
+    }
+
+    /// Starts a Google Sign-In flow (`openid email profile`), returning the
+    /// Google OAuth URL whose signed `state` carries [`LOGIN_SENTINEL_APP`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `CLIENT_ID` or `CLIENT_SECRET` is not configured.
+    pub fn begin_user_login(&self) -> anyhow::Result<String> {
+        if !self.flow.config.is_configured() {
+            anyhow::bail!(
+                "Google OAuth is not configured: set CLIENT_ID and CLIENT_SECRET in .env and restart the server."
+            );
+        }
+        let session = SessionRef {
+            app_name: LOGIN_SENTINEL_APP.to_string(),
+            user_id: "login".to_string(),
+            session_id: "login".to_string(),
+        };
+        let scopes = vec![
+            "openid".to_string(),
+            "email".to_string(),
+            "profile".to_string(),
+        ];
+        let state = self.sign_state(&session, &scopes);
+        Ok(self.flow.login_authorization_url(&state))
+    }
+
+    /// Signs `user` into a tamper-proof cookie value (`<payload>.<sig>`).
+    pub fn sign_user_cookie(&self, user: &AuthenticatedUser) -> String {
+        let payload = b64(&serde_json::to_vec(user).expect("user serializes"));
+        let mut mac = self.mac();
+        mac.update(b"user-cookie:");
+        mac.update(payload.as_bytes());
+        format!("{payload}.{}", b64(&mac.finalize().into_bytes()))
+    }
+
+    /// Verifies a signed user cookie value and returns the [`AuthenticatedUser`]
+    /// if valid and not older than 7 days.
+    pub fn verify_user_cookie(&self, value: &str) -> Option<AuthenticatedUser> {
+        let (payload, signature) = value.split_once('.')?;
+        let signature = unb64(signature).ok()?;
+        let mut mac = self.mac();
+        mac.update(b"user-cookie:");
+        mac.update(payload.as_bytes());
+        mac.verify_slice(&signature).ok()?;
+        let user: AuthenticatedUser = serde_json::from_slice(&unb64(payload).ok()?).ok()?;
+        let age = Utc::now().timestamp() - user.iat;
+        if (-60..=7 * 86_400).contains(&age) {
+            Some(user)
+        } else {
+            None
+        }
     }
 }
 

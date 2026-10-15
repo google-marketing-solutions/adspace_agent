@@ -2901,6 +2901,7 @@
 
     if (typeof overrideText !== "string") {
       chatInput.value = "";
+      syncComposerHeight();
     }
     attachments = [];
     renderAttachments();
@@ -2979,6 +2980,13 @@
     }
   };
 
+  const syncComposerHeight = () => {
+    chatInput.style.height = "36px";
+    const next = Math.min(160, Math.max(36, chatInput.scrollHeight));
+    chatInput.style.height = `${next}px`;
+  };
+
+  chatInput.addEventListener("input", syncComposerHeight);
   sendBtn.addEventListener("click", () => sendMessage());
   chatInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {

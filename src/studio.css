@@ -1058,12 +1058,12 @@ select:focus-visible {
 }
 
 .composer {
-  display: grid;
-  grid-template-columns: 32px 1fr 38px;
-  gap: 7px;
-  padding: 7px;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 6px 8px;
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--bg-secondary);
   box-shadow: var(--shadow-md);
 }
@@ -1074,26 +1074,42 @@ select:focus-visible {
 }
 
 .composer textarea {
+  flex: 1 1 auto;
   min-width: 0;
+  height: 36px;
+  min-height: 36px;
   max-height: 160px;
+  margin: 0;
+  padding: 8px 4px;
   resize: none;
   border: 0;
   outline: 0;
   background: transparent;
   color: var(--text-primary);
-  padding: 4px;
   font-size: 13.5px;
+  line-height: 20px;
+  display: block;
+}
+
+.composer textarea:focus,
+.composer textarea:focus-visible {
+  outline: none;
 }
 
 .attach-button {
-  width: 30px;
-  height: 30px;
-  align-self: end;
-  display: grid;
-  place-items: center;
-  border-radius: 6px;
+  position: relative;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  margin: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
   color: var(--text-muted);
   cursor: pointer;
+  transition: background 0.15s, color 0.15s;
 }
 
 .attach-button:hover {
@@ -1129,12 +1145,25 @@ select:focus-visible {
 }
 
 .send-button {
-  width: 38px;
-  height: 38px;
-  align-self: end;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  margin: 0;
+  padding: 0;
+  border-radius: 8px;
   border: 1px solid var(--accent-primary);
   background: var(--accent-primary);
   color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+
+.send-button svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
 }
 
 .send-button.stop-button {

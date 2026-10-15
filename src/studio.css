@@ -824,9 +824,49 @@ select:focus-visible {
   gap: 6px;
   font-size: 11px;
   font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
   white-space: nowrap;
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  transition: border-color 0.15s, background 0.15s, color 0.15s, box-shadow 0.25s;
+}
+
+.usage-pill.usage-pill-bump {
+  animation: usagePillPulse 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes usagePillPulse {
+  0% {
+    border-color: var(--border-default);
+    box-shadow: 0 0 0 0 transparent;
+  }
+  35% {
+    border-color: var(--accent-primary);
+    background: var(--accent-wash);
+    box-shadow: 0 0 0 3px var(--ring);
+  }
+  100% {
+    border-color: var(--border-default);
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@keyframes counterTick {
+  0% {
+    transform: translateY(0) scale(1);
+  }
+  35% {
+    transform: translateY(-1px) scale(1.04);
+    color: var(--accent-primary);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
+}
+
+.counter-tick {
+  display: inline-block;
+  font-variant-numeric: tabular-nums;
+  animation: counterTick 0.48s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .usage-pill:hover {
@@ -886,6 +926,7 @@ select:focus-visible {
 .usage-kpi-card strong {
   font-size: 15px;
   font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
   color: var(--text-primary);
 }
 
@@ -941,6 +982,7 @@ select:focus-visible {
   align-items: flex-end;
   gap: 1px;
   font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
 
@@ -1230,6 +1272,7 @@ select:focus-visible {
   justify-content: space-between;
   gap: 8px;
   font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
   font-size: 10.5px;
   color: var(--text-muted);
   background: color-mix(in srgb, var(--bg-primary) 50%, var(--surface-card));

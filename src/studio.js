@@ -2565,6 +2565,79 @@
     return `$${val.toFixed(2)}`;
   };
 
+  const prefersReducedMotion = () =>
+    Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
+
+  const triggerPulseClass = (el, className) => {
+    if (!el || prefersReducedMotion()) return;
+    el.classList.remove(className);
+    void el.offsetWidth;
+    el.classList.add(className);
+    el.addEventListener(
+      "animationend",
+      () => {
+        el.classList.remove(className);
+      },
+      { once: true }
+    );
+  };
+
+  const animateCounter = (el, nextValue, formatter, options = {}) => {
+    if (!el) return;
+    const target = Math.max(0, Number(nextValue) || 0);
+    const formatSig = options.formatSig ?? "";
+    if (el._counterTarget === target && el._counterFormatSig === formatSig) {
+      return;
+    }
+
+    const startValue =
+      typeof el._counterValue === "number" && Number.isFinite(el._counterValue)
+        ? el._counterValue
+        : 0;
+    const hadPreviousTarget = typeof el._counterTarget === "number";
+    el._counterTarget = target;
+    el._counterFormatSig = formatSig;
+
+    if (el._counterRaf) {
+      cancelAnimationFrame(el._counterRaf);
+      el._counterRaf = null;
+    }
+
+    if (
+      prefersReducedMotion() ||
+      target === 0 ||
+      Math.abs(target - startValue) < 1e-9
+    ) {
+      el._counterValue = target;
+      el.textContent = formatter(target);
+      return;
+    }
+
+    if (target > startValue && (hadPreviousTarget || options.pulseOnMount)) {
+      triggerPulseClass(el, "counter-tick");
+    }
+
+    const duration = options.duration ?? 520;
+    const startTime = performance.now();
+
+    const step = (now) => {
+      const elapsed = now - startTime;
+      const t = Math.min(1, Math.max(0, elapsed / duration));
+      const eased = 1 - Math.pow(1 - t, 3);
+      const current = startValue + (target - startValue) * eased;
+      el._counterValue = current;
+      el.textContent = formatter(t >= 1 ? target : current);
+      if (t < 1) {
+        el._counterRaf = requestAnimationFrame(step);
+      } else {
+        el._counterValue = target;
+        el._counterRaf = null;
+      }
+    };
+
+    el._counterRaf = requestAnimationFrame(step);
+  };
+
   const extractEventUsage = (ev) => {
     const u = ev?.usage_metadata || ev?.usageMetadata;
     if (!u || typeof u !== "object") return null;
@@ -2740,15 +2813,29 @@
       }
     }
 
-    if ($("session-usage-tokens")) {
-      $("session-usage-tokens").textContent = `${formatCompactTokens(s.totalTokens)} tok`;
+    if (sessionUsageBtn) {
+      const prevBtnTokens = sessionUsageBtn._lastSessionTokens;
+      if (
+        typeof prevBtnTokens === "number" &&
+        s.totalTokens > prevBtnTokens &&
+        showSession
+      ) {
+        triggerPulseClass(sessionUsageBtn, "usage-pill-bump");
+      }
+      sessionUsageBtn._lastSessionTokens = s.totalTokens;
     }
+
+    animateCounter(
+      $("session-usage-tokens"),
+      s.totalTokens,
+      (v) => `${formatCompactTokens(v)} tok`
+    );
     if ($("session-usage-sep")) {
       $("session-usage-sep").classList.toggle("hidden", !showCost);
     }
     if ($("session-usage-cost")) {
       $("session-usage-cost").classList.toggle("hidden", !showCost);
-      $("session-usage-cost").textContent = formatUsdShort(s.totalCost);
+      animateCounter($("session-usage-cost"), s.totalCost, formatUsdShort);
     }
     if (sessionUsageBtn) {
       const costSuffix = showCost ? ` · Est. ${formatUsdDetail(s.totalCost)}` : "";
@@ -2759,68 +2846,70 @@
       }`;
     }
 
-    if ($("usage-total-tokens")) {
-      $("usage-total-tokens").textContent = formatExactInt(s.totalTokens);
-    }
-    if ($("usage-llm-calls")) {
-      $("usage-llm-calls").textContent = `${s.llmCalls} LLM call${s.llmCalls === 1 ? "" : "s"}`;
-    }
+    animateCounter($("usage-total-tokens"), s.totalTokens, formatExactInt);
+    animateCounter(
+      $("usage-llm-calls"),
+      s.llmCalls,
+      (v) => {
+        const n = Math.round(v);
+        return `${n} LLM call${n === 1 ? "" : "s"}`;
+      }
+    );
     if ($("usage-kpi-cost-card")) {
       $("usage-kpi-cost-card").classList.toggle("hidden", !showCost);
     }
-    if ($("usage-total-cost")) {
-      $("usage-total-cost").textContent = formatUsdDetail(s.totalCost);
-    }
+    animateCounter($("usage-total-cost"), s.totalCost, formatUsdDetail);
     if ($("usage-active-model")) {
       $("usage-active-model").textContent = modelsList.join(", ");
     }
 
-    if ($("usage-input-tokens")) {
-      $("usage-input-tokens").textContent = formatExactInt(s.inputTokens);
-    }
+    animateCounter($("usage-input-tokens"), s.inputTokens, formatExactInt);
     if ($("usage-input-cost")) {
       $("usage-input-cost").classList.toggle("hidden", !showCost);
-      $("usage-input-cost").textContent = formatUsdDetail(s.inputCost);
+      animateCounter($("usage-input-cost"), s.inputCost, formatUsdDetail);
     }
-    if ($("usage-cache-read-tokens")) {
-      $("usage-cache-read-tokens").textContent = formatExactInt(s.cacheReadTokens);
-    }
+    animateCounter($("usage-cache-read-tokens"), s.cacheReadTokens, formatExactInt);
     if ($("usage-cache-read-cost")) {
       $("usage-cache-read-cost").classList.toggle("hidden", !showCost);
-      $("usage-cache-read-cost").textContent = formatUsdDetail(s.cacheReadCost);
+      animateCounter($("usage-cache-read-cost"), s.cacheReadCost, formatUsdDetail);
     }
 
     const cacheCreateRow = $("usage-row-cache-creation");
     if (cacheCreateRow) {
       cacheCreateRow.classList.toggle("hidden", s.cacheCreationTokens === 0);
-      if ($("usage-cache-creation-tokens")) {
-        $("usage-cache-creation-tokens").textContent = formatExactInt(s.cacheCreationTokens);
-      }
+      animateCounter(
+        $("usage-cache-creation-tokens"),
+        s.cacheCreationTokens,
+        formatExactInt
+      );
     }
 
-    if ($("usage-output-tokens")) {
-      $("usage-output-tokens").textContent = formatExactInt(s.outputTokens);
-    }
+    animateCounter($("usage-output-tokens"), s.outputTokens, formatExactInt);
     if ($("usage-output-cost")) {
       $("usage-output-cost").classList.toggle("hidden", !showCost);
-      $("usage-output-cost").textContent = formatUsdDetail(s.outputCost);
+      animateCounter($("usage-output-cost"), s.outputCost, formatUsdDetail);
     }
-    if ($("usage-thinking-tokens")) {
-      $("usage-thinking-tokens").textContent = formatExactInt(s.thinkingTokens);
-    }
+    animateCounter($("usage-thinking-tokens"), s.thinkingTokens, formatExactInt);
 
     const audioRow = $("usage-row-audio");
     if (audioRow) {
       const hasAudio = s.audioInputTokens > 0 || s.audioOutputTokens > 0;
       audioRow.classList.toggle("hidden", !hasAudio);
-      if ($("usage-audio-tokens")) {
-        $("usage-audio-tokens").textContent = `${formatExactInt(
-          s.audioInputTokens
-        )} / ${formatExactInt(s.audioOutputTokens)}`;
-      }
+      const totalAudio = s.audioInputTokens + s.audioOutputTokens;
+      animateCounter(
+        $("usage-audio-tokens"),
+        totalAudio,
+        (v) => {
+          const r = totalAudio > 0 ? v / totalAudio : 1;
+          return `${formatExactInt(s.audioInputTokens * r)} / ${formatExactInt(
+            s.audioOutputTokens * r
+          )}`;
+        },
+        { formatSig: `${s.audioInputTokens}:${s.audioOutputTokens}` }
+      );
       if ($("usage-audio-cost")) {
         $("usage-audio-cost").classList.toggle("hidden", !showCost);
-        $("usage-audio-cost").textContent = formatUsdDetail(s.audioCost);
+        animateCounter($("usage-audio-cost"), s.audioCost, formatUsdDetail);
       }
     }
 
@@ -2833,15 +2922,15 @@
     if ($("menu-session-tokens-row")) {
       $("menu-session-tokens-row").classList.toggle("hidden", !showSession);
     }
-    if ($("menu-session-tokens")) {
-      $("menu-session-tokens").textContent = `${formatExactInt(s.totalTokens)} tok`;
-    }
+    animateCounter(
+      $("menu-session-tokens"),
+      s.totalTokens,
+      (v) => `${formatExactInt(v)} tok`
+    );
     if ($("menu-session-cost-row")) {
       $("menu-session-cost-row").classList.toggle("hidden", !showSession || !showCost);
     }
-    if ($("menu-session-cost")) {
-      $("menu-session-cost").textContent = formatUsdDetail(s.totalCost);
-    }
+    animateCounter($("menu-session-cost"), s.totalCost, formatUsdDetail);
   };
 
   const isPlainTextPart = (part) =>
@@ -3131,26 +3220,47 @@
           });
           article.appendChild(usageEl);
         }
-        const detailParts = [
-          `${formatExactInt(usage.inputTokens)} in`,
-          `${formatExactInt(usage.outputTokens)} out`,
-        ];
-        if (usage.thinkingTokens > 0) {
-          detailParts.push(`${formatExactInt(usage.thinkingTokens)} thinking`);
+        let leftSpan = usageEl.querySelector(":scope > .message-usage-tokens");
+        if (!leftSpan) {
+          leftSpan = document.createElement("span");
+          leftSpan.className = "message-usage-tokens";
+          usageEl.prepend(leftSpan);
         }
-        if (usage.cacheReadTokens > 0) {
-          detailParts.push(`${formatExactInt(usage.cacheReadTokens)} cached`);
-        }
-        const leftSpan = document.createElement("span");
-        leftSpan.textContent = `${formatExactInt(usage.totalTokens)} tok (${detailParts.join(" · ")})`;
+        animateCounter(
+          leftSpan,
+          usage.totalTokens,
+          (v) => {
+            const r = usage.totalTokens > 0 ? v / usage.totalTokens : 1;
+            const detailParts = [
+              `${formatExactInt(usage.inputTokens * r)} in`,
+              `${formatExactInt(usage.outputTokens * r)} out`,
+            ];
+            if (usage.thinkingTokens > 0) {
+              detailParts.push(`${formatExactInt(usage.thinkingTokens * r)} thinking`);
+            }
+            if (usage.cacheReadTokens > 0) {
+              detailParts.push(`${formatExactInt(usage.cacheReadTokens * r)} cached`);
+            }
+            return `${formatExactInt(v)} tok (${detailParts.join(" · ")})`;
+          },
+          {
+            formatSig: `${usage.inputTokens}:${usage.outputTokens}:${usage.thinkingTokens}:${usage.cacheReadTokens}`,
+            pulseOnMount: true,
+          }
+        );
         usageEl.title = `gen_ai.request.model=${usage.model} · gen_ai.usage.input_tokens=${usage.inputTokens} · gen_ai.usage.output_tokens=${usage.outputTokens} · gen_ai.usage.total_tokens=${usage.totalTokens}`;
+        let rightSpan = usageEl.querySelector(":scope > .message-usage-cost");
         if (prefs.showCost) {
-          const rightSpan = document.createElement("span");
-          rightSpan.className = "message-usage-cost";
-          rightSpan.textContent = formatUsdShort(usage.totalCost);
-          usageEl.replaceChildren(leftSpan, rightSpan);
-        } else {
-          usageEl.replaceChildren(leftSpan);
+          if (!rightSpan) {
+            rightSpan = document.createElement("span");
+            rightSpan.className = "message-usage-cost";
+            usageEl.appendChild(rightSpan);
+          }
+          animateCounter(rightSpan, usage.totalCost, formatUsdShort, {
+            pulseOnMount: true,
+          });
+        } else if (rightSpan) {
+          rightSpan.remove();
         }
       } else if (usageEl) {
         usageEl.remove();

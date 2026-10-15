@@ -21,6 +21,9 @@
     theme: "adspace.studio.theme",
     canvasMode: "adspace.studio.canvasMode",
     showTools: "adspace.studio.showTools",
+    showSessionUsage: "adspace.studio.showSessionUsage",
+    showMessageUsage: "adspace.studio.showMessageUsage",
+    showCost: "adspace.studio.showCost",
     autoScroll: "adspace.studio.autoScroll",
     customerId: "adspace.studio.customerId",
     loginCustomerId: "adspace.studio.loginCustomerId",
@@ -78,6 +81,9 @@
     theme: localStorage.getItem(STORAGE_KEYS.theme) || "system",
     canvasMode: localStorage.getItem(STORAGE_KEYS.canvasMode) || "stacked",
     showTools: localStorage.getItem(STORAGE_KEYS.showTools) !== "false",
+    showSessionUsage: localStorage.getItem(STORAGE_KEYS.showSessionUsage) !== "false",
+    showMessageUsage: localStorage.getItem(STORAGE_KEYS.showMessageUsage) !== "false",
+    showCost: localStorage.getItem(STORAGE_KEYS.showCost) !== "false",
     autoScroll: localStorage.getItem(STORAGE_KEYS.autoScroll) === "true",
     customerId: localStorage.getItem(STORAGE_KEYS.customerId) || "",
     loginCustomerId: localStorage.getItem(STORAGE_KEYS.loginCustomerId) || "",
@@ -232,6 +238,9 @@
     localStorage.setItem(STORAGE_KEYS.theme, prefs.theme);
     localStorage.setItem(STORAGE_KEYS.canvasMode, prefs.canvasMode);
     localStorage.setItem(STORAGE_KEYS.showTools, String(prefs.showTools));
+    localStorage.setItem(STORAGE_KEYS.showSessionUsage, String(prefs.showSessionUsage));
+    localStorage.setItem(STORAGE_KEYS.showMessageUsage, String(prefs.showMessageUsage));
+    localStorage.setItem(STORAGE_KEYS.showCost, String(prefs.showCost));
     localStorage.setItem(STORAGE_KEYS.autoScroll, String(prefs.autoScroll));
     localStorage.setItem(STORAGE_KEYS.customerId, prefs.customerId);
     localStorage.setItem(STORAGE_KEYS.loginCustomerId, prefs.loginCustomerId);
@@ -246,6 +255,15 @@
       btn.classList.toggle("active", btn.dataset.canvasMode === prefs.canvasMode);
     });
     $("setting-show-tools").checked = prefs.showTools;
+    if ($("setting-show-session-usage")) {
+      $("setting-show-session-usage").checked = prefs.showSessionUsage;
+    }
+    if ($("setting-show-message-usage")) {
+      $("setting-show-message-usage").checked = prefs.showMessageUsage;
+    }
+    if ($("setting-show-cost")) {
+      $("setting-show-cost").checked = prefs.showCost;
+    }
     $("setting-autoscroll").checked = prefs.autoScroll;
     $("setting-customer-id").value = prefs.customerId;
     $("setting-login-customer-id").value = prefs.loginCustomerId;
@@ -2712,19 +2730,33 @@
     const modelsList = s.models.size > 0 ? Array.from(s.models) : [activeModel];
     const primaryModel = modelsList[modelsList.length - 1] || activeModel;
     const rates = getModelPricing(primaryModel);
+    const showSession = !!prefs.showSessionUsage;
+    const showCost = !!prefs.showCost;
+
+    if ($("session-usage-anchor")) {
+      $("session-usage-anchor").classList.toggle("hidden", !showSession);
+      if (!showSession && sessionUsagePopover) {
+        sessionUsagePopover.classList.add("hidden");
+      }
+    }
 
     if ($("session-usage-tokens")) {
       $("session-usage-tokens").textContent = `${formatCompactTokens(s.totalTokens)} tok`;
     }
+    if ($("session-usage-sep")) {
+      $("session-usage-sep").classList.toggle("hidden", !showCost);
+    }
     if ($("session-usage-cost")) {
+      $("session-usage-cost").classList.toggle("hidden", !showCost);
       $("session-usage-cost").textContent = formatUsdShort(s.totalCost);
     }
     if (sessionUsageBtn) {
+      const costSuffix = showCost ? ` · Est. ${formatUsdDetail(s.totalCost)}` : "";
       sessionUsageBtn.title = `Session usage: ${formatExactInt(s.totalTokens)} tokens (${formatExactInt(
         s.inputTokens
-      )} input, ${formatExactInt(s.outputTokens)} output) · Est. ${formatUsdDetail(
-        s.totalCost
-      )} across ${s.llmCalls} LLM call${s.llmCalls === 1 ? "" : "s"}`;
+      )} input, ${formatExactInt(s.outputTokens)} output)${costSuffix} across ${s.llmCalls} LLM call${
+        s.llmCalls === 1 ? "" : "s"
+      }`;
     }
 
     if ($("usage-total-tokens")) {
@@ -2732,6 +2764,9 @@
     }
     if ($("usage-llm-calls")) {
       $("usage-llm-calls").textContent = `${s.llmCalls} LLM call${s.llmCalls === 1 ? "" : "s"}`;
+    }
+    if ($("usage-kpi-cost-card")) {
+      $("usage-kpi-cost-card").classList.toggle("hidden", !showCost);
     }
     if ($("usage-total-cost")) {
       $("usage-total-cost").textContent = formatUsdDetail(s.totalCost);
@@ -2744,12 +2779,14 @@
       $("usage-input-tokens").textContent = formatExactInt(s.inputTokens);
     }
     if ($("usage-input-cost")) {
+      $("usage-input-cost").classList.toggle("hidden", !showCost);
       $("usage-input-cost").textContent = formatUsdDetail(s.inputCost);
     }
     if ($("usage-cache-read-tokens")) {
       $("usage-cache-read-tokens").textContent = formatExactInt(s.cacheReadTokens);
     }
     if ($("usage-cache-read-cost")) {
+      $("usage-cache-read-cost").classList.toggle("hidden", !showCost);
       $("usage-cache-read-cost").textContent = formatUsdDetail(s.cacheReadCost);
     }
 
@@ -2765,6 +2802,7 @@
       $("usage-output-tokens").textContent = formatExactInt(s.outputTokens);
     }
     if ($("usage-output-cost")) {
+      $("usage-output-cost").classList.toggle("hidden", !showCost);
       $("usage-output-cost").textContent = formatUsdDetail(s.outputCost);
     }
     if ($("usage-thinking-tokens")) {
@@ -2781,16 +2819,25 @@
         )} / ${formatExactInt(s.audioOutputTokens)}`;
       }
       if ($("usage-audio-cost")) {
+        $("usage-audio-cost").classList.toggle("hidden", !showCost);
         $("usage-audio-cost").textContent = formatUsdDetail(s.audioCost);
       }
     }
 
     if ($("usage-rate-note")) {
-      $("usage-rate-note").textContent = `Rates (${primaryModel}): $${rates.input}/1M in · $${rates.cached}/1M cached · $${rates.output}/1M out`;
+      $("usage-rate-note").textContent = showCost
+        ? `Rates (${primaryModel}): $${rates.input}/1M in · $${rates.cached}/1M cached · $${rates.output}/1M out`
+        : `Model (${primaryModel}) · OpenTelemetry gen_ai.usage.* counters`;
     }
 
+    if ($("menu-session-tokens-row")) {
+      $("menu-session-tokens-row").classList.toggle("hidden", !showSession);
+    }
     if ($("menu-session-tokens")) {
       $("menu-session-tokens").textContent = `${formatExactInt(s.totalTokens)} tok`;
+    }
+    if ($("menu-session-cost-row")) {
+      $("menu-session-cost-row").classList.toggle("hidden", !showSession || !showCost);
     }
     if ($("menu-session-cost")) {
       $("menu-session-cost").textContent = formatUsdDetail(s.totalCost);
@@ -3063,8 +3110,8 @@
 
     // 5. Per-turn token telemetry & cost footer (for completed agent messages)
     const usageSig =
-      !isUser && !partial && usage
-        ? `${usage.totalTokens}:${usage.inputTokens}:${usage.outputTokens}:${usage.thinkingTokens}:${usage.cacheReadTokens}:${usage.totalCost.toFixed(6)}`
+      !isUser && !partial && usage && prefs.showMessageUsage
+        ? `${usage.totalTokens}:${usage.inputTokens}:${usage.outputTokens}:${usage.thinkingTokens}:${usage.cacheReadTokens}:${prefs.showCost ? usage.totalCost.toFixed(6) : "nocost"}`
         : "";
     if (article.dataset.usageSig !== usageSig) {
       article.dataset.usageSig = usageSig;
@@ -3075,7 +3122,7 @@
           usageEl.className = "message-usage";
           usageEl.addEventListener("click", (e) => {
             e.stopPropagation();
-            if (sessionUsagePopover) {
+            if (sessionUsagePopover && prefs.showSessionUsage) {
               settingsMenu.classList.add("hidden");
               userMenu.classList.add("hidden");
               updateSessionUsageUi();
@@ -3096,11 +3143,15 @@
         }
         const leftSpan = document.createElement("span");
         leftSpan.textContent = `${formatExactInt(usage.totalTokens)} tok (${detailParts.join(" · ")})`;
-        const rightSpan = document.createElement("span");
-        rightSpan.className = "message-usage-cost";
-        rightSpan.textContent = formatUsdShort(usage.totalCost);
         usageEl.title = `gen_ai.request.model=${usage.model} · gen_ai.usage.input_tokens=${usage.inputTokens} · gen_ai.usage.output_tokens=${usage.outputTokens} · gen_ai.usage.total_tokens=${usage.totalTokens}`;
-        usageEl.replaceChildren(leftSpan, rightSpan);
+        if (prefs.showCost) {
+          const rightSpan = document.createElement("span");
+          rightSpan.className = "message-usage-cost";
+          rightSpan.textContent = formatUsdShort(usage.totalCost);
+          usageEl.replaceChildren(leftSpan, rightSpan);
+        } else {
+          usageEl.replaceChildren(leftSpan);
+        }
       } else if (usageEl) {
         usageEl.remove();
       }
@@ -3579,6 +3630,27 @@
     prefs.showTools = e.target.checked;
     applyPreferences();
   });
+
+  if ($("setting-show-session-usage")) {
+    $("setting-show-session-usage").addEventListener("change", (e) => {
+      prefs.showSessionUsage = e.target.checked;
+      applyPreferences({ rerender: false });
+    });
+  }
+
+  if ($("setting-show-message-usage")) {
+    $("setting-show-message-usage").addEventListener("change", (e) => {
+      prefs.showMessageUsage = e.target.checked;
+      applyPreferences();
+    });
+  }
+
+  if ($("setting-show-cost")) {
+    $("setting-show-cost").addEventListener("change", (e) => {
+      prefs.showCost = e.target.checked;
+      applyPreferences();
+    });
+  }
 
   $("setting-autoscroll").addEventListener("change", (e) => {
     prefs.autoScroll = e.target.checked;

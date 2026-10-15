@@ -60,10 +60,22 @@
             </div>
 
             <div class="popover-section">
-              <div class="popover-label">Conversation Preferences</div>
+              <div class="popover-label">Conversation &amp; Telemetry</div>
               <label class="toggle-row">
                 <span>Show tool calls in chat</span>
                 <input id="setting-show-tools" type="checkbox" checked />
+              </label>
+              <label class="toggle-row">
+                <span>Show session token usage</span>
+                <input id="setting-show-session-usage" type="checkbox" checked />
+              </label>
+              <label class="toggle-row">
+                <span>Show token usage on messages</span>
+                <input id="setting-show-message-usage" type="checkbox" checked />
+              </label>
+              <label class="toggle-row">
+                <span>Show estimated cost</span>
+                <input id="setting-show-cost" type="checkbox" checked />
               </label>
               <label class="toggle-row">
                 <span>Auto-scroll chat on new messages</span>
@@ -177,11 +189,11 @@
                 <span class="meta-key">Active Session</span>
                 <code id="menu-session-id">—</code>
               </div>
-              <div>
+              <div id="menu-session-tokens-row">
                 <span class="meta-key">Session Tokens</span>
                 <code id="menu-session-tokens">0</code>
               </div>
-              <div>
+              <div id="menu-session-cost-row">
                 <span class="meta-key">Est. Session Cost</span>
                 <code id="menu-session-cost">$0.00</code>
               </div>
@@ -249,7 +261,7 @@
               <h2 id="chat-session-title">Session</h2>
             </div>
             <div class="pane-header-actions">
-              <div class="popover-anchor">
+              <div id="session-usage-anchor" class="popover-anchor">
                 <button
                   id="session-usage-btn"
                   type="button"
@@ -262,7 +274,7 @@
                     <circle cx="12" cy="12" r="4" />
                   </svg>
                   <span id="session-usage-tokens">0 tok</span>
-                  <span class="usage-pill-sep">·</span>
+                  <span id="session-usage-sep" class="usage-pill-sep">·</span>
                   <span id="session-usage-cost" class="usage-pill-cost">$0.00</span>
                 </button>
 
@@ -280,7 +292,7 @@
                         <strong id="usage-total-tokens">0</strong>
                         <span id="usage-llm-calls" class="usage-kpi-sub">0 LLM calls</span>
                       </div>
-                      <div class="usage-kpi-card">
+                      <div id="usage-kpi-cost-card" class="usage-kpi-card">
                         <span class="usage-kpi-label">Estimated Cost</span>
                         <strong id="usage-total-cost" class="usage-kpi-cost">$0.0000</strong>
                         <span id="usage-active-model" class="usage-kpi-sub">gemini-3.8-flash</span>

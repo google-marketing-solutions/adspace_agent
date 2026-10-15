@@ -2217,39 +2217,40 @@
         return;
       }
 
-      const article = document.createElement("article");
-      article.className = `message ${isUser ? "message-user" : "message-agent"}`;
+      const row = document.createElement("div");
+      row.className = `message-row ${isUser ? "message-row-user" : "message-row-agent"}`;
 
-      const hdr = document.createElement("header");
-      const avatar = document.createElement("span");
-      avatar.className = "avatar";
-      if (isUser && currentUser?.picture) {
-        const img = document.createElement("img");
-        img.src = currentUser.picture;
-        img.alt = "";
-        img.referrerPolicy = "no-referrer";
-        avatar.appendChild(img);
-      } else {
-        avatar.textContent = isUser
-          ? initialsOf(currentUser?.name || currentUser?.email || "U")
-          : "A";
-      }
-
-      const author = document.createElement("strong");
-      author.textContent = isUser
-        ? currentUser?.name || "You"
+      const authorLabel = isUser
+        ? currentUser?.name || currentUser?.email || "You"
         : ev.author === APP_NAME
           ? "AdSpace Agent"
           : ev.author || "Agent";
 
-      hdr.append(avatar, author);
-      if (ev.partial) {
-        const st = document.createElement("span");
-        st.className = "streaming-tag";
-        st.textContent = "streaming";
-        hdr.appendChild(st);
+      const avatar = document.createElement("span");
+      avatar.className = `avatar ${isUser ? "avatar-user" : "avatar-agent"}`;
+      avatar.title = authorLabel;
+      if (isUser && currentUser?.picture) {
+        const img = document.createElement("img");
+        img.src = currentUser.picture;
+        img.alt = authorLabel;
+        img.referrerPolicy = "no-referrer";
+        img.onerror = () => {
+          avatar.textContent = initialsOf(authorLabel);
+        };
+        avatar.appendChild(img);
+      } else {
+        avatar.textContent = isUser ? initialsOf(authorLabel) : "A";
       }
-      article.appendChild(hdr);
+
+      const article = document.createElement("article");
+      article.className = `message ${isUser ? "message-user" : "message-agent"}`;
+
+      if (ev.partial) {
+        const st = document.createElement("div");
+        st.className = "streaming-tag";
+        st.textContent = "streaming…";
+        article.appendChild(st);
+      }
 
       if (textContent) {
         if (isUser) {
@@ -2290,7 +2291,8 @@
         article.appendChild(chip);
       }
 
-      chatTranscript.appendChild(article);
+      row.append(avatar, article);
+      chatTranscript.appendChild(row);
     });
 
     if (prefs.autoScroll) {

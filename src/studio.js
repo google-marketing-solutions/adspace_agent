@@ -108,6 +108,8 @@
   const googleLoginBtn = $("google-login-btn");
   const workspace = $("workspace");
   const chatSessionTitle = $("chat-session-title");
+  const sessionUsageBtn = $("session-usage-btn");
+  const sessionUsagePopover = $("session-usage-popover");
   const refreshSessionBtn = $("refresh-session-btn");
   const chatTranscript = $("chat-transcript");
   const attachmentChips = $("attachment-chips");
@@ -259,6 +261,8 @@
     if (rerender) {
       renderTranscript();
       renderCanvas();
+    } else if (typeof updateSessionUsageUi === "function") {
+      updateSessionUsageUi();
     }
   };
 
@@ -2442,6 +2446,357 @@
 
   let currentEvents = [];
 
+  // ---------------------------------------------------------------------------
+  // OpenTelemetry GenAI Token Usage (`adk_telemetry` / `gen_ai.usage.*`) & Cost
+  // ---------------------------------------------------------------------------
+
+  const getModelPricing = (model) => {
+    const m = String(model || prefs.model || DEFAULT_MODELS.model)
+      .trim()
+      .toLowerCase();
+    if (m.includes("flash-lite")) {
+      return {
+        input: 0.1,
+        inputLong: 0.1,
+        cached: 0.025,
+        cachedLong: 0.025,
+        output: 0.4,
+        outputLong: 0.4,
+        audioIn: 0.3,
+      };
+    }
+    if (m.includes("gemini-2.0-flash")) {
+      return {
+        input: 0.1,
+        inputLong: 0.1,
+        cached: 0.025,
+        cachedLong: 0.025,
+        output: 0.4,
+        outputLong: 0.4,
+        audioIn: 0.7,
+      };
+    }
+    if (m.includes("gemini-3") && m.includes("flash")) {
+      return {
+        input: 0.5,
+        inputLong: 0.5,
+        cached: 0.05,
+        cachedLong: 0.05,
+        output: 3.0,
+        outputLong: 3.0,
+        audioIn: 1.0,
+      };
+    }
+    if (m.includes("flash")) {
+      return {
+        input: 0.3,
+        inputLong: 0.3,
+        cached: 0.03,
+        cachedLong: 0.03,
+        output: 2.5,
+        outputLong: 2.5,
+        audioIn: 1.0,
+      };
+    }
+    if (m.includes("gemini-3") || m.includes("gemini-4") || m.includes("argon")) {
+      return {
+        input: 2.0,
+        inputLong: 4.0,
+        cached: 0.2,
+        cachedLong: 0.4,
+        output: 12.0,
+        outputLong: 18.0,
+        audioIn: 2.0,
+      };
+    }
+    return {
+      input: 1.25,
+      inputLong: 2.5,
+      cached: 0.125,
+      cachedLong: 0.25,
+      output: 10.0,
+      outputLong: 15.0,
+      audioIn: 1.25,
+    };
+  };
+
+  const formatCompactTokens = (n) => {
+    const num = Math.max(0, Math.round(Number(n) || 0));
+    if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(2)}M`;
+    if (num >= 10_000) return `${(num / 1_000).toFixed(1)}k`;
+    if (num >= 1_000) return `${(num / 1_000).toFixed(2)}k`;
+    return String(num);
+  };
+
+  const formatExactInt = (n) => Math.max(0, Math.round(Number(n) || 0)).toLocaleString("en-US");
+
+  const formatUsdShort = (cost) => {
+    const val = Math.max(0, Number(cost) || 0);
+    if (val === 0) return "$0.00";
+    if (val < 0.0001) return "<$0.0001";
+    if (val < 0.01) return `~$${val.toFixed(4)}`;
+    if (val < 1) return `~$${val.toFixed(3)}`;
+    return `~$${val.toFixed(2)}`;
+  };
+
+  const formatUsdDetail = (cost) => {
+    const val = Math.max(0, Number(cost) || 0);
+    if (val === 0) return "$0.0000";
+    if (val < 0.0001) return `$${val.toFixed(6)}`;
+    if (val < 1) return `$${val.toFixed(4)}`;
+    return `$${val.toFixed(2)}`;
+  };
+
+  const extractEventUsage = (ev) => {
+    const u = ev?.usage_metadata || ev?.usageMetadata;
+    if (!u || typeof u !== "object") return null;
+    const prov = u.provider_usage && typeof u.provider_usage === "object" ? u.provider_usage : {};
+    const model =
+      prov["gen_ai.request.model"] || prov.model || prefs.model || DEFAULT_MODELS.model;
+
+    const inputTokens = Math.max(
+      0,
+      Number(
+        u.prompt_token_count ?? prov["gen_ai.usage.input_tokens"] ?? prov.promptTokenCount ?? 0
+      ) || 0
+    );
+    const outputTokens = Math.max(
+      0,
+      Number(
+        u.candidates_token_count ??
+          prov["gen_ai.usage.output_tokens"] ??
+          prov.candidatesTokenCount ??
+          0
+      ) || 0
+    );
+    const totalTokens = Math.max(
+      0,
+      Number(
+        u.total_token_count ??
+          prov["gen_ai.usage.total_tokens"] ??
+          prov.totalTokenCount ??
+          inputTokens + outputTokens
+      ) || 0
+    );
+    const cacheReadTokens = Math.min(
+      inputTokens,
+      Math.max(
+        0,
+        Number(
+          u.cache_read_input_token_count ??
+            prov["gen_ai.usage.cache_read_tokens"] ??
+            prov.cachedContentTokenCount ??
+            0
+        ) || 0
+      )
+    );
+    const cacheCreationTokens = Math.max(
+      0,
+      Number(
+        u.cache_creation_input_token_count ?? prov["gen_ai.usage.cache_creation_tokens"] ?? 0
+      ) || 0
+    );
+    const thinkingTokens = Math.max(
+      0,
+      Number(
+        u.thinking_token_count ??
+          prov["gen_ai.usage.thinking_tokens"] ??
+          prov.thoughtsTokenCount ??
+          0
+      ) || 0
+    );
+    const remainingInput = Math.max(0, inputTokens - cacheReadTokens);
+    const audioInputTokens = Math.min(
+      remainingInput,
+      Math.max(
+        0,
+        Number(u.audio_input_token_count ?? prov["gen_ai.usage.audio_input_tokens"] ?? 0) || 0
+      )
+    );
+    const audioOutputTokens = Math.max(
+      0,
+      Number(u.audio_output_token_count ?? prov["gen_ai.usage.audio_output_tokens"] ?? 0) || 0
+    );
+    const uncachedInputTokens = Math.max(0, remainingInput - audioInputTokens);
+
+    const p = getModelPricing(model);
+    const isLong = inputTokens > 200000;
+    const inputRate = isLong ? p.inputLong : p.input;
+    const cachedRate = isLong ? p.cachedLong : p.cached;
+    const outputRate = isLong ? p.outputLong : p.output;
+
+    const inputCost = (uncachedInputTokens / 1e6) * inputRate;
+    const cacheReadCost = (cacheReadTokens / 1e6) * cachedRate;
+    const audioCost = (audioInputTokens / 1e6) * p.audioIn;
+    const outputCost = (outputTokens / 1e6) * outputRate;
+    const computedTotalCost = inputCost + cacheReadCost + audioCost + outputCost;
+    const totalCost =
+      typeof u.cost === "number" && Number.isFinite(u.cost) ? u.cost : computedTotalCost;
+
+    return {
+      model,
+      inputTokens,
+      uncachedInputTokens,
+      outputTokens,
+      totalTokens,
+      cacheReadTokens,
+      cacheCreationTokens,
+      thinkingTokens,
+      audioInputTokens,
+      audioOutputTokens,
+      inputCost,
+      cacheReadCost,
+      audioCost,
+      outputCost,
+      totalCost,
+    };
+  };
+
+  const computeSessionUsage = (events) => {
+    const deduped = [];
+    const byId = new Map();
+    for (const ev of Array.isArray(events) ? events : []) {
+      if (!ev || typeof ev !== "object") continue;
+      if (ev.id) {
+        byId.set(ev.id, ev);
+      } else {
+        deduped.push(ev);
+      }
+    }
+    const allEvents = [...byId.values(), ...deduped];
+
+    const summary = {
+      llmCalls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      thinkingTokens: 0,
+      audioInputTokens: 0,
+      audioOutputTokens: 0,
+      inputCost: 0,
+      cacheReadCost: 0,
+      audioCost: 0,
+      outputCost: 0,
+      totalCost: 0,
+      models: new Set(),
+    };
+
+    for (const ev of allEvents) {
+      const u = extractEventUsage(ev);
+      if (!u) continue;
+      summary.llmCalls += 1;
+      summary.inputTokens += u.inputTokens;
+      summary.outputTokens += u.outputTokens;
+      summary.totalTokens += u.totalTokens;
+      summary.cacheReadTokens += u.cacheReadTokens;
+      summary.cacheCreationTokens += u.cacheCreationTokens;
+      summary.thinkingTokens += u.thinkingTokens;
+      summary.audioInputTokens += u.audioInputTokens;
+      summary.audioOutputTokens += u.audioOutputTokens;
+      summary.inputCost += u.inputCost;
+      summary.cacheReadCost += u.cacheReadCost;
+      summary.audioCost += u.audioCost;
+      summary.outputCost += u.outputCost;
+      summary.totalCost += u.totalCost;
+      if (u.model) summary.models.add(u.model);
+    }
+
+    return summary;
+  };
+
+  const updateSessionUsageUi = () => {
+    const s = computeSessionUsage(currentEvents);
+    const activeModel = prefs.model || DEFAULT_MODELS.model;
+    const modelsList = s.models.size > 0 ? Array.from(s.models) : [activeModel];
+    const primaryModel = modelsList[modelsList.length - 1] || activeModel;
+    const rates = getModelPricing(primaryModel);
+
+    if ($("session-usage-tokens")) {
+      $("session-usage-tokens").textContent = `${formatCompactTokens(s.totalTokens)} tok`;
+    }
+    if ($("session-usage-cost")) {
+      $("session-usage-cost").textContent = formatUsdShort(s.totalCost);
+    }
+    if (sessionUsageBtn) {
+      sessionUsageBtn.title = `Session usage: ${formatExactInt(s.totalTokens)} tokens (${formatExactInt(
+        s.inputTokens
+      )} input, ${formatExactInt(s.outputTokens)} output) · Est. ${formatUsdDetail(
+        s.totalCost
+      )} across ${s.llmCalls} LLM call${s.llmCalls === 1 ? "" : "s"}`;
+    }
+
+    if ($("usage-total-tokens")) {
+      $("usage-total-tokens").textContent = formatExactInt(s.totalTokens);
+    }
+    if ($("usage-llm-calls")) {
+      $("usage-llm-calls").textContent = `${s.llmCalls} LLM call${s.llmCalls === 1 ? "" : "s"}`;
+    }
+    if ($("usage-total-cost")) {
+      $("usage-total-cost").textContent = formatUsdDetail(s.totalCost);
+    }
+    if ($("usage-active-model")) {
+      $("usage-active-model").textContent = modelsList.join(", ");
+    }
+
+    if ($("usage-input-tokens")) {
+      $("usage-input-tokens").textContent = formatExactInt(s.inputTokens);
+    }
+    if ($("usage-input-cost")) {
+      $("usage-input-cost").textContent = formatUsdDetail(s.inputCost);
+    }
+    if ($("usage-cache-read-tokens")) {
+      $("usage-cache-read-tokens").textContent = formatExactInt(s.cacheReadTokens);
+    }
+    if ($("usage-cache-read-cost")) {
+      $("usage-cache-read-cost").textContent = formatUsdDetail(s.cacheReadCost);
+    }
+
+    const cacheCreateRow = $("usage-row-cache-creation");
+    if (cacheCreateRow) {
+      cacheCreateRow.classList.toggle("hidden", s.cacheCreationTokens === 0);
+      if ($("usage-cache-creation-tokens")) {
+        $("usage-cache-creation-tokens").textContent = formatExactInt(s.cacheCreationTokens);
+      }
+    }
+
+    if ($("usage-output-tokens")) {
+      $("usage-output-tokens").textContent = formatExactInt(s.outputTokens);
+    }
+    if ($("usage-output-cost")) {
+      $("usage-output-cost").textContent = formatUsdDetail(s.outputCost);
+    }
+    if ($("usage-thinking-tokens")) {
+      $("usage-thinking-tokens").textContent = formatExactInt(s.thinkingTokens);
+    }
+
+    const audioRow = $("usage-row-audio");
+    if (audioRow) {
+      const hasAudio = s.audioInputTokens > 0 || s.audioOutputTokens > 0;
+      audioRow.classList.toggle("hidden", !hasAudio);
+      if ($("usage-audio-tokens")) {
+        $("usage-audio-tokens").textContent = `${formatExactInt(
+          s.audioInputTokens
+        )} / ${formatExactInt(s.audioOutputTokens)}`;
+      }
+      if ($("usage-audio-cost")) {
+        $("usage-audio-cost").textContent = formatUsdDetail(s.audioCost);
+      }
+    }
+
+    if ($("usage-rate-note")) {
+      $("usage-rate-note").textContent = `Rates (${primaryModel}): $${rates.input}/1M in · $${rates.cached}/1M cached · $${rates.output}/1M out`;
+    }
+
+    if ($("menu-session-tokens")) {
+      $("menu-session-tokens").textContent = `${formatExactInt(s.totalTokens)} tok`;
+    }
+    if ($("menu-session-cost")) {
+      $("menu-session-cost").textContent = formatUsdDetail(s.totalCost);
+    }
+  };
+
   const isPlainTextPart = (part) =>
     part &&
     typeof part.text === "string" &&
@@ -2603,7 +2958,10 @@
     return avatar;
   };
 
-  const updateMessageArticle = (article, { isUser, partial, textContent, visibleTools, surfaceRefs }) => {
+  const updateMessageArticle = (
+    article,
+    { isUser, partial, textContent, visibleTools, surfaceRefs, usage }
+  ) => {
     // 1. Streaming indicator
     let st = article.querySelector(":scope > .streaming-tag");
     if (partial) {
@@ -2649,7 +3007,9 @@
     if (article.dataset.toolsSig !== toolsSig) {
       article.dataset.toolsSig = toolsSig;
       article.querySelectorAll(":scope > details.tool-call").forEach((el) => el.remove());
-      const firstChip = article.querySelector(":scope > .canvas-jump-chip");
+      const beforeEl =
+        article.querySelector(":scope > .canvas-jump-chip") ||
+        article.querySelector(":scope > .message-usage");
       for (const tp of visibleTools) {
         const details = document.createElement("details");
         details.className = "tool-call";
@@ -2666,8 +3026,8 @@
         const pre = document.createElement("pre");
         pre.textContent = JSON.stringify(tp, null, 2);
         details.append(summary, pre);
-        if (firstChip) {
-          article.insertBefore(details, firstChip);
+        if (beforeEl) {
+          article.insertBefore(details, beforeEl);
         } else {
           article.appendChild(details);
         }
@@ -2679,6 +3039,7 @@
     if (article.dataset.surfacesSig !== surfacesSig) {
       article.dataset.surfacesSig = surfacesSig;
       article.querySelectorAll(":scope > .canvas-jump-chip").forEach((el) => el.remove());
+      const usageFooter = article.querySelector(":scope > .message-usage");
       for (const surf of surfaceRefs) {
         const chip = document.createElement("button");
         chip.type = "button";
@@ -2692,12 +3053,62 @@
         right.textContent = "View on Canvas →";
         chip.append(left, right);
         chip.addEventListener("click", () => focusSurfaceOnCanvas(surf.id));
-        article.appendChild(chip);
+        if (usageFooter) {
+          article.insertBefore(chip, usageFooter);
+        } else {
+          article.appendChild(chip);
+        }
+      }
+    }
+
+    // 5. Per-turn token telemetry & cost footer (for completed agent messages)
+    const usageSig =
+      !isUser && !partial && usage
+        ? `${usage.totalTokens}:${usage.inputTokens}:${usage.outputTokens}:${usage.thinkingTokens}:${usage.cacheReadTokens}:${usage.totalCost.toFixed(6)}`
+        : "";
+    if (article.dataset.usageSig !== usageSig) {
+      article.dataset.usageSig = usageSig;
+      let usageEl = article.querySelector(":scope > .message-usage");
+      if (usageSig && usage) {
+        if (!usageEl) {
+          usageEl = document.createElement("div");
+          usageEl.className = "message-usage";
+          usageEl.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (sessionUsagePopover) {
+              settingsMenu.classList.add("hidden");
+              userMenu.classList.add("hidden");
+              updateSessionUsageUi();
+              sessionUsagePopover.classList.remove("hidden");
+            }
+          });
+          article.appendChild(usageEl);
+        }
+        const detailParts = [
+          `${formatExactInt(usage.inputTokens)} in`,
+          `${formatExactInt(usage.outputTokens)} out`,
+        ];
+        if (usage.thinkingTokens > 0) {
+          detailParts.push(`${formatExactInt(usage.thinkingTokens)} thinking`);
+        }
+        if (usage.cacheReadTokens > 0) {
+          detailParts.push(`${formatExactInt(usage.cacheReadTokens)} cached`);
+        }
+        const leftSpan = document.createElement("span");
+        leftSpan.textContent = `${formatExactInt(usage.totalTokens)} tok (${detailParts.join(" · ")})`;
+        const rightSpan = document.createElement("span");
+        rightSpan.className = "message-usage-cost";
+        rightSpan.textContent = formatUsdShort(usage.totalCost);
+        usageEl.title = `gen_ai.request.model=${usage.model} · gen_ai.usage.input_tokens=${usage.inputTokens} · gen_ai.usage.output_tokens=${usage.outputTokens} · gen_ai.usage.total_tokens=${usage.totalTokens}`;
+        usageEl.replaceChildren(leftSpan, rightSpan);
+      } else if (usageEl) {
+        usageEl.remove();
       }
     }
   };
 
   const renderTranscript = () => {
+    updateSessionUsageUi();
     const visibleItems = [];
 
     currentEvents.forEach((ev, idx) => {
@@ -2751,6 +3162,7 @@
         textContent,
         visibleTools,
         surfaceRefs,
+        usage: isUser ? null : extractEventUsage(ev),
       });
     });
 
@@ -3109,14 +3521,26 @@
   settingsBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     userMenu.classList.add("hidden");
+    if (sessionUsagePopover) sessionUsagePopover.classList.add("hidden");
     settingsMenu.classList.toggle("hidden");
   });
 
   userBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     settingsMenu.classList.add("hidden");
+    if (sessionUsagePopover) sessionUsagePopover.classList.add("hidden");
     userMenu.classList.toggle("hidden");
   });
+
+  if (sessionUsageBtn && sessionUsagePopover) {
+    sessionUsageBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      settingsMenu.classList.add("hidden");
+      userMenu.classList.add("hidden");
+      updateSessionUsageUi();
+      sessionUsagePopover.classList.toggle("hidden");
+    });
+  }
 
   document.addEventListener("click", (e) => {
     if (!settingsMenu.contains(e.target) && e.target !== settingsBtn) {
@@ -3124,6 +3548,14 @@
     }
     if (!userMenu.contains(e.target) && e.target !== userBtn) {
       userMenu.classList.add("hidden");
+    }
+    if (
+      sessionUsagePopover &&
+      sessionUsageBtn &&
+      !sessionUsagePopover.contains(e.target) &&
+      !sessionUsageBtn.contains(e.target)
+    ) {
+      sessionUsagePopover.classList.add("hidden");
     }
   });
 

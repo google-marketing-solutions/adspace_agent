@@ -669,6 +669,128 @@ impl ModelController for SimpleModelController {
     }
 }
 
+/// Per-million-token USD pricing rates for an LLM model.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ModelPricing {
+    /// USD per 1M uncached input tokens (prompts <= 200k tokens).
+    pub input_per_million: f64,
+    /// USD per 1M uncached input tokens when prompt > 200k tokens.
+    pub input_long_per_million: f64,
+    /// USD per 1M cached input tokens (prompts <= 200k tokens).
+    pub cached_input_per_million: f64,
+    /// USD per 1M cached input tokens when prompt > 200k tokens.
+    pub cached_input_long_per_million: f64,
+    /// USD per 1M output/completion tokens (including thinking tokens, prompts <= 200k).
+    pub output_per_million: f64,
+    /// USD per 1M output/completion tokens when prompt > 200k tokens.
+    pub output_long_per_million: f64,
+    /// USD per 1M audio input tokens.
+    pub audio_input_per_million: f64,
+}
+
+/// Returns the per-million-token pricing table for `model`.
+pub fn model_pricing(model: &str) -> ModelPricing {
+    let m = model.trim().to_ascii_lowercase();
+    if m.contains("flash-lite") {
+        ModelPricing {
+            input_per_million: 0.10,
+            input_long_per_million: 0.10,
+            cached_input_per_million: 0.025,
+            cached_input_long_per_million: 0.025,
+            output_per_million: 0.40,
+            output_long_per_million: 0.40,
+            audio_input_per_million: 0.30,
+        }
+    } else if m.contains("gemini-2.0-flash") {
+        ModelPricing {
+            input_per_million: 0.10,
+            input_long_per_million: 0.10,
+            cached_input_per_million: 0.025,
+            cached_input_long_per_million: 0.025,
+            output_per_million: 0.40,
+            output_long_per_million: 0.40,
+            audio_input_per_million: 0.70,
+        }
+    } else if m.contains("gemini-3") && m.contains("flash") {
+        ModelPricing {
+            input_per_million: 0.50,
+            input_long_per_million: 0.50,
+            cached_input_per_million: 0.05,
+            cached_input_long_per_million: 0.05,
+            output_per_million: 3.00,
+            output_long_per_million: 3.00,
+            audio_input_per_million: 1.00,
+        }
+    } else if m.contains("flash") {
+        ModelPricing {
+            input_per_million: 0.30,
+            input_long_per_million: 0.30,
+            cached_input_per_million: 0.03,
+            cached_input_long_per_million: 0.03,
+            output_per_million: 2.50,
+            output_long_per_million: 2.50,
+            audio_input_per_million: 1.00,
+        }
+    } else if m.contains("gemini-3") || m.contains("gemini-4") || m.contains("argon") {
+        ModelPricing {
+            input_per_million: 2.00,
+            input_long_per_million: 4.00,
+            cached_input_per_million: 0.20,
+            cached_input_long_per_million: 0.40,
+            output_per_million: 12.00,
+            output_long_per_million: 18.00,
+            audio_input_per_million: 2.00,
+        }
+    } else {
+        ModelPricing {
+            input_per_million: 1.25,
+            input_long_per_million: 2.50,
+            cached_input_per_million: 0.125,
+            cached_input_long_per_million: 0.25,
+            output_per_million: 10.00,
+            output_long_per_million: 15.00,
+            audio_input_per_million: 1.25,
+        }
+    }
+}
+
+/// Estimates the USD cost of a single LLM call from its [`adk_rust::UsageMetadata`].
+pub fn estimate_usage_cost_usd(model: &str, usage: &adk_rust::UsageMetadata) -> f64 {
+    let p = model_pricing(model);
+    let prompt_tokens = i64::from(usage.prompt_token_count.max(0));
+    let is_long = prompt_tokens > 200_000;
+    let input_rate = if is_long {
+        p.input_long_per_million
+    } else {
+        p.input_per_million
+    };
+    let cached_rate = if is_long {
+        p.cached_input_long_per_million
+    } else {
+        p.cached_input_per_million
+    };
+    let output_rate = if is_long {
+        p.output_long_per_million
+    } else {
+        p.output_per_million
+    };
+
+    let cached_tokens =
+        i64::from(usage.cache_read_input_token_count.unwrap_or(0).max(0)).min(prompt_tokens);
+    let remaining_after_cache = (prompt_tokens - cached_tokens).max(0);
+    let audio_in_tokens =
+        i64::from(usage.audio_input_token_count.unwrap_or(0).max(0)).min(remaining_after_cache);
+    let uncached_text_in_tokens = (remaining_after_cache - audio_in_tokens).max(0);
+    let output_tokens = i64::from(usage.candidates_token_count.max(0));
+
+    let input_cost = (uncached_text_in_tokens as f64 / 1_000_000.0) * input_rate;
+    let cached_cost = (cached_tokens as f64 / 1_000_000.0) * cached_rate;
+    let audio_cost = (audio_in_tokens as f64 / 1_000_000.0) * p.audio_input_per_million;
+    let output_cost = (output_tokens as f64 / 1_000_000.0) * output_rate;
+
+    input_cost + cached_cost + audio_cost + output_cost
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,5 +890,28 @@ mod tests {
                 "tool names are truncated to 60 chars"
             );
         }
+    }
+
+    #[test]
+    fn estimates_token_usage_cost_across_model_families() {
+        let usage = adk_rust::UsageMetadata {
+            prompt_token_count: 100_000,
+            candidates_token_count: 10_000,
+            total_token_count: 110_000,
+            cache_read_input_token_count: Some(40_000),
+            thinking_token_count: Some(2_000),
+            ..Default::default()
+        };
+        // gemini-2.5-flash: 60k uncached * $0.30/1M ($0.018) + 40k cached * $0.03/1M ($0.0012) + 10k out * $2.50/1M ($0.025) = $0.0442
+        let flash_cost = estimate_usage_cost_usd("gemini-2.5-flash", &usage);
+        assert!((flash_cost - 0.0442).abs() < 1e-9, "got {flash_cost}");
+
+        // gemini-3.5-flash-lite: 60k * $0.10/1M ($0.006) + 40k * $0.025/1M ($0.001) + 10k * $0.40/1M ($0.004) = $0.011
+        let lite_cost = estimate_usage_cost_usd("gemini-3.5-flash-lite", &usage);
+        assert!((lite_cost - 0.011).abs() < 1e-9, "got {lite_cost}");
+
+        // gemini-3.8-flash: 60k * $0.50/1M ($0.03) + 40k * $0.05/1M ($0.002) + 10k * $3.00/1M ($0.03) = $0.062
+        let flash3_cost = estimate_usage_cost_usd("gemini-3.8-flash", &usage);
+        assert!((flash3_cost - 0.062).abs() < 1e-9, "got {flash3_cost}");
     }
 }

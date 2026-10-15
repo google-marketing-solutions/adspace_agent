@@ -177,6 +177,14 @@
                 <span class="meta-key">Active Session</span>
                 <code id="menu-session-id">—</code>
               </div>
+              <div>
+                <span class="meta-key">Session Tokens</span>
+                <code id="menu-session-tokens">0</code>
+              </div>
+              <div>
+                <span class="meta-key">Est. Session Cost</span>
+                <code id="menu-session-cost">$0.00</code>
+              </div>
             </div>
             <div class="popover-actions">
               <button id="delete-session-btn" type="button" class="quiet-button full-width">
@@ -241,6 +249,117 @@
               <h2 id="chat-session-title">Session</h2>
             </div>
             <div class="pane-header-actions">
+              <div class="popover-anchor">
+                <button
+                  id="session-usage-btn"
+                  type="button"
+                  class="usage-pill"
+                  title="Session token usage &amp; estimated cost (adk_telemetry)"
+                  aria-label="Session token usage and estimated cost"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+                    <circle cx="12" cy="12" r="4" />
+                  </svg>
+                  <span id="session-usage-tokens">0 tok</span>
+                  <span class="usage-pill-sep">·</span>
+                  <span id="session-usage-cost" class="usage-pill-cost">$0.00</span>
+                </button>
+
+                <div
+                  id="session-usage-popover"
+                  class="popover-card usage-popover hidden"
+                  role="dialog"
+                  aria-label="Session token telemetry and cost breakdown"
+                >
+                  <div class="popover-section">
+                    <div class="popover-label">Session Token Telemetry · adk_telemetry</div>
+                    <div class="usage-kpi-grid">
+                      <div class="usage-kpi-card">
+                        <span class="usage-kpi-label">Total Tokens</span>
+                        <strong id="usage-total-tokens">0</strong>
+                        <span id="usage-llm-calls" class="usage-kpi-sub">0 LLM calls</span>
+                      </div>
+                      <div class="usage-kpi-card">
+                        <span class="usage-kpi-label">Estimated Cost</span>
+                        <strong id="usage-total-cost" class="usage-kpi-cost">$0.0000</strong>
+                        <span id="usage-active-model" class="usage-kpi-sub">gemini-3.8-flash</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="popover-section">
+                    <div class="popover-label">OpenTelemetry GenAI Usage Breakdown</div>
+                    <div class="usage-breakdown-list">
+                      <div class="usage-row">
+                        <div class="usage-row-meta">
+                          <span class="usage-row-title">Prompt / Input</span>
+                          <code>gen_ai.usage.input_tokens</code>
+                        </div>
+                        <div class="usage-row-values">
+                          <strong id="usage-input-tokens">0</strong>
+                          <span id="usage-input-cost">$0.0000</span>
+                        </div>
+                      </div>
+                      <div class="usage-row" id="usage-row-cache-read">
+                        <div class="usage-row-meta">
+                          <span class="usage-row-title">Cache Read</span>
+                          <code>gen_ai.usage.cache_read_tokens</code>
+                        </div>
+                        <div class="usage-row-values">
+                          <strong id="usage-cache-read-tokens">0</strong>
+                          <span id="usage-cache-read-cost">$0.0000</span>
+                        </div>
+                      </div>
+                      <div class="usage-row hidden" id="usage-row-cache-creation">
+                        <div class="usage-row-meta">
+                          <span class="usage-row-title">Cache Creation</span>
+                          <code>gen_ai.usage.cache_creation_tokens</code>
+                        </div>
+                        <div class="usage-row-values">
+                          <strong id="usage-cache-creation-tokens">0</strong>
+                          <span>—</span>
+                        </div>
+                      </div>
+                      <div class="usage-row">
+                        <div class="usage-row-meta">
+                          <span class="usage-row-title">Completion / Output</span>
+                          <code>gen_ai.usage.output_tokens</code>
+                        </div>
+                        <div class="usage-row-values">
+                          <strong id="usage-output-tokens">0</strong>
+                          <span id="usage-output-cost">$0.0000</span>
+                        </div>
+                      </div>
+                      <div class="usage-row" id="usage-row-thinking">
+                        <div class="usage-row-meta">
+                          <span class="usage-row-title">Reasoning / Thinking</span>
+                          <code>gen_ai.usage.thinking_tokens</code>
+                        </div>
+                        <div class="usage-row-values">
+                          <strong id="usage-thinking-tokens">0</strong>
+                          <span class="usage-subnote">incl. in output</span>
+                        </div>
+                      </div>
+                      <div class="usage-row hidden" id="usage-row-audio">
+                        <div class="usage-row-meta">
+                          <span class="usage-row-title">Audio In / Out</span>
+                          <code>gen_ai.usage.audio_*_tokens</code>
+                        </div>
+                        <div class="usage-row-values">
+                          <strong id="usage-audio-tokens">0 / 0</strong>
+                          <span id="usage-audio-cost">$0.0000</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="popover-footer usage-popover-footer">
+                    <span id="usage-rate-note">Estimated from standard Gemini API per-1M token pricing.</span>
+                  </div>
+                </div>
+              </div>
+
               <button id="refresh-session-btn" type="button" class="quiet-button" title="Refresh session">
                 <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" /></svg>
                 <span>Refresh</span>

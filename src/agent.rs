@@ -207,9 +207,114 @@ impl adk_rust::Llm for RuntimeModelConfig {
         stream: bool,
     ) -> AdkResult<adk_rust::LlmResponseStream> {
         let active = self.llm.read().unwrap_or_else(|e| e.into_inner()).clone();
-        req.model = active.name().to_string();
-        active.generate_content(req, stream).await
+        let model_name = active.name().to_string();
+        req.model = model_name.clone();
+        let usage_span = adk_rust::telemetry::llm_generate_span("gemini", &model_name, stream);
+        let response_stream = active.generate_content(req, stream).await?;
+        Ok(track_stream_token_usage(
+            response_stream,
+            usage_span,
+            model_name,
+        ))
     }
+}
+
+/// Wraps an [`adk_rust::LlmResponseStream`] to record OpenTelemetry GenAI token
+/// usage via [`adk_rust::telemetry::record_llm_usage`] and enrich each
+/// [`adk_rust::UsageMetadata`] with the active model name, OTel `gen_ai.usage.*`
+/// attributes, and estimated USD cost.
+fn track_stream_token_usage(
+    stream: adk_rust::LlmResponseStream,
+    span: tracing::Span,
+    model_name: String,
+) -> adk_rust::LlmResponseStream {
+    let tracked = stream.map(move |mut item| {
+        if let Ok(ref mut response) = item
+            && let Some(ref mut usage) = response.usage_metadata
+        {
+            let llm_usage = adk_rust::telemetry::LlmUsage {
+                input_tokens: usage.prompt_token_count,
+                output_tokens: usage.candidates_token_count,
+                total_tokens: usage.total_token_count,
+                cache_read_tokens: usage.cache_read_input_token_count,
+                cache_creation_tokens: usage.cache_creation_input_token_count,
+                thinking_tokens: usage.thinking_token_count,
+                audio_input_tokens: usage.audio_input_token_count,
+                audio_output_tokens: usage.audio_output_token_count,
+            };
+            {
+                let _enter = span.enter();
+                adk_rust::telemetry::record_llm_usage(&llm_usage);
+            }
+            adk_rust::telemetry::record_llm_usage(&llm_usage);
+
+            let estimated_cost = config::estimate_usage_cost_usd(&model_name, usage);
+            if usage.cost.is_none() {
+                usage.cost = Some(estimated_cost);
+            }
+
+            let mut meta_obj = match usage.provider_usage.take() {
+                Some(serde_json::Value::Object(map)) => map,
+                Some(other) => {
+                    let mut map = serde_json::Map::new();
+                    map.insert("raw".to_string(), other);
+                    map
+                }
+                None => serde_json::Map::new(),
+            };
+            meta_obj.insert("model".to_string(), serde_json::json!(model_name));
+            meta_obj.insert("gen_ai.system".to_string(), serde_json::json!("gemini"));
+            meta_obj.insert(
+                "gen_ai.request.model".to_string(),
+                serde_json::json!(model_name),
+            );
+            meta_obj.insert(
+                "gen_ai.usage.input_tokens".to_string(),
+                serde_json::json!(llm_usage.input_tokens),
+            );
+            meta_obj.insert(
+                "gen_ai.usage.output_tokens".to_string(),
+                serde_json::json!(llm_usage.output_tokens),
+            );
+            meta_obj.insert(
+                "gen_ai.usage.total_tokens".to_string(),
+                serde_json::json!(llm_usage.total_tokens),
+            );
+            if let Some(v) = llm_usage.cache_read_tokens {
+                meta_obj.insert(
+                    "gen_ai.usage.cache_read_tokens".to_string(),
+                    serde_json::json!(v),
+                );
+            }
+            if let Some(v) = llm_usage.cache_creation_tokens {
+                meta_obj.insert(
+                    "gen_ai.usage.cache_creation_tokens".to_string(),
+                    serde_json::json!(v),
+                );
+            }
+            if let Some(v) = llm_usage.thinking_tokens {
+                meta_obj.insert(
+                    "gen_ai.usage.thinking_tokens".to_string(),
+                    serde_json::json!(v),
+                );
+            }
+            if let Some(v) = llm_usage.audio_input_tokens {
+                meta_obj.insert(
+                    "gen_ai.usage.audio_input_tokens".to_string(),
+                    serde_json::json!(v),
+                );
+            }
+            if let Some(v) = llm_usage.audio_output_tokens {
+                meta_obj.insert(
+                    "gen_ai.usage.audio_output_tokens".to_string(),
+                    serde_json::json!(v),
+                );
+            }
+            usage.provider_usage = Some(serde_json::Value::Object(meta_obj));
+        }
+        item
+    });
+    Box::pin(tracked)
 }
 
 #[async_trait]
@@ -996,5 +1101,36 @@ mod tests {
         assert_eq!(extension_for("text/csv; charset=utf-8"), "csv");
         assert_eq!(extension_for("image/png"), "png");
         assert_eq!(extension_for("application/x-unknown"), "bin");
+    }
+
+    #[tokio::test]
+    async fn telemetry_stream_records_otel_usage_and_cost() {
+        let mut resp = adk_rust::LlmResponse::new(Content::new("model").with_text("hello"));
+        resp.usage_metadata = Some(adk_rust::UsageMetadata {
+            prompt_token_count: 1_000,
+            candidates_token_count: 250,
+            total_token_count: 1_250,
+            cache_read_input_token_count: Some(200),
+            thinking_token_count: Some(50),
+            ..Default::default()
+        });
+        let raw_stream: adk_rust::LlmResponseStream =
+            Box::pin(futures::stream::once(async move { Ok(resp) }));
+        let span = adk_rust::telemetry::llm_generate_span("gemini", "gemini-3.8-flash", true);
+        let mut tracked = track_stream_token_usage(raw_stream, span, "gemini-3.8-flash".into());
+        let item = tracked
+            .next()
+            .await
+            .expect("one item")
+            .expect("ok response");
+        let usage = item.usage_metadata.expect("usage metadata present");
+        assert!(usage.cost.unwrap_or(0.0) > 0.0);
+        let provider_usage = usage.provider_usage.expect("provider_usage present");
+        assert_eq!(provider_usage["gen_ai.request.model"], "gemini-3.8-flash");
+        assert_eq!(provider_usage["gen_ai.usage.input_tokens"], 1_000);
+        assert_eq!(provider_usage["gen_ai.usage.output_tokens"], 250);
+        assert_eq!(provider_usage["gen_ai.usage.total_tokens"], 1_250);
+        assert_eq!(provider_usage["gen_ai.usage.cache_read_tokens"], 200);
+        assert_eq!(provider_usage["gen_ai.usage.thinking_tokens"], 50);
     }
 }

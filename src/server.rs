@@ -110,6 +110,16 @@ const STUDIO_CSS: &str = include_str!("studio.css");
 const STUDIO_JS: &str = include_str!("studio.js");
 /// Custom AdSpace Agent Interactive Canvas WebGL stage shader (`/app/stage.js`).
 const STUDIO_STAGE_JS: &str = include_str!("stage.js");
+/// Inline Gemini spark SVG favicon served at `/favicon.svg` and `/favicon.ico`.
+const STUDIO_FAVICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\">\
+<defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"32\" y2=\"32\" gradientUnits=\"userSpaceOnUse\">\
+<stop offset=\"0%\" stop-color=\"#1a73e8\"/>\
+<stop offset=\"40%\" stop-color=\"#5b6cf9\"/>\
+<stop offset=\"75%\" stop-color=\"#9b72cb\"/>\
+<stop offset=\"100%\" stop-color=\"#d96570\"/>\
+</linearGradient></defs>\
+<path fill=\"url(#g)\" d=\"M16 2C16.6 10.1 21.9 15.4 30 16C21.9 16.6 16.6 21.9 16 30C15.4 21.9 10.1 16.6 2 16C10.1 15.4 15.4 10.1 16 2Z\"/>\
+</svg>";
 
 /// Body of `POST /oauth2/ack`.
 #[derive(Debug, serde::Deserialize)]
@@ -309,6 +319,24 @@ async fn studio_stage_js() -> Response {
             (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
         ],
         STUDIO_STAGE_JS,
+    )
+        .into_response()
+}
+
+/// Serves the Gemini spark SVG favicon (`/favicon.svg` and `/favicon.ico`).
+async fn studio_favicon() -> Response {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("image/svg+xml; charset=utf-8"),
+            ),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=86400"),
+            ),
+        ],
+        STUDIO_FAVICON_SVG,
     )
         .into_response()
 }
@@ -681,6 +709,8 @@ pub fn oauth_router(routes: OAuthRoutes) -> Router {
         .route("/app/app.css", get(studio_css))
         .route("/app/app.js", get(studio_js))
         .route("/app/stage.js", get(studio_stage_js))
+        .route("/favicon.ico", get(studio_favicon))
+        .route("/favicon.svg", get(studio_favicon))
         .with_state(routes)
 }
 
@@ -935,6 +965,16 @@ mod tests {
         .unwrap();
         assert!(html.contains("AdSpace"));
         assert!(html.contains("/app/app.js"));
+
+        // 1b. `/favicon.ico` and `/favicon.svg` return 200 OK with the SVG icon.
+        for path in ["/favicon.ico", "/favicon.svg"] {
+            let fav = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(fav.status(), StatusCode::OK);
+        }
 
         // 2. `/auth/me` is unauthenticated without a cookie.
         let resp = app

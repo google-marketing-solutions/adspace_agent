@@ -25,8 +25,6 @@
     showMessageUsage: "adspace.studio.showMessageUsage",
     showCost: "adspace.studio.showCost",
     autoScroll: "adspace.studio.autoScroll",
-    customerId: "adspace.studio.customerId",
-    loginCustomerId: "adspace.studio.loginCustomerId",
     leftWidth: "adspace.studio.leftWidth",
     model: "adspace.studio.model",
     imageModel: "adspace.studio.imageModel",
@@ -98,8 +96,6 @@
     showMessageUsage: localStorage.getItem(STORAGE_KEYS.showMessageUsage) !== "false",
     showCost: localStorage.getItem(STORAGE_KEYS.showCost) !== "false",
     autoScroll: localStorage.getItem(STORAGE_KEYS.autoScroll) === "true",
-    customerId: localStorage.getItem(STORAGE_KEYS.customerId) || "",
-    loginCustomerId: localStorage.getItem(STORAGE_KEYS.loginCustomerId) || "",
     model: localStorage.getItem(STORAGE_KEYS.model) || DEFAULT_MODELS.model,
     imageModel: localStorage.getItem(STORAGE_KEYS.imageModel) || DEFAULT_MODELS.imageModel,
     videoModel: localStorage.getItem(STORAGE_KEYS.videoModel) || DEFAULT_MODELS.videoModel,
@@ -259,8 +255,6 @@
     localStorage.setItem(STORAGE_KEYS.showMessageUsage, String(prefs.showMessageUsage));
     localStorage.setItem(STORAGE_KEYS.showCost, String(prefs.showCost));
     localStorage.setItem(STORAGE_KEYS.autoScroll, String(prefs.autoScroll));
-    localStorage.setItem(STORAGE_KEYS.customerId, prefs.customerId);
-    localStorage.setItem(STORAGE_KEYS.loginCustomerId, prefs.loginCustomerId);
     localStorage.setItem(STORAGE_KEYS.model, prefs.model);
     localStorage.setItem(STORAGE_KEYS.imageModel, prefs.imageModel);
     localStorage.setItem(STORAGE_KEYS.videoModel, prefs.videoModel);
@@ -284,8 +278,6 @@
       $("setting-show-cost").checked = prefs.showCost;
     }
     $("setting-autoscroll").checked = prefs.autoScroll;
-    $("setting-customer-id").value = prefs.customerId;
-    $("setting-mcc-customer-id").value = prefs.loginCustomerId;
     if (syncModels) {
       syncAllModelControls();
     }
@@ -296,10 +288,7 @@
       syncCanvasStageTheme();
     }
 
-    const ids = [prefs.model];
-    if (prefs.customerId) ids.push(`CID: ${prefs.customerId}`);
-    if (prefs.loginCustomerId) ids.push(`MCC: ${prefs.loginCustomerId}`);
-    composerContextHint.textContent = `${ids.join(" · ")} · Enter to send`;
+    composerContextHint.textContent = `${prefs.model} · Enter to send`;
 
     if (rerender) {
       renderTranscript();
@@ -447,6 +436,18 @@
 
   let authCheckPromise = null;
 
+  function syncSettingsAvailability() {
+    const hasSession = Boolean(currentUser && activeSession);
+    if (!settingsMenu) return;
+    settingsMenu.classList.toggle("settings-popover--auth-only", !hasSession);
+    settingsMenu.querySelectorAll("[data-session-only]").forEach((el) => {
+      el.classList.toggle("hidden", !hasSession);
+      el.querySelectorAll("input, select, button, textarea").forEach((ctrl) => {
+        ctrl.disabled = !hasSession;
+      });
+    });
+  }
+
   const checkAuthStatus = () => {
     if (authCheckPromise) return authCheckPromise;
     authCheckPromise = (async () => {
@@ -455,19 +456,25 @@
         const data = await resp.json();
         if (!data.authenticated || !data.user) {
           currentUser = null;
+          activeSession = null;
           authGate.classList.remove("hidden");
           workspace.classList.add("hidden");
+          syncActiveStage();
+          syncSettingsAvailability();
           sessionControls.classList.add("hidden");
           userMenuAnchor.classList.add("hidden");
           authGateHint.textContent = data.oauth_configured
-            ? "Uses your configured Google OAuth 2.0 Web Client."
+            ? ""
             : "Configure CLIENT_ID and CLIENT_SECRET in .env to enable Google Sign-In.";
+          authGateHint.classList.toggle("hidden", Boolean(data.oauth_configured));
           return;
         }
 
         currentUser = data.user;
         authGate.classList.add("hidden");
         workspace.classList.remove("hidden");
+        syncActiveStage();
+        syncSettingsAvailability();
         sessionControls.classList.remove("hidden");
         userMenuAnchor.classList.remove("hidden");
 
@@ -621,6 +628,7 @@
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       activeSession = await resp.json();
+      syncSettingsAvailability();
       $("menu-session-id").textContent = activeSession.id;
       if (isSessionSwitch) {
         activeSurfaceId = "all";
@@ -656,6 +664,7 @@
         { method: "DELETE" }
       );
       activeSession = null;
+      syncSettingsAvailability();
       await loadUserSessions();
     } catch {
       await createNewSession();
@@ -4198,20 +4207,8 @@
       typeof overrideText === "string" ? overrideText.trim() : chatInput.value.trim();
     if (!rawText && attachments.length === 0) return;
 
-    let finalMessage = rawText;
-    if (
-      (prefs.customerId || prefs.loginCustomerId) &&
-      !rawText.startsWith("[UI Event:") &&
-      !/\b\d{10}\b/.test(rawText)
-    ) {
-      const ctxParts = [];
-      if (prefs.customerId) ctxParts.push(`Customer ID=${prefs.customerId}`);
-      if (prefs.loginCustomerId) ctxParts.push(`Login Customer ID=${prefs.loginCustomerId}`);
-      finalMessage = `${rawText}\n\n[Default Google Ads Account Context: ${ctxParts.join(", ")}]`;
-    }
-
     const parts = [];
-    if (finalMessage) parts.push({ text: finalMessage });
+    if (rawText) parts.push({ text: rawText });
 
     for (const file of attachments) {
       const bytes = new Uint8Array(await file.arrayBuffer());
@@ -4427,17 +4424,6 @@
     applyPreferences();
   });
 
-  $("setting-customer-id").addEventListener("input", (e) => {
-    prefs.customerId = e.target.value.replace(/\D/g, "");
-    applyPreferences({ rerender: false });
-  });
-
-  $("setting-mcc-customer-id").addEventListener("input", (e) => {
-    prefs.customerId = $("setting-customer-id").value.replace(/\D/g, "");
-    prefs.loginCustomerId = e.target.value.replace(/\D/g, "");
-    applyPreferences({ rerender: false });
-  });
-
   const bindModelPicker = (prefKey, selectId, customId, defaultVal) => {
     const selectEl = $(selectId);
     const customEl = $(customId);
@@ -4586,8 +4572,20 @@
   // ---------------------------------------------------------------------------
   // Interactive Canvas Stage (Argon Dotted Grid WebGL Stage)
   // ---------------------------------------------------------------------------
+  let authStageInstance = null;
   let canvasStageInstance = null;
-  let canvasStageAbort = null;
+  let stageAbort = null;
+
+  const STAGE_CONFIG = {
+    dark_mode_preset: "argon-dark",
+    light_mode_preset: "argon-light",
+    grid_step: 24,
+    dot_radius: 1.4,
+    hover_reach: 155,
+    hover_push: 7.5,
+    hover_swirl: 2.2,
+    hover_scale: 1.35,
+  };
 
   const getEffectiveColorMode = () => {
     if (prefs.theme === "dark") return "dark";
@@ -4596,42 +4594,65 @@
   };
 
   function syncCanvasStageTheme() {
+    const colorMode = getEffectiveColorMode();
+    if (authStageInstance && typeof authStageInstance.update === "function") {
+      authStageInstance.update({ colorMode });
+    }
     if (canvasStageInstance && typeof canvasStageInstance.update === "function") {
-      canvasStageInstance.update({ colorMode: getEffectiveColorMode() });
+      canvasStageInstance.update({ colorMode });
     }
   }
 
-  const initCanvasStage = async () => {
-    const stageEl = $("canvas-stage");
+  function syncActiveStage() {
+    const authVisible = authGate && !authGate.classList.contains("hidden");
+    const workspaceVisible = workspace && !workspace.classList.contains("hidden");
+    const allowMotion = !prefersReducedMotion();
+
+    if (authStageInstance) {
+      if (authVisible && allowMotion && typeof authStageInstance.resume === "function") {
+        authStageInstance.resume();
+      } else if (typeof authStageInstance.pause === "function") {
+        authStageInstance.pause();
+      }
+    }
+    if (canvasStageInstance) {
+      if (workspaceVisible && allowMotion && typeof canvasStageInstance.resume === "function") {
+        canvasStageInstance.resume();
+      } else if (typeof canvasStageInstance.pause === "function") {
+        canvasStageInstance.pause();
+      }
+    }
+  }
+
+  const mountStageOn = async (stageEl, signal) => {
     const stageMod = window.AdSpaceStage;
-    if (!stageEl || !stageMod || typeof stageMod.mount !== "function") return;
-
-    if (canvasStageAbort) canvasStageAbort.abort();
-    canvasStageAbort = new AbortController();
-
+    if (!stageEl || !stageMod || typeof stageMod.mount !== "function") return null;
     try {
-      const instance = await stageMod.mount({
+      return await stageMod.mount({
         root: stageEl,
         colorMode: getEffectiveColorMode(),
-        signal: canvasStageAbort.signal,
-        config: {
-          dark_mode_preset: "argon-dark",
-          light_mode_preset: "argon-light",
-          grid_step: 24,
-          dot_radius: 1.4,
-          hover_reach: 155,
-          hover_push: 7.5,
-          hover_swirl: 2.2,
-          hover_scale: 1.35,
-        },
+        signal,
+        config: STAGE_CONFIG,
       });
-      canvasStageInstance = instance;
-      if (!prefersReducedMotion() && typeof instance.resume === "function") {
-        instance.resume();
-      }
     } catch {
       /* fallback silently to CSS background if WebGL2 is unavailable */
+      return null;
     }
+  };
+
+  const initCanvasStage = async () => {
+    if (stageAbort) stageAbort.abort();
+    const ctrl = new AbortController();
+    stageAbort = ctrl;
+
+    const [authInst, canvasInst] = await Promise.all([
+      mountStageOn($("auth-stage"), ctrl.signal),
+      mountStageOn($("canvas-stage"), ctrl.signal),
+    ]);
+    if (stageAbort !== ctrl) return;
+    authStageInstance = authInst;
+    canvasStageInstance = canvasInst;
+    syncActiveStage();
   };
 
   if (window.matchMedia) {
@@ -4645,6 +4666,7 @@
 
   // Initialize
   applyPreferences();
+  syncSettingsAvailability();
   initCanvasStage();
   checkAuthStatus();
 })();

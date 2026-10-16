@@ -66,7 +66,7 @@
             <span class="google-symbols" aria-hidden="true">tune</span>
           </button>
 
-          <div id="settings-menu" class="popover-card settings-popover hidden" role="dialog" aria-label="Workspace settings">
+          <div id="settings-menu" class="popover-card settings-popover settings-popover--auth-only hidden" role="dialog" aria-label="Workspace settings">
             <div class="popover-section">
               <div class="popover-label">Appearance</div>
               <div class="segmented" id="theme-segmented">
@@ -76,7 +76,7 @@
               </div>
             </div>
 
-            <div class="popover-section">
+            <div class="popover-section hidden" data-session-only>
               <div class="popover-label">Interactive UI Canvas Mode</div>
               <div class="segmented" id="canvas-mode-segmented">
                 <button type="button" data-canvas-mode="stacked">All Cards</button>
@@ -84,7 +84,7 @@
               </div>
             </div>
 
-            <div class="popover-section">
+            <div class="popover-section hidden" data-session-only>
               <div class="popover-label">Conversation &amp; Telemetry</div>
               <label class="toggle-row">
                 <span>Show tool calls in chat</span>
@@ -108,7 +108,7 @@
               </label>
             </div>
 
-            <div class="popover-section">
+            <div class="popover-section hidden" data-session-only>
               <div class="popover-label">ADK &amp; Generative Media Models</div>
               <div class="settings-inputs">
                 <label>
@@ -176,7 +176,7 @@
               </div>
             </div>
 
-            <div class="popover-section">
+            <div class="popover-section hidden" data-session-only>
               <div class="popover-label-row">
                 <div class="popover-label">Model Pricing (USD / 1M Tokens)</div>
                 <button
@@ -251,39 +251,9 @@
               </div>
             </div>
 
-            <div class="popover-section">
-              <div class="popover-label">Default Google Ads Account (Optional)</div>
-              <div class="settings-inputs">
-                <label>
-                  <span>Customer ID</span>
-                  <input
-                    id="setting-customer-id"
-                    type="text"
-                    placeholder="e.g. 1382274117"
-                    autocomplete="off"
-                    data-1p-ignore
-                    data-lpignore="true"
-                    data-form-type="other"
-                  />
-                </label>
-                <label>
-                  <span>Login Customer ID (MCC)</span>
-                  <input
-                    id="setting-mcc-customer-id"
-                    type="text"
-                    placeholder="e.g. 8056520078"
-                    autocomplete="off"
-                    data-1p-ignore
-                    data-lpignore="true"
-                    data-form-type="other"
-                  />
-                </label>
-              </div>
-            </div>
-
-            <div class="popover-footer">
+            <div class="popover-footer hidden" data-session-only>
               <a href="/ui/" target="_blank" rel="noreferrer" class="developer-link">
-                <span>Open ADK Developer Inspector (`/ui/`)</span>
+                <span>Open ADK Developer Inspector</span>
                 <span class="google-symbols" aria-hidden="true">north_east</span>
               </a>
             </div>
@@ -328,7 +298,8 @@
             </div>
             <div class="popover-actions">
               <button id="delete-session-btn" type="button" class="quiet-button full-width">
-                Clear Current Session
+                <span class="google-symbols" aria-hidden="true">delete_sweep</span>
+                <span>Clear Current Session</span>
               </button>
               <button id="logout-btn" type="button" class="danger-button full-width">
                 <span class="google-symbols" aria-hidden="true">logout</span>
@@ -348,26 +319,19 @@
 
       <!-- Google Sign-In Gate (shown when unauthenticated) -->
       <main id="auth-gate" class="auth-gate hidden">
+        <div id="auth-stage" class="stage" aria-hidden="true"></div>
         <div class="auth-card">
           <div class="auth-brand-row">
             <span class="brand-mark brand-mark-lg" aria-hidden="true">
               <span class="google-symbols filled">robot</span>
             </span>
-            <div>
-              <div class="eyebrow">Google Marketing &amp; Analytics Workspace</div>
-              <h1>AdSpace Agent</h1>
-            </div>
+            <h1><b>AdSpace</b> Agent</h1>
           </div>
           <p class="auth-copy">
-            Sign in with your Google account to launch a personal workspace session tied to your identity.
-            Chat with the agent on the left and explore live, interactive <code>adk-ui</code> dashboards,
-            charts, sortable tables, and forms on the right.
+            AdSpace Agent is designed to provide a standardized way to integrate an LLM with
+            Google Ads, YouTube, Google Cloud, and Google Search to form a more
+            comprehensive campaign and marketing plan for agencies.
           </p>
-          <div class="auth-features">
-            <span>Least-Privilege OAuth 2.0</span>
-            <span>Session-Scoped Credentials</span>
-            <span>Interactive Generative UI</span>
-          </div>
           <button id="google-login-btn" type="button" class="google-signin-button">
             <svg class="google-g" viewBox="0 0 24 24">
               <path fill="#4285F4" d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.56-5.17 3.56-8.82z"/>

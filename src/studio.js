@@ -632,8 +632,12 @@
       $("menu-session-id").textContent = activeSession.id;
       if (isSessionSwitch) {
         activeSurfaceId = "all";
+        closeModalOverlay();
       }
-      rebuildFromSessionEvents(activeSession.events || [], { forceCanvas: isSessionSwitch });
+      rebuildFromSessionEvents(activeSession.events || [], {
+        forceCanvas: isSessionSwitch,
+        suppressOverlays: true,
+      });
     } catch (err) {
       showError(`Could not load session: ${err.message || err}`);
     }
@@ -749,66 +753,315 @@
     }
   };
 
-  const createStandaloneCard = ({ title, description, eyebrow, headerRight, flushBody = false }) => {
+  const variantIconName = (variant) => {
+    switch (String(variant || "info").toLowerCase()) {
+      case "success":
+      case "ok":
+        return "check_circle";
+      case "warning":
+      case "warn":
+        return "warning";
+      case "error":
+      case "danger":
+      case "outage":
+        return "error";
+      default:
+        return "info";
+    }
+  };
+
+  const showToast = (comp) => {
+    const stack = $("toast-stack");
+    if (!stack || !comp) return;
+    const vc = variantColors(comp.variant);
+    const toast = document.createElement("div");
+    toast.className = "ui-toast";
+    toast.setAttribute("role", "status");
+
+    const iconWrap = document.createElement("span");
+    iconWrap.className = "ui-toast-icon";
+    style(iconWrap, { color: vc.fg });
+    const icon = document.createElement("span");
+    icon.className = "google-symbols filled";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = variantIconName(comp.variant);
+    iconWrap.appendChild(icon);
+
+    const body = document.createElement("div");
+    body.className = "ui-toast-body";
+    const title = document.createElement("div");
+    title.className = "ui-toast-title";
+    title.textContent = comp.message || comp.title || "Notification";
+    body.appendChild(title);
+    if (comp.description) {
+      const desc = document.createElement("div");
+      desc.className = "ui-toast-desc";
+      desc.textContent = comp.description;
+      body.appendChild(desc);
+    }
+
+    toast.append(iconWrap, body);
+
+    let dismissed = false;
+    let timerId = 0;
+    let remainingMs = Math.max(0, Number(comp.duration ?? 5000));
+    let startedAt = 0;
+
+    const dismiss = () => {
+      if (dismissed) return;
+      dismissed = true;
+      if (timerId) clearTimeout(timerId);
+      toast.classList.add("leaving");
+      setTimeout(() => toast.remove(), 190);
+    };
+
+    if (comp.dismissible !== false) {
+      const closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.className = "ui-toast-close";
+      closeBtn.setAttribute("aria-label", "Dismiss notification");
+      closeBtn.innerHTML = "&times;";
+      closeBtn.addEventListener("click", dismiss);
+      toast.appendChild(closeBtn);
+    }
+
+    if (remainingMs > 0) {
+      const bar = document.createElement("div");
+      bar.className = "ui-toast-timer";
+      style(bar, {
+        background: vc.fg,
+        animationDuration: `${remainingMs}ms`,
+      });
+      toast.appendChild(bar);
+
+      const startTimer = () => {
+        if (dismissed || remainingMs <= 0) return;
+        startedAt = performance.now();
+        timerId = window.setTimeout(dismiss, remainingMs);
+      };
+
+      const pauseTimer = () => {
+        if (dismissed || !timerId) return;
+        clearTimeout(timerId);
+        timerId = 0;
+        remainingMs = Math.max(0, remainingMs - (performance.now() - startedAt));
+      };
+
+      toast.addEventListener("pointerenter", pauseTimer);
+      toast.addEventListener("pointerleave", startTimer);
+      startTimer();
+    }
+
+    stack.appendChild(toast);
+  };
+
+  let activeModalCleanup = null;
+
+  const closeModalOverlay = () => {
+    const root = $("ui-modal-root");
+    if (activeModalCleanup) {
+      activeModalCleanup();
+      activeModalCleanup = null;
+    }
+    if (root) {
+      root.classList.add("hidden");
+      root.replaceChildren();
+    }
+  };
+
+  const showModalOverlay = (spec, { isConfirm = false } = {}) => {
+    const root = $("ui-modal-root");
+    if (!root || !spec) return;
+    closeModalOverlay();
+
+    const closable = spec.closable !== false;
+    const rawSize = String(spec.size || (isConfirm ? "small" : "medium")).toLowerCase();
+    const size = ["small", "medium", "large", "full"].includes(rawSize) ? rawSize : "medium";
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "ui-modal-backdrop";
+    if (closable) {
+      backdrop.addEventListener("click", closeModalOverlay);
+    }
+
+    const dialog = document.createElement("div");
+    dialog.className = `ui-modal-dialog ui-modal--${size}`;
+    dialog.setAttribute("data-ui-scope", "true");
+    dialog.setAttribute("data-ui-modal", "true");
+
+    const hdr = document.createElement("header");
+    hdr.className = "ui-modal-header";
+    const titleWrap = document.createElement("div");
+    titleWrap.className = "ui-modal-title-wrap";
+
+    const hasDangerAction =
+      isConfirm &&
+      Array.isArray(spec.footer) &&
+      spec.footer.some((b) => String(b?.variant || "").toLowerCase() === "danger");
+
+    if (hasDangerAction) {
+      const warnChip = document.createElement("span");
+      style(warnChip, {
+        color: "var(--accent-error)",
+        width: "34px",
+        height: "34px",
+        borderRadius: "50%",
+        background: "var(--dm-surface-gray-subtle)",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: "0",
+      });
+      const warnIcon = document.createElement("span");
+      warnIcon.className = "google-symbols filled";
+      warnIcon.setAttribute("aria-hidden", "true");
+      warnIcon.textContent = "warning";
+      style(warnIcon, { fontSize: "19px" });
+      warnChip.appendChild(warnIcon);
+      titleWrap.appendChild(warnChip);
+    }
+
+    const titleEl = document.createElement("h3");
+    titleEl.className = "ui-modal-title";
+    titleEl.textContent = spec.title || (isConfirm ? "Confirm Action" : "Details");
+    titleWrap.appendChild(titleEl);
+    hdr.appendChild(titleWrap);
+
+    if (closable) {
+      const closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.className = "ui-modal-close";
+      closeBtn.setAttribute("aria-label", "Close dialog");
+      const closeSym = document.createElement("span");
+      closeSym.className = "google-symbols";
+      closeSym.setAttribute("aria-hidden", "true");
+      closeSym.textContent = "close";
+      style(closeSym, { fontSize: "18px" });
+      closeBtn.appendChild(closeSym);
+      closeBtn.addEventListener("click", closeModalOverlay);
+      hdr.appendChild(closeBtn);
+    }
+
+    const body = document.createElement("div");
+    body.className = "ui-modal-body";
+    const contentArr = Array.isArray(spec.content) ? spec.content : [];
+    for (const child of contentArr) {
+      body.appendChild(renderInnerComponent(child, dialog, false));
+    }
+
+    dialog.append(hdr, body);
+
+    if (Array.isArray(spec.footer) && spec.footer.length) {
+      const ftr = document.createElement("footer");
+      ftr.className = "ui-modal-footer";
+      for (const child of spec.footer) {
+        ftr.appendChild(renderInnerComponent(child, dialog, false));
+      }
+      dialog.appendChild(ftr);
+    }
+
+    const onKeyDown = (ev) => {
+      if (ev.key === "Escape" && closable) {
+        closeModalOverlay();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    activeModalCleanup = () => window.removeEventListener("keydown", onKeyDown);
+
+    root.replaceChildren(backdrop, dialog);
+    root.classList.remove("hidden");
+  };
+
+  const alertVariantLabel = (variant) => {
+    const v = String(variant || "info").toLowerCase();
+    if (v === "info") return "Info";
+    if (v === "warn" || v === "warning") return "Warning";
+    if (v === "error" || v === "danger" || v === "outage") return "Error";
+    if (v === "success" || v === "ok") return "Success";
+    return v.charAt(0).toUpperCase() + v.slice(1);
+  };
+
+  const buildAlertParts = (alertComp) => {
+    const variantLabel = alertVariantLabel(alertComp.variant);
+    const titleText = String(alertComp.title || alertComp.message || "Alert");
+
+    const content = document.createElement("div");
+    content.className = "dm-alert-content";
+    const titleEl = document.createElement("h3");
+    titleEl.className = "dm-alert-title";
+    titleEl.textContent = titleText;
+    content.appendChild(titleEl);
+
+    if (alertComp.description && String(alertComp.description).trim()) {
+      const descEl = document.createElement("p");
+      descEl.className = "dm-alert-desc";
+      descEl.textContent = String(alertComp.description).trim();
+      content.appendChild(descEl);
+    }
+
+    const statusBtn = document.createElement("span");
+    statusBtn.className = "dm-alert-status-btn";
+    statusBtn.textContent = variantLabel;
+
+    return { content, statusBtn, variantLabel, titleText };
+  };
+
+  const createAlertCard = (alertComp) => {
+    const card = document.createElement("section");
+    card.className = "adk-ui-surface adk-ui-card dm-alert-card";
+    card.setAttribute("data-ui-scope", "true");
+    const { content, statusBtn, titleText } = buildAlertParts(alertComp);
+    card.append(content, statusBtn);
+    return { card, title: titleText };
+  };
+
+  const createStandaloneCard = ({ title, description, headerRight, flushBody = false }) => {
     const card = document.createElement("section");
     card.className = "adk-ui-surface adk-ui-card";
     card.setAttribute("data-ui-scope", "true");
     style(card, {
       width: "100%",
-      border: "1px solid var(--border-default)",
-      borderRadius: "16px",
+      border: "1px solid var(--dm-outline)",
+      borderRadius: "24px",
       background: "var(--surface-card)",
-      boxShadow: "var(--shadow-sm)",
+      boxShadow:
+        "0 12px 32px -12px rgba(18, 19, 23, 0.08), 0 2px 8px -2px rgba(18, 19, 23, 0.04)",
       overflow: "hidden",
       display: "flex",
       flexDirection: "column",
     });
 
-    if (title || description || eyebrow || headerRight) {
+    if (title || description || headerRight) {
       const hdr = document.createElement("header");
       style(hdr, {
         display: "flex",
-        alignItems: "center",
+        alignItems: "flex-start",
         justifyContent: "space-between",
-        gap: "10px",
-        padding: "12px 16px",
-        borderBottom: "1px solid var(--border-default)",
-        background: "color-mix(in srgb, var(--bg-primary) 45%, var(--surface-card))",
+        gap: "16px",
+        padding: flushBody ? "20px 24px 16px" : "22px 24px 6px",
+        borderBottom: flushBody ? "1px solid var(--dm-outline)" : "0",
+        background: "transparent",
       });
 
       const left = document.createElement("div");
       style(left, {
         display: "flex",
-        alignItems: "center",
-        gap: "8px",
+        flexDirection: "column",
+        alignItems: "flex-start",
+        gap: "4px",
         minWidth: "0",
-        flexWrap: "wrap",
       });
-
-      if (eyebrow) {
-        const chip = document.createElement("span");
-        chip.textContent = eyebrow;
-        style(chip, {
-          padding: "2px 8px",
-          borderRadius: "999px",
-          background: "var(--accent-wash)",
-          color: "var(--accent-primary)",
-          fontSize: "9.5px",
-          fontWeight: "700",
-          letterSpacing: "0.07em",
-          textTransform: "uppercase",
-          flexShrink: "0",
-        });
-        left.appendChild(chip);
-      }
 
       if (title) {
         const strong = document.createElement("strong");
         strong.textContent = title;
         style(strong, {
-          fontSize: "13px",
-          fontWeight: "650",
-          color: "var(--text-primary)",
+          fontSize: "20px",
+          fontWeight: "450",
+          lineHeight: "1.22",
+          letterSpacing: "-0.008em",
+          color: "var(--dm-text-primary)",
+          textWrap: "pretty",
         });
         left.appendChild(strong);
       }
@@ -817,8 +1070,10 @@
         const sub = document.createElement("span");
         sub.textContent = description;
         style(sub, {
-          fontSize: "11.5px",
-          color: "var(--text-muted)",
+          fontSize: "14.5px",
+          fontWeight: "400",
+          lineHeight: "1.45",
+          color: "var(--dm-text-secondary)",
         });
         left.appendChild(sub);
       }
@@ -830,10 +1085,10 @@
 
     const body = document.createElement("div");
     style(body, {
-      padding: flushBody ? "0" : "14px 16px",
+      padding: flushBody ? "0" : "10px 24px 24px",
       display: "flex",
       flexDirection: "column",
-      gap: "12px",
+      gap: "16px",
     });
     card.appendChild(body);
 
@@ -950,17 +1205,17 @@
         x: cx,
         y: cy - 4,
         "text-anchor": "middle",
-        fill: "var(--text-muted)",
-        "font-size": "10",
+        fill: "var(--dm-text-secondary)",
+        "font-size": "10.5",
       });
       centerTop.textContent = yKey;
       const centerVal = svgEl("text", {
         x: cx,
         y: cy + 14,
         "text-anchor": "middle",
-        fill: "var(--text-primary)",
-        "font-size": "15",
-        "font-weight": "700",
+        fill: "var(--dm-text-primary)",
+        "font-size": "16",
+        "font-weight": "500",
       });
       centerVal.textContent = formatCompact(total);
       svg.append(centerTop, centerVal);
@@ -969,7 +1224,7 @@
       style(legend, {
         display: "flex",
         flexDirection: "column",
-        gap: "6px",
+        gap: "8px",
         flex: "1",
         minWidth: "180px",
       });
@@ -980,7 +1235,7 @@
           alignItems: "center",
           justifyContent: "space-between",
           gap: "10px",
-          fontSize: "12px",
+          fontSize: "13px",
         });
         const left = document.createElement("div");
         style(left, { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" });
@@ -988,14 +1243,14 @@
         style(swatch, {
           width: "9px",
           height: "9px",
-          borderRadius: "2.5px",
+          borderRadius: "999px",
           background: s.color,
           flexShrink: "0",
         });
         const lbl = document.createElement("span");
         lbl.textContent = s.label;
         style(lbl, {
-          color: "var(--text-primary)",
+          color: "var(--dm-text-primary)",
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
@@ -1005,9 +1260,9 @@
         const right = document.createElement("span");
         right.textContent = `${formatCompact(s.value)} (${((s.value / total) * 100).toFixed(1)}%)`;
         style(right, {
-          color: "var(--text-secondary)",
+          color: "var(--dm-text-secondary)",
           fontFamily: "var(--mono)",
-          fontSize: "11px",
+          fontSize: "12px",
           flexShrink: "0",
         });
         item.append(left, right);
@@ -1064,15 +1319,15 @@
           y1: y,
           x2: W - padR,
           y2: y,
-          stroke: "var(--border-default)",
+          stroke: "var(--dm-outline)",
           "stroke-width": "1",
         });
         const label = svgEl("text", {
           x: padL - 8,
           y: y + 3.5,
           "text-anchor": "end",
-          fill: "var(--text-muted)",
-          "font-size": "10",
+          fill: "var(--dm-text-secondary)",
+          "font-size": "10.5",
         });
         label.textContent = formatCompact(val);
         svg.append(line, label);
@@ -1101,7 +1356,7 @@
             y: top,
             width: barW,
             height: h,
-            rx: "3.5",
+            rx: "6",
             fill: colors[sIdx % colors.length],
             stroke: "none",
           });
@@ -1115,8 +1370,8 @@
               x: bx + barW / 2,
               y: Math.max(10, top - 5),
               "text-anchor": "middle",
-              fill: "var(--text-secondary)",
-              "font-size": "9.5",
+              fill: "var(--dm-text-secondary)",
+              "font-size": "10",
             });
             valTxt.textContent = formatCompact(v);
             svg.appendChild(valTxt);
@@ -1131,8 +1386,8 @@
             x: padL + (i + 0.5) * groupStep,
             y: H - padB + 17,
             "text-anchor": "middle",
-            fill: "var(--text-muted)",
-            "font-size": "10",
+            fill: "var(--dm-text-secondary)",
+            "font-size": "10.5",
           });
           xTxt.textContent = shortLbl;
           const t = svgEl("title");
@@ -1213,8 +1468,8 @@
             x: xForIdx(i),
             y: H - padB + 17,
             "text-anchor": "middle",
-            fill: "var(--text-muted)",
-            "font-size": "10",
+            fill: "var(--dm-text-secondary)",
+            "font-size": "10.5",
           });
           xTxt.textContent = shortLbl;
           svg.appendChild(xTxt);
@@ -1229,19 +1484,19 @@
       style(legend, {
         display: "flex",
         flexWrap: "wrap",
-        gap: "14px",
+        gap: "16px",
         justifyContent: "center",
-        fontSize: "11px",
-        color: "var(--text-secondary)",
+        fontSize: "12.5px",
+        color: "var(--dm-text-secondary)",
       });
       yKeys.forEach((yk, sIdx) => {
         const item = document.createElement("span");
-        style(item, { display: "inline-flex", alignItems: "center", gap: "6px" });
+        style(item, { display: "inline-flex", alignItems: "center", gap: "7px" });
         const dot = document.createElement("span");
         style(dot, {
           width: "8px",
           height: "8px",
-          borderRadius: "2px",
+          borderRadius: "999px",
           background: colors[sIdx % colors.length],
         });
         const txt = document.createElement("span");
@@ -1274,13 +1529,13 @@
     const pageSize = comp.page_size && comp.page_size > 0 ? Number(comp.page_size) : 0;
 
     const toolbar = document.createElement("div");
-    style(toolbar, { display: "flex", alignItems: "center", gap: "8px" });
+    style(toolbar, { display: "flex", alignItems: "center", gap: "10px" });
     const countChip = document.createElement("span");
     countChip.textContent = `${rawRows.length} rows`;
     style(countChip, {
-      fontSize: "10.5px",
-      color: "var(--text-muted)",
-      fontFamily: "var(--mono)",
+      fontSize: "12.5px",
+      fontWeight: "450",
+      color: "var(--dm-text-secondary)",
     });
     toolbar.appendChild(countChip);
 
@@ -1289,13 +1544,13 @@
       search.type = "search";
       search.placeholder = "Filter…";
       style(search, {
-        padding: "3px 8px",
-        borderRadius: "6px",
-        border: "1px solid var(--border-default)",
-        background: "var(--bg-primary)",
-        color: "var(--text-primary)",
-        fontSize: "11px",
-        width: "145px",
+        padding: "6px 14px",
+        borderRadius: "999px",
+        border: "1px solid var(--dm-outline)",
+        background: "var(--dm-surface-gray)",
+        color: "var(--dm-text-primary)",
+        fontSize: "13px",
+        width: "180px",
       });
       search.addEventListener("input", () => {
         filterQuery = search.value.trim().toLowerCase();
@@ -1312,15 +1567,15 @@
     style(table, {
       width: "100%",
       borderCollapse: "collapse",
-      fontSize: "12px",
-      color: "var(--text-primary)",
+      fontSize: "13.5px",
+      color: "var(--dm-text-primary)",
     });
 
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
     style(headRow, {
-      background: "var(--bg-primary)",
-      borderBottom: "1px solid var(--border-default)",
+      background: "transparent",
+      borderBottom: "1px solid var(--dm-outline)",
     });
 
     const tbody = document.createElement("tbody");
@@ -1336,10 +1591,11 @@
         th.textContent = `${col.header}${indicator}`;
         style(th, {
           textAlign: "left",
-          padding: "8px 14px",
-          fontWeight: "650",
-          fontSize: "11px",
-          color: "var(--text-secondary)",
+          padding: "12px 18px",
+          fontWeight: "500",
+          fontSize: "13px",
+          letterSpacing: "0.005em",
+          color: "var(--dm-text-primary)",
           whiteSpace: "nowrap",
           cursor: canSort ? "pointer" : "default",
           userSelect: "none",
@@ -1394,13 +1650,10 @@
         const tr = document.createElement("tr");
         const isLast = idx === rows.length - 1 && !(pageSize > 0 && totalRows > pageSize);
         style(tr, {
-          borderBottom: isLast ? "0" : "1px solid var(--border-default)",
-          background:
-            comp.striped && idx % 2 === 1
-              ? "color-mix(in srgb, var(--bg-primary) 55%, var(--surface-card))"
-              : "transparent",
+          borderBottom: isLast ? "0" : "1px solid var(--dm-outline)",
+          background: comp.striped && idx % 2 === 1 ? "var(--dm-surface-gray)" : "transparent",
         });
-        for (const col of columns) {
+        columns.forEach((col, colIdx) => {
           const td = document.createElement("td");
           const raw = row[col.accessor_key];
           const text = formatCellValue(raw);
@@ -1409,14 +1662,15 @@
             (typeof raw === "string" && /^[$+-]?[\d,.]+%?$/.test(raw.trim()));
           td.textContent = text;
           style(td, {
-            padding: "8px 14px",
+            padding: "12px 18px",
             textAlign: isNumeric ? "right" : "left",
             fontFamily: isNumeric ? "var(--mono)" : "inherit",
-            fontSize: isNumeric ? "11.5px" : "12px",
+            fontSize: isNumeric ? "13px" : "13.5px",
+            color: colIdx === 0 && !isNumeric ? "var(--dm-text-primary)" : "var(--dm-text-secondary)",
             whiteSpace: isNumeric ? "nowrap" : "normal",
           });
           tr.appendChild(td);
-        }
+        });
         tbody.appendChild(tr);
       });
 
@@ -1427,30 +1681,31 @@
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
-          padding: "7px 14px",
-          fontSize: "11px",
-          color: "var(--text-muted)",
-          background: "var(--bg-primary)",
-          borderTop: "1px solid var(--border-default)",
+          padding: "12px 18px",
+          fontSize: "13px",
+          color: "var(--dm-text-secondary)",
+          background: "transparent",
+          borderTop: "1px solid var(--dm-outline)",
         });
         const info = document.createElement("span");
         info.textContent = `Page ${page + 1} of ${totalPages}`;
         const btnWrap = document.createElement("div");
-        style(btnWrap, { display: "flex", gap: "6px" });
+        style(btnWrap, { display: "flex", gap: "8px" });
         const mkBtn = (lbl, disabled, onClick) => {
           const b = document.createElement("button");
           b.type = "button";
           b.textContent = lbl;
           b.disabled = disabled;
           style(b, {
-            padding: "3px 9px",
-            borderRadius: "5px",
-            border: "1px solid var(--border-default)",
-            background: "var(--surface-card)",
-            color: "var(--text-secondary)",
+            padding: "6px 14px",
+            borderRadius: "999px",
+            border: "1px solid var(--dm-outline)",
+            background: "var(--dm-surface-gray)",
+            color: "var(--dm-text-primary)",
             cursor: disabled ? "default" : "pointer",
-            opacity: disabled ? "0.45" : "1",
-            fontSize: "11px",
+            opacity: disabled ? "0.4" : "1",
+            fontSize: "12.5px",
+            fontWeight: "500",
           });
           b.addEventListener("click", onClick);
           return b;
@@ -1488,6 +1743,31 @@
       case "text": {
         const v = String(comp.variant || "body").toLowerCase();
         const raw = String(comp.content ?? "");
+        const stepMatch = v === "body" && raw.match(/^(✅|⏳|⬜)\s+([\s\S]+)$/);
+        if (stepMatch) {
+          const row = document.createElement("div");
+          const isDone = stepMatch[1] === "✅";
+          const isCurrent = stepMatch[1] === "⏳";
+          style(row, {
+            display: "flex",
+            alignItems: "center",
+            gap: "10px",
+            padding: "10px 14px",
+            borderRadius: "14px",
+            background: "var(--dm-surface-gray)",
+            border: `1px solid ${isCurrent ? "var(--dm-text-primary)" : "var(--dm-outline)"}`,
+            fontSize: "14px",
+            color: isDone ? "var(--dm-text-secondary)" : "var(--dm-text-primary)",
+            fontWeight: isCurrent ? "500" : "400",
+          });
+          const mark = document.createElement("span");
+          mark.textContent = stepMatch[1];
+          mark.setAttribute("aria-hidden", "true");
+          const txt = document.createElement("span");
+          appendInlineMarkdown(txt, stepMatch[2]);
+          row.append(mark, txt);
+          return row;
+        }
         const el = document.createElement(v === "code" ? "code" : "div");
         if (v === "code") {
           el.textContent = raw;
@@ -1498,43 +1778,55 @@
         } else {
           appendInlineMarkdown(el, raw);
         }
+        const inModal =
+          Boolean(surfaceRoot?.hasAttribute?.("data-ui-modal")) ||
+          Boolean(surfaceRoot?.closest?.('[data-ui-modal="true"]'));
         const map = {
           h1: {
-            fontSize: "19px",
-            fontWeight: "750",
-            letterSpacing: "-0.01em",
-            lineHeight: "1.25",
-            color: "var(--text-primary)",
+            fontSize: "22px",
+            fontWeight: "450",
+            letterSpacing: "-0.012em",
+            lineHeight: "1.2",
+            color: "var(--dm-text-primary)",
           },
           h2: {
-            fontSize: inGrid ? "20px" : "16px",
-            fontWeight: "750",
-            letterSpacing: "-0.01em",
-            lineHeight: "1.25",
-            color: "var(--text-primary)",
+            fontSize: inGrid ? "28px" : "19px",
+            fontWeight: "450",
+            letterSpacing: inGrid ? "-0.015em" : "-0.01em",
+            lineHeight: inGrid ? "1.12" : "1.22",
+            color: "var(--dm-text-primary)",
           },
           h3: {
-            fontSize: "13.5px",
-            fontWeight: "650",
-            lineHeight: "1.35",
-            color: "var(--text-primary)",
+            fontSize: inModal ? "17px" : "16.5px",
+            fontWeight: "450",
+            letterSpacing: "-0.006em",
+            lineHeight: "1.32",
+            color: "var(--dm-text-primary)",
           },
           h4: {
-            fontSize: "12.5px",
-            fontWeight: "650",
+            fontSize: "14.5px",
+            fontWeight: "500",
             lineHeight: "1.4",
-            color: "var(--text-primary)",
+            color: "var(--dm-text-primary)",
           },
-          caption: { fontSize: "11.5px", color: "var(--text-muted)", lineHeight: "1.4" },
+          caption: {
+            fontSize: inModal ? "13.5px" : "13px",
+            color: "var(--dm-text-secondary)",
+            lineHeight: "1.45",
+          },
           code: {
             fontFamily: "var(--mono)",
-            fontSize: "11.5px",
-            background: "var(--bg-primary)",
-            border: "1px solid var(--border-default)",
-            padding: "1px 5px",
-            borderRadius: "4px",
+            fontSize: inModal ? "13px" : "12.5px",
+            background: "var(--dm-surface-gray-subtle)",
+            border: "1px solid var(--dm-outline)",
+            padding: "1px 6px",
+            borderRadius: "6px",
           },
-          body: { fontSize: "13px", lineHeight: "1.5", color: "var(--text-primary)" },
+          body: {
+            fontSize: inModal ? "16px" : "14.5px",
+            lineHeight: "1.55",
+            color: inModal ? "var(--dm-text-secondary)" : "var(--dm-text-primary)",
+          },
         };
         style(el, map[v] || map.body);
         return el;
@@ -1547,13 +1839,13 @@
         style(span, {
           display: "inline-flex",
           alignItems: "center",
-          padding: "2px 8px",
+          padding: "4px 10px",
           borderRadius: "999px",
-          fontSize: "10.5px",
-          fontWeight: "650",
+          fontSize: "12px",
+          fontWeight: "500",
           background: vc.bg,
           color: vc.fg,
-          border: `1px solid ${vc.border}`,
+          border: "1px solid transparent",
           alignSelf: "flex-start",
         });
         return span;
@@ -1563,8 +1855,8 @@
         const hr = document.createElement("hr");
         style(hr, {
           border: "0",
-          borderTop: "1px solid var(--border-default)",
-          margin: "4px 0",
+          borderTop: "1px solid var(--dm-outline)",
+          margin: "6px 0",
           width: "100%",
         });
         return hr;
@@ -1573,7 +1865,7 @@
       case "stack": {
         const div = document.createElement("div");
         const horiz = String(comp.direction || "vertical").toLowerCase() === "horizontal";
-        const gapPx = Math.max(1, Number(comp.gap ?? 3)) * 3.5;
+        const gapPx = Math.max(1, Number(comp.gap ?? 3)) * 4;
         style(div, {
           display: "flex",
           flexDirection: horiz ? "row" : "column",
@@ -1592,8 +1884,8 @@
         const cols = Math.max(1, Math.min(6, Number(comp.columns) || 2));
         style(div, {
           display: "grid",
-          gridTemplateColumns: `repeat(auto-fit, minmax(${cols >= 3 ? "155px" : "210px"}, 1fr))`,
-          gap: "10px",
+          gridTemplateColumns: `repeat(auto-fit, minmax(${cols >= 3 ? "165px" : "220px"}, 1fr))`,
+          gap: "14px",
           alignItems: "stretch",
         });
         for (const child of comp.children || []) {
@@ -1604,7 +1896,7 @@
 
       case "container": {
         const div = document.createElement("div");
-        style(div, { display: "flex", flexDirection: "column", gap: "10px" });
+        style(div, { display: "flex", flexDirection: "column", gap: "12px" });
         for (const child of comp.children || []) {
           div.appendChild(renderInnerComponent(child, surfaceRoot, inGrid));
         }
@@ -1619,11 +1911,11 @@
           display: "flex",
           flexDirection: "column",
           justifyContent: "space-between",
-          gap: "6px",
-          padding: "12px 14px",
-          borderRadius: "12px",
-          background: "var(--bg-primary)",
-          border: "1px solid var(--border-default)",
+          gap: "8px",
+          padding: inGrid ? "18px 20px" : "20px 22px",
+          borderRadius: "20px",
+          background: "var(--dm-surface-gray)",
+          border: "1px solid var(--dm-outline)",
         });
 
         if (comp.title) {
@@ -1633,16 +1925,16 @@
             t,
             inGrid
               ? {
-                  fontSize: "10px",
-                  fontWeight: "750",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.06em",
-                  color: "var(--text-muted)",
+                  fontSize: "13.5px",
+                  fontWeight: "450",
+                  letterSpacing: "0.005em",
+                  color: "var(--dm-text-secondary)",
                 }
               : {
-                  fontSize: "12.5px",
-                  fontWeight: "650",
-                  color: "var(--text-primary)",
+                  fontSize: "16.5px",
+                  fontWeight: "450",
+                  letterSpacing: "-0.006em",
+                  color: "var(--dm-text-primary)",
                 }
           );
           tile.appendChild(t);
@@ -1650,12 +1942,12 @@
         if (comp.description) {
           const d = document.createElement("div");
           d.textContent = comp.description;
-          style(d, { fontSize: "11.5px", color: "var(--text-muted)" });
+          style(d, { fontSize: "13.5px", color: "var(--dm-text-secondary)", lineHeight: "1.45" });
           tile.appendChild(d);
         }
         if (Array.isArray(comp.content) && comp.content.length) {
           const body = document.createElement("div");
-          style(body, { display: "flex", flexDirection: "column", gap: "6px" });
+          style(body, { display: "flex", flexDirection: "column", gap: "8px" });
           for (const child of comp.content) {
             body.appendChild(renderInnerComponent(child, tile, inGrid));
           }
@@ -1666,10 +1958,9 @@
           style(ftr, {
             display: "flex",
             flexWrap: "wrap",
-            gap: "6px",
+            gap: "8px",
             justifyContent: "flex-end",
-            paddingTop: "8px",
-            borderTop: "1px solid var(--border-default)",
+            paddingTop: "10px",
           });
           for (const child of comp.footer) {
             ftr.appendChild(renderInnerComponent(child, tile, false));
@@ -1681,13 +1972,13 @@
 
       case "tabs": {
         const wrap = document.createElement("div");
-        style(wrap, { display: "flex", flexDirection: "column", gap: "10px" });
+        style(wrap, { display: "flex", flexDirection: "column", gap: "14px" });
         const bar = document.createElement("div");
         style(bar, {
           display: "flex",
-          gap: "6px",
-          borderBottom: "1px solid var(--border-default)",
-          paddingBottom: "6px",
+          gap: "4px",
+          borderBottom: "1px solid var(--dm-outline)",
+          paddingBottom: "0",
         });
         const panel = document.createElement("div");
         const tabs = Array.isArray(comp.tabs) ? comp.tabs : [];
@@ -1697,10 +1988,10 @@
           activeIdx = idx;
           Array.from(bar.children).forEach((btn, i) => {
             style(btn, {
-              background: i === activeIdx ? "var(--accent-wash)" : "var(--bg-primary)",
-              color: i === activeIdx ? "var(--accent-primary)" : "var(--text-secondary)",
-              borderColor:
-                i === activeIdx ? "var(--accent-primary)" : "var(--border-default)",
+              background: "transparent",
+              color: i === activeIdx ? "var(--dm-text-primary)" : "var(--dm-text-secondary)",
+              borderBottom:
+                i === activeIdx ? "2px solid var(--dm-text-primary)" : "2px solid transparent",
             });
           });
           panel.replaceChildren();
@@ -1714,11 +2005,13 @@
           b.type = "button";
           b.textContent = tab.label || `Tab ${idx + 1}`;
           style(b, {
-            border: "1px solid var(--border-default)",
-            borderRadius: "999px",
-            padding: "5px 12px",
-            fontSize: "11.5px",
-            fontWeight: "600",
+            border: "0",
+            borderBottom: "2px solid transparent",
+            borderRadius: "0",
+            padding: "10px 16px",
+            marginBottom: "-1px",
+            fontSize: "14px",
+            fontWeight: "500",
             cursor: "pointer",
           });
           b.addEventListener("click", () => selectTab(idx));
@@ -1736,17 +2029,17 @@
         const { element, toolbar } = renderTableParts(comp);
         const box = document.createElement("div");
         style(box, {
-          border: "1px solid var(--border-default)",
-          borderRadius: "12px",
+          border: "1px solid var(--dm-outline)",
+          borderRadius: "18px",
           overflow: "hidden",
         });
         const bar = document.createElement("div");
         style(bar, {
           display: "flex",
           justifyContent: "flex-end",
-          padding: "7px 12px",
-          background: "var(--bg-primary)",
-          borderBottom: "1px solid var(--border-default)",
+          padding: "10px 16px",
+          background: "transparent",
+          borderBottom: "1px solid var(--dm-outline)",
         });
         bar.appendChild(toolbar);
         box.append(bar, element);
@@ -1757,21 +2050,21 @@
         const dl = document.createElement("div");
         style(dl, {
           display: "grid",
-          gridTemplateColumns: "minmax(130px, auto) 1fr",
-          gap: "7px 16px",
-          padding: "11px 14px",
-          borderRadius: "12px",
-          background: "var(--bg-primary)",
-          border: "1px solid var(--border-default)",
-          fontSize: "12px",
+          gridTemplateColumns: "minmax(140px, auto) 1fr",
+          gap: "10px 20px",
+          padding: "16px 18px",
+          borderRadius: "18px",
+          background: "var(--dm-surface-gray)",
+          border: "1px solid var(--dm-outline)",
+          fontSize: "13.5px",
         });
         for (const pair of comp.pairs || []) {
           const k = document.createElement("div");
           k.textContent = pair.key;
-          style(k, { color: "var(--text-muted)", fontWeight: "600" });
+          style(k, { color: "var(--dm-text-secondary)", fontWeight: "450" });
           const v = document.createElement("div");
           v.textContent = pair.value;
-          style(v, { color: "var(--text-primary)", fontWeight: "650" });
+          style(v, { color: "var(--dm-text-primary)", fontWeight: "500" });
           dl.append(k, v);
         }
         return dl;
@@ -1781,12 +2074,13 @@
         const list = document.createElement(comp.ordered ? "ol" : "ul");
         style(list, {
           margin: "0",
-          paddingLeft: "20px",
+          paddingLeft: "22px",
           display: "flex",
           flexDirection: "column",
-          gap: "4px",
-          fontSize: "12.5px",
-          color: "var(--text-primary)",
+          gap: "6px",
+          fontSize: "14.5px",
+          lineHeight: "1.55",
+          color: "var(--dm-text-primary)",
         });
         for (const item of comp.items || []) {
           const li = document.createElement("li");
@@ -1801,12 +2095,12 @@
         pre.textContent = comp.code ?? "";
         style(pre, {
           margin: "0",
-          padding: "10px 12px",
-          borderRadius: "7px",
-          background: "var(--bg-primary)",
-          border: "1px solid var(--border-default)",
-          color: "var(--text-primary)",
-          fontSize: "11.5px",
+          padding: "14px 16px",
+          borderRadius: "14px",
+          background: "var(--dm-surface-gray)",
+          border: "1px solid var(--dm-outline)",
+          color: "var(--dm-text-primary)",
+          fontSize: "12.5px",
           overflowX: "auto",
           fontFamily: "var(--mono)",
         });
@@ -1816,49 +2110,31 @@
       case "alert":
       case "toast": {
         const box = document.createElement("div");
-        const vc = variantColors(comp.variant);
-        style(box, {
-          padding: "10px 12px",
-          borderRadius: "8px",
-          background: vc.bg,
-          border: `1px solid ${vc.border}`,
-          display: "flex",
-          flexDirection: "column",
-          gap: "3px",
-        });
-        const title = document.createElement("div");
-        title.textContent = comp.title || comp.message || "";
-        style(title, { fontWeight: "650", fontSize: "12.5px", color: vc.fg });
-        box.appendChild(title);
-        if (comp.description) {
-          const desc = document.createElement("div");
-          desc.textContent = comp.description;
-          style(desc, { fontSize: "12px", color: "var(--text-secondary)" });
-          box.appendChild(desc);
-        }
+        box.className = "dm-alert-inline";
+        const { content, statusBtn } = buildAlertParts(comp);
+        box.append(content, statusBtn);
         return box;
       }
 
       case "progress": {
         const wrap = document.createElement("div");
-        style(wrap, { display: "flex", flexDirection: "column", gap: "6px" });
+        style(wrap, { display: "flex", flexDirection: "column", gap: "8px" });
         const pct = Math.max(0, Math.min(100, Number(comp.value) || 0));
         const top = document.createElement("div");
-        style(top, { display: "flex", justifyContent: "space-between", fontSize: "12px" });
+        style(top, { display: "flex", justifyContent: "space-between", fontSize: "13.5px" });
         const lbl = document.createElement("span");
         lbl.textContent = comp.label || "Progress";
-        style(lbl, { color: "var(--text-primary)", fontWeight: "600" });
+        style(lbl, { color: "var(--dm-text-primary)", fontWeight: "450" });
         const val = document.createElement("span");
         val.textContent = `${pct}%`;
-        style(val, { color: "var(--text-muted)", fontFamily: "var(--mono)" });
+        style(val, { color: "var(--dm-text-secondary)", fontFamily: "var(--mono)" });
         top.append(lbl, val);
 
         const track = document.createElement("div");
         style(track, {
-          height: "7px",
+          height: "8px",
           borderRadius: "999px",
-          background: "var(--bg-primary)",
-          border: "1px solid var(--border-default)",
+          background: "var(--dm-surface-gray)",
           overflow: "hidden",
         });
         const bar = document.createElement("div");
@@ -1866,7 +2142,7 @@
           width: `${pct}%`,
           height: "100%",
           borderRadius: "999px",
-          background: "var(--accent-primary)",
+          background: "var(--dm-text-primary)",
         });
         track.appendChild(bar);
         wrap.append(top, track);
@@ -1882,11 +2158,27 @@
       case "slider":
       case "switch": {
         const field = document.createElement("label");
-        style(field, { display: "flex", flexDirection: "column", gap: "4px", fontSize: "11.5px" });
+        style(field, { display: "flex", flexDirection: "column", gap: "6px", fontSize: "13.5px" });
         const lbl = document.createElement("span");
         lbl.textContent = `${comp.label || comp.name}${comp.required ? " *" : ""}`;
-        style(lbl, { fontWeight: "650", color: "var(--text-secondary)" });
-        field.appendChild(lbl);
+        style(lbl, { fontWeight: "450", color: "var(--dm-text-secondary)" });
+
+        let sliderValEl = null;
+        if (type === "slider") {
+          const lblRow = document.createElement("div");
+          style(lblRow, { display: "flex", justifyContent: "space-between", alignItems: "center" });
+          sliderValEl = document.createElement("code");
+          sliderValEl.textContent = String(comp.default_value ?? comp.min ?? 0);
+          style(sliderValEl, {
+            fontFamily: "var(--mono)",
+            fontSize: "12.5px",
+            color: "var(--dm-text-primary)",
+          });
+          lblRow.append(lbl, sliderValEl);
+          field.appendChild(lblRow);
+        } else {
+          field.appendChild(lbl);
+        }
 
         let control;
         if (type === "textarea") {
@@ -1920,7 +2212,7 @@
           }
         } else if (type === "switch") {
           const row = document.createElement("div");
-          style(row, { display: "flex", alignItems: "center", gap: "8px", padding: "2px 0" });
+          style(row, { display: "flex", alignItems: "center", gap: "10px", padding: "4px 0" });
           control = document.createElement("input");
           control.type = "checkbox";
           control.checked = !!comp.default_checked;
@@ -1944,6 +2236,22 @@
           if (comp.default_value !== undefined && comp.default_value !== null) {
             control.value = String(comp.default_value);
           }
+          if (type === "slider" && sliderValEl) {
+            sliderValEl.textContent = control.value;
+            control.addEventListener("input", () => {
+              sliderValEl.textContent = control.value;
+            });
+          }
+          if (type !== "slider") {
+            control.addEventListener("keydown", (ev) => {
+              if (ev.key === "Enter") {
+                ev.preventDefault();
+                const scope = control.closest('[data-ui-scope="true"]') || surfaceRoot;
+                const submitBtn = scope?.querySelector('button[data-ui-primary="true"]');
+                if (submitBtn && !submitBtn.disabled) submitBtn.click();
+              }
+            });
+          }
         }
 
         if (comp.required) {
@@ -1954,12 +2262,17 @@
 
         if (type !== "switch") {
           style(control, {
-            padding: type === "select" ? "8px 30px 8px 11px" : "8px 11px",
-            borderRadius: "10px",
-            border: "1px solid var(--border-default)",
-            backgroundColor: "var(--bg-primary)",
-            color: "var(--text-primary)",
-            fontSize: "12.5px",
+            padding:
+              type === "select"
+                ? "10px 34px 10px 14px"
+                : type === "slider"
+                  ? "4px 0"
+                  : "10px 14px",
+            borderRadius: "12px",
+            border: type === "slider" ? "0" : "1px solid var(--dm-outline)",
+            backgroundColor: type === "slider" ? "transparent" : "var(--dm-surface-gray)",
+            color: "var(--dm-text-primary)",
+            fontSize: "14px",
           });
           field.appendChild(control);
         }
@@ -1967,15 +2280,15 @@
         const errEl = document.createElement("span");
         errEl.className = "ui-field-error hidden";
         style(errEl, {
-          fontSize: "11px",
-          fontWeight: "500",
+          fontSize: "12px",
+          fontWeight: "450",
           color: "var(--accent-error)",
         });
         field.appendChild(errEl);
 
         const clearFieldError = () => {
-          if (type !== "switch") {
-            control.style.borderColor = "var(--border-default)";
+          if (type !== "switch" && type !== "slider") {
+            control.style.borderColor = "var(--dm-outline)";
           }
           control.removeAttribute("aria-invalid");
           errEl.textContent = "";
@@ -1994,12 +2307,18 @@
         btn.textContent = comp.label || "Submit";
         btn.disabled = !!comp.disabled;
         const v = String(comp.variant || "primary").toLowerCase();
+        const inModal =
+          Boolean(surfaceRoot?.hasAttribute?.("data-ui-modal")) ||
+          Boolean(surfaceRoot?.closest?.('[data-ui-modal="true"]'));
+        if (v === "primary" || v === "danger") {
+          btn.setAttribute("data-ui-primary", "true");
+        }
         const btnStyles =
           v === "primary"
             ? {
-                background: "var(--accent-primary)",
-                color: "#fff",
-                border: "1px solid var(--accent-primary)",
+                background: "var(--primary-btn-bg)",
+                color: "var(--primary-btn-fg)",
+                border: "1px solid transparent",
               }
             : v === "danger"
               ? {
@@ -2007,18 +2326,34 @@
                   color: "#fff",
                   border: "1px solid var(--accent-error)",
                 }
-              : {
-                  background: "var(--bg-primary)",
-                  color: "var(--text-secondary)",
-                  border: "1px solid var(--border-default)",
-                };
+              : v === "outline"
+                ? {
+                    background: "transparent",
+                    color: "var(--dm-text-primary)",
+                    border: "1px solid var(--dm-outline)",
+                    boxShadow: "0 0 0 1px var(--dm-outline)",
+                  }
+                : v === "ghost"
+                  ? {
+                      background: "transparent",
+                      color: "var(--dm-text-secondary)",
+                      border: "1px solid transparent",
+                    }
+                  : {
+                      background: inModal ? "var(--dm-surface-gray-subtle)" : "var(--dm-surface-gray)",
+                      color: "var(--dm-text-primary)",
+                      border: "1px solid var(--dm-outline)",
+                    };
         style(btn, {
-          padding: "7px 16px",
+          padding: "10px 22px",
           borderRadius: "999px",
-          fontSize: "12px",
-          fontWeight: "600",
+          fontSize: inModal ? "14.5px" : "14px",
+          fontWeight: "500",
+          letterSpacing: "-0.004em",
           cursor: btn.disabled ? "default" : "pointer",
+          opacity: btn.disabled ? "0.45" : "1",
           alignSelf: "flex-start",
+          transition: "opacity 0.15s ease, transform 0.12s ease",
           ...btnStyles,
         });
 
@@ -2055,7 +2390,7 @@
               }
 
               if (errMsg) {
-                if (inp.type !== "checkbox") {
+                if (inp.type !== "checkbox" && inp.type !== "range") {
                   inp.style.borderColor = "var(--accent-error)";
                 }
                 inp.setAttribute("aria-invalid", "true");
@@ -2077,7 +2412,7 @@
           }
 
           let msg;
-          if (inputs.length > 0) {
+          if (inputs.length > 0 && !isCancelAction) {
             const lines = inputs.map((inp) => {
               const name = inp.getAttribute("data-ui-field");
               const val =
@@ -2099,9 +2434,81 @@
           setTimeout(() => {
             btn.textContent = orig;
           }, 1800);
+          if (btn.closest('[data-ui-modal="true"]')) {
+            closeModalOverlay();
+          }
           sendMessage(msg);
         });
         return btn;
+      }
+
+      case "icon": {
+        const span = document.createElement("span");
+        span.className = "google-symbols";
+        span.setAttribute("aria-hidden", "true");
+        const rawName = String(comp.name || "info").toLowerCase().replace(/-/g, "_");
+        const iconMap = {
+          check: "check_circle",
+          alert_triangle: "warning",
+          alert_circle: "error",
+          x: "close",
+        };
+        span.textContent = iconMap[rawName] || rawName;
+        style(span, {
+          fontSize: `${Math.max(14, Number(comp.size) || 18)}px`,
+          color: "var(--accent-primary)",
+        });
+        return span;
+      }
+
+      case "image": {
+        const img = document.createElement("img");
+        img.src = comp.src || "";
+        img.alt = comp.alt || "";
+        style(img, {
+          maxWidth: "100%",
+          height: "auto",
+          borderRadius: "10px",
+          border: "1px solid var(--border-default)",
+        });
+        return img;
+      }
+
+      case "spinner": {
+        const wrap = document.createElement("div");
+        style(wrap, { display: "inline-flex", alignItems: "center", gap: "8px" });
+        const ring = document.createElement("span");
+        const sz = comp.size === "small" ? "14px" : comp.size === "large" ? "24px" : "18px";
+        style(ring, {
+          width: sz,
+          height: sz,
+          borderRadius: "50%",
+          border: "2px solid var(--border-strong)",
+          borderTopColor: "var(--accent-primary)",
+          display: "inline-block",
+          animation: "ui-spin 0.8s linear infinite",
+        });
+        wrap.appendChild(ring);
+        if (comp.label) {
+          const lbl = document.createElement("span");
+          lbl.textContent = comp.label;
+          style(lbl, { fontSize: "12px", color: "var(--text-secondary)" });
+          wrap.appendChild(lbl);
+        }
+        return wrap;
+      }
+
+      case "skeleton": {
+        const sk = document.createElement("div");
+        style(sk, {
+          width: comp.width || "100%",
+          height: comp.height || "16px",
+          borderRadius: comp.circle ? "50%" : "8px",
+          background: "var(--bg-primary)",
+          border: "1px solid var(--border-default)",
+          animation: "ui-shimmer 1.4s ease-in-out infinite",
+        });
+        return sk;
       }
 
       default:
@@ -2109,7 +2516,61 @@
     }
   };
 
-  const buildStandaloneCards = (uiResp) => {
+  const isInputComponent = (c) => {
+    const t = String(c?.type || "").toLowerCase();
+    return (
+      t === "text_input" ||
+      t === "number_input" ||
+      t === "date_input" ||
+      t === "textarea" ||
+      t === "select" ||
+      t === "multi_select" ||
+      t === "slider" ||
+      t === "switch"
+    );
+  };
+
+  const isConfirmCard = (comp, toolName) => {
+    if (toolName === "render_confirm") return true;
+    if (String(comp?.type || "").toLowerCase() !== "card") return false;
+    const footer = Array.isArray(comp.footer) ? comp.footer : [];
+    const content = Array.isArray(comp.content) ? comp.content : [];
+    if (footer.length !== 2 || !content.length) return false;
+    const allButtons = footer.every((b) => String(b?.type || "").toLowerCase() === "button");
+    const allText = content.every((c) => String(c?.type || "").toLowerCase() === "text");
+    const hasCancel = footer.some(
+      (b) =>
+        String(b?.variant || "").toLowerCase() === "ghost" ||
+        /^(cancel|dismiss|no)\b/i.test(String(b?.action_id || "")) ||
+        /^(cancel|dismiss|no)\b/i.test(String(b?.label || ""))
+    );
+    return allButtons && allText && hasCancel;
+  };
+
+  const classifyUiResponse = (part, uiResp) => {
+    const toolName =
+      part?.functionResponse?.name || part?.function_response?.name || part?.name || "";
+    const comps = Array.isArray(uiResp?.components) ? uiResp.components : [];
+    const toasts = comps.filter((c) => String(c?.type || "").toLowerCase() === "toast");
+    const rest = comps.filter((c) => String(c?.type || "").toLowerCase() !== "toast");
+
+    if (toolName === "render_toast" || (toasts.length > 0 && rest.length === 0)) {
+      return { kind: "toast", toolName, toasts };
+    }
+    if (
+      toolName === "render_modal" ||
+      (rest.length === 1 && String(rest[0]?.type || "").toLowerCase() === "modal")
+    ) {
+      return { kind: "modal", toolName, modal: rest[0], toasts };
+    }
+    if (rest.length === 1 && isConfirmCard(rest[0], toolName)) {
+      return { kind: "confirm", toolName, confirmCard: rest[0], toasts };
+    }
+    const cleanResp = rest.length === comps.length ? uiResp : { ...uiResp, components: rest };
+    return { kind: "surface", toolName, uiResp: cleanResp, toasts };
+  };
+
+  const buildStandaloneCards = (uiResp, toolName = "") => {
     const comps = Array.isArray(uiResp.components) ? uiResp.components : [];
     const cards = [];
 
@@ -2122,23 +2583,27 @@
       const { element, toolbar } = renderTableParts(tableComp);
       const { card, body } = createStandaloneCard({
         title,
-        eyebrow: "Table",
         headerRight: toolbar,
         flushBody: true,
       });
       body.appendChild(element);
       cards.push(card);
-      return { title, eyebrow: "Table", cards };
+      return { title, cards };
     }
 
     if (comps.length === 1 && comps[0]?.type === "chart") {
       const chartComp = comps[0];
-      const kind = String(chartComp.kind || "bar").toUpperCase();
       const title = chartComp.title || "Chart";
-      const { card, body } = createStandaloneCard({ title, eyebrow: kind });
+      const { card, body } = createStandaloneCard({ title });
       body.appendChild(renderChartInner({ ...chartComp, title: null }));
       cards.push(card);
-      return { title, eyebrow: kind, cards };
+      return { title, cards };
+    }
+
+    if (comps.length === 1 && String(comps[0]?.type || "").toLowerCase() === "alert") {
+      const { card, title } = createAlertCard(comps[0]);
+      cards.push(card);
+      return { title, cards };
     }
 
     let surfaceTitle = null;
@@ -2174,7 +2639,6 @@
           description: pendingTitle
             ? `${pendingTitle}${pendingSubtitle ? ` · ${pendingSubtitle}` : ""}`
             : null,
-          eyebrow: "KPIs",
         });
         pendingTitle = null;
         pendingSubtitle = null;
@@ -2184,9 +2648,21 @@
       }
 
       if (t === "card" || t === "modal") {
-        const contentArr = Array.isArray(comp.content) ? comp.content : [];
+        let contentArr = Array.isArray(comp.content) ? [...comp.content] : [];
         const singleTable = contentArr.length === 1 && contentArr[0]?.type === "table";
         const singleChart = contentArr.length === 1 && contentArr[0]?.type === "chart";
+        const isProgress =
+          toolName === "render_progress" ||
+          (!comp.title && contentArr.some((c) => String(c?.type || "").toLowerCase() === "progress"));
+
+        let liftedTitle = null;
+        let liftedDesc = null;
+        if (isProgress && !comp.title && contentArr[0]?.type === "text") {
+          liftedTitle = contentArr.shift().content;
+          if (contentArr[0]?.type === "text" && String(contentArr[0].variant || "").toLowerCase() === "caption") {
+            liftedDesc = contentArr.shift().content;
+          }
+        }
 
         let headerRight = null;
         let tableElement = null;
@@ -2196,19 +2672,15 @@
           tableElement = parts.element;
         }
 
-        const eyebrow = singleTable
-          ? "Table"
-          : singleChart
-            ? String(contentArr[0].kind || "Chart").toUpperCase()
-            : pendingTitle || "Card";
-
-        const cardTitle = comp.title || pendingTitle || "Details";
+        const cardTitle = comp.title || liftedTitle || pendingTitle || "Details";
         if (!surfaceTitle) surfaceTitle = cardTitle;
 
         const { card, body } = createStandaloneCard({
           title: cardTitle,
-          description: comp.description || (comp.title && pendingTitle ? pendingSubtitle : null),
-          eyebrow,
+          description:
+            comp.description ||
+            liftedDesc ||
+            (comp.title && pendingTitle ? pendingSubtitle : null),
           headerRight,
           flushBody: singleTable,
         });
@@ -2230,11 +2702,10 @@
           style(ftr, {
             display: "flex",
             flexWrap: "wrap",
-            gap: "8px",
+            gap: "10px",
             justifyContent: "flex-end",
-            padding: "10px 14px",
-            borderTop: "1px solid var(--border-default)",
-            background: "var(--bg-primary)",
+            padding: "4px 24px 22px",
+            background: "transparent",
           });
           for (const child of comp.footer) {
             ftr.appendChild(renderInnerComponent(child, card, false));
@@ -2246,12 +2717,20 @@
         continue;
       }
 
+      if (t === "alert") {
+        const { card, title } = createAlertCard(comp);
+        if (!surfaceTitle) surfaceTitle = title;
+        pendingTitle = null;
+        pendingSubtitle = null;
+        cards.push(card);
+        continue;
+      }
+
       const fallbackTitle = comp.title || pendingTitle || "Component";
       if (!surfaceTitle) surfaceTitle = fallbackTitle;
       const { card, body } = createStandaloneCard({
         title: fallbackTitle,
         description: pendingSubtitle || null,
-        eyebrow: t === "alert" || t === "toast" ? String(comp.variant || "Alert") : "UI",
       });
       pendingTitle = null;
       pendingSubtitle = null;
@@ -2261,7 +2740,6 @@
 
     return {
       title: surfaceTitle || "Dashboard",
-      eyebrow: cards.length > 1 ? "Dashboard" : "Card",
       cards,
     };
   };
@@ -3543,29 +4021,90 @@
     };
   };
 
-  const rebuildFromSessionEvents = (events, { forceCanvas = false } = {}) => {
+  const shownOverlayIds = new Set();
+  let overlayTriggersById = new Map();
+
+  const rebuildFromSessionEvents = (
+    events,
+    { forceCanvas = false, suppressOverlays = false } = {}
+  ) => {
     currentEvents = Array.isArray(events) ? events : [];
     const prevSurfaceIds = canvasSurfaces.map((s) => s.id).join("|");
     const existingById = new Map(canvasSurfaces.map((s) => [s.id, s]));
     const nextSurfaces = [];
+    const nextOverlays = new Map();
 
     currentEvents.forEach((ev, idx) => {
       const parts = ev?.content?.parts || [];
       let uiIndex = 0;
       parts.forEach((part) => {
         const uiResp = extractUiResponse(part);
-        if (uiResp) {
-          const surfaceId = `surface-${ev.id || idx}-${uiIndex++}`;
-          const prev = existingById.get(surfaceId);
-          if (prev) {
-            nextSurfaces.push(prev);
-          } else {
-            const built = buildStandaloneCards(uiResp);
+        if (!uiResp) return;
+        const slotIndex = uiIndex++;
+        const surfaceId = `surface-${ev.id || idx}-${slotIndex}`;
+        const overlayKey = `${activeSession?.id || "anon"}:${ev.id || idx}:${slotIndex}`;
+        const classified = classifyUiResponse(part, uiResp);
+
+        if (classified.toasts.length > 0) {
+          const toastKey = `toast:${overlayKey}`;
+          if (suppressOverlays) {
+            shownOverlayIds.add(toastKey);
+          } else if (!ev.partial && !shownOverlayIds.has(toastKey)) {
+            shownOverlayIds.add(toastKey);
+            classified.toasts.forEach(showToast);
+          }
+        }
+
+        if (classified.kind === "toast") {
+          return;
+        }
+
+        if (classified.kind === "modal") {
+          const modalKey = `modal:${overlayKey}`;
+          nextOverlays.set(surfaceId, {
+            id: surfaceId,
+            title: classified.modal?.title || "Dialog",
+            cta: "Open Modal",
+            icon: "dialogs",
+            onOpen: () => showModalOverlay(classified.modal),
+          });
+          if (suppressOverlays) {
+            shownOverlayIds.add(modalKey);
+          } else if (!ev.partial && !shownOverlayIds.has(modalKey)) {
+            shownOverlayIds.add(modalKey);
+            showModalOverlay(classified.modal);
+          }
+          return;
+        }
+
+        if (classified.kind === "confirm") {
+          const confirmKey = `confirm:${overlayKey}`;
+          nextOverlays.set(surfaceId, {
+            id: surfaceId,
+            title: classified.confirmCard?.title || "Confirm Action",
+            cta: "Review",
+            icon: "help",
+            onOpen: () => showModalOverlay(classified.confirmCard, { isConfirm: true }),
+          });
+          if (suppressOverlays) {
+            shownOverlayIds.add(confirmKey);
+          } else if (!ev.partial && !shownOverlayIds.has(confirmKey)) {
+            shownOverlayIds.add(confirmKey);
+            showModalOverlay(classified.confirmCard, { isConfirm: true });
+          }
+          return;
+        }
+
+        const prev = existingById.get(surfaceId);
+        if (prev) {
+          nextSurfaces.push(prev);
+        } else {
+          const built = buildStandaloneCards(classified.uiResp, classified.toolName);
+          if (built.cards.length > 0) {
             nextSurfaces.push({
               id: surfaceId,
               title: built.title,
-              eyebrow: built.eyebrow,
-              raw: uiResp,
+              raw: classified.uiResp,
               cards: built.cards,
             });
           }
@@ -3573,6 +4112,7 @@
       });
     });
     canvasSurfaces = nextSurfaces;
+    overlayTriggersById = nextOverlays;
     const nextSurfaceIds = canvasSurfaces.map((s) => s.id).join("|");
 
     renderTranscript();
@@ -3896,23 +4436,26 @@
           const icon = document.createElement("span");
           icon.className = "google-symbols filled canvas-jump-icon";
           icon.setAttribute("aria-hidden", "true");
-          icon.textContent = "spark";
+          icon.textContent = surf.icon || "spark";
 
           const label = document.createElement("span");
           label.className = "button__label canvas-jump-label";
-          const eyebrow = document.createElement("span");
-          eyebrow.className = "canvas-jump-eyebrow";
-          eyebrow.textContent = `${surf.eyebrow}: `;
           const strong = document.createElement("strong");
           strong.textContent = surf.title;
-          label.append(eyebrow, strong);
+          label.appendChild(strong);
 
           const cta = document.createElement("span");
           cta.className = "canvas-jump-cta";
-          cta.textContent = "View on Canvas →";
+          cta.textContent = surf.cta || "View on Canvas →";
 
           btn.append(icon, label, cta);
-          btn.addEventListener("click", () => focusSurfaceOnCanvas(surf.id));
+          btn.addEventListener("click", () => {
+            if (typeof surf.onOpen === "function") {
+              surf.onOpen();
+            } else {
+              focusSurfaceOnCanvas(surf.id);
+            }
+          });
           btnGroup.appendChild(btn);
         }
       }
@@ -3955,7 +4498,8 @@
         const uiResp = extractUiResponse(part);
         if (uiResp) {
           const surfaceId = `surface-${ev.id || idx}-${uiIndex++}`;
-          const found = canvasSurfaces.find((s) => s.id === surfaceId);
+          const found =
+            canvasSurfaces.find((s) => s.id === surfaceId) || overlayTriggersById.get(surfaceId);
           if (found) surfaceRefs.push(found);
           return;
         }
@@ -4083,7 +4627,7 @@
       const tab = document.createElement("button");
       tab.type = "button";
       tab.className = `canvas-tab ${prefs.canvasMode === "focused" && activeSurfaceId === surf.id ? "active" : ""}`;
-      tab.textContent = `${surf.eyebrow}: ${surf.title}`;
+      tab.textContent = surf.title;
       tab.addEventListener("click", () => {
         focusSurfaceOnCanvas(surf.id);
       });

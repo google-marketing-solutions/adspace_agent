@@ -297,9 +297,9 @@
               </div>
             </div>
             <div class="popover-actions">
-              <button id="delete-session-btn" type="button" class="quiet-button full-width">
+              <button id="delete-session-btn" type="button" class="black-action-button full-width">
                 <span class="google-symbols" aria-hidden="true">delete_sweep</span>
-                <span>Clear Current Session</span>
+                <span>Clear Session</span>
               </button>
               <button id="logout-btn" type="button" class="danger-button full-width">
                 <span class="google-symbols" aria-hidden="true">logout</span>
@@ -371,7 +371,7 @@
                   aria-label="Session token telemetry and cost breakdown"
                 >
                   <div class="popover-section">
-                    <div class="popover-label">Session Token Telemetry · adk_telemetry</div>
+                    <div class="popover-label">Session Telemetry</div>
                     <div class="usage-kpi-grid">
                       <div class="usage-kpi-card">
                         <span class="usage-kpi-label">Total Tokens</span>
@@ -387,7 +387,7 @@
                   </div>
 
                   <div class="popover-section">
-                    <div class="popover-label">OpenTelemetry GenAI Usage Breakdown</div>
+                    <div class="popover-label">Usage</div>
                     <div class="usage-breakdown-list">
                       <div class="usage-row">
                         <div class="usage-row-meta">
@@ -585,6 +585,10 @@
           </div>
         </section>
       </main>
+
+      <!-- Floating Toast Stack & Modal Dialog Overlay -->
+      <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+      <div id="ui-modal-root" class="ui-modal-root hidden" role="dialog" aria-modal="true"></div>
     </div>
 
     <script src="/app/stage.js" defer></script>

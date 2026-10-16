@@ -352,62 +352,137 @@
     }
   };
 
+  const alertVariantLabel = (variant) => {
+    const v = String(variant || "info").toLowerCase();
+    if (v === "info") return "Info";
+    if (v === "warn" || v === "warning") return "Warning";
+    if (v === "error" || v === "danger" || v === "outage") return "Error";
+    if (v === "success" || v === "ok") return "Success";
+    return v.charAt(0).toUpperCase() + v.slice(1);
+  };
+
+  const createHelperAlert = (comp, isInline = false) => {
+    const variantLabel = alertVariantLabel(comp.variant);
+    const titleText = String(comp.title || comp.message || "Alert");
+
+    const card = document.createElement("section");
+    card.className = isInline ? "dm-alert-inline" : "adk-ui-surface adk-ui-card dm-alert-card";
+    card.setAttribute("data-ui-scope", "true");
+    style(card, {
+      position: "relative",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "flex-start",
+      gap: isInline ? "14px" : "18px",
+      padding: isInline ? "18px 20px" : "24px 26px",
+      borderRadius: isInline ? "20px" : "24px",
+      background: "var(--surface-card, #ffffff)",
+      border: "1px solid var(--dm-outline, rgba(33, 34, 38, 0.08))",
+      boxShadow: isInline
+        ? "none"
+        : "0 12px 32px -12px rgba(18, 19, 23, 0.08), 0 2px 8px -2px rgba(18, 19, 23, 0.04)",
+      maxWidth: isInline ? "100%" : "760px",
+      width: "100%",
+    });
+
+    const content = document.createElement("div");
+    style(content, { display: "flex", flexDirection: "column", gap: "6px", minWidth: "0", width: "100%" });
+    const titleEl = document.createElement("h3");
+    titleEl.textContent = titleText;
+    style(titleEl, {
+      margin: "0",
+      fontSize: isInline ? "16.5px" : "20px",
+      fontWeight: "450",
+      lineHeight: isInline ? "1.34" : "1.3",
+      letterSpacing: "-0.008em",
+      color: "var(--dm-text-primary, var(--text-primary, #121317))",
+      textWrap: "pretty",
+    });
+    content.appendChild(titleEl);
+
+    if (comp.description && String(comp.description).trim()) {
+      const descEl = document.createElement("p");
+      descEl.textContent = String(comp.description).trim();
+      style(descEl, {
+        margin: "0",
+        fontSize: isInline ? "14px" : "15px",
+        fontWeight: "400",
+        lineHeight: isInline ? "1.48" : "1.5",
+        color: "var(--dm-text-primary, var(--text-primary, #121317))",
+      });
+      content.appendChild(descEl);
+    }
+
+    const statusBtn = document.createElement("span");
+    statusBtn.textContent = variantLabel;
+    style(statusBtn, {
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: isInline ? "5px 12px" : "6px 14px",
+      borderRadius: "999px",
+      border: "1px solid var(--protected-btn-outline, rgba(33, 34, 38, 0.12))",
+      background: "transparent",
+      color: "var(--dm-text-primary, var(--text-primary, #121317))",
+      fontSize: isInline ? "12.5px" : "13px",
+      fontWeight: "500",
+      lineHeight: "1.2",
+      letterSpacing: "0.004em",
+      userSelect: "none",
+    });
+
+    card.append(content, statusBtn);
+    return card;
+  };
+
   // Creates a standalone top-level card matching `.message` in `index-FuuY_PBH.css`.
-  const createStandaloneCard = ({ title, description, eyebrow, headerRight, flushBody = false }) => {
+  const createStandaloneCard = ({ title, description, headerRight, flushBody = false }) => {
     const card = document.createElement("section");
     card.className = "adk-ui-surface adk-ui-card";
     card.setAttribute("data-ui-scope", "true");
     style(card, {
       maxWidth: "760px",
       width: "100%",
-      border: "1px solid var(--border-default)",
-      borderRadius: "10px",
+      border: "1px solid var(--dm-outline, var(--border-default))",
+      borderRadius: "24px",
       background: "var(--surface-card)",
-      boxShadow: "var(--shadow-sm)",
+      boxShadow:
+        "0 12px 32px -12px rgba(18, 19, 23, 0.08), 0 2px 8px -2px rgba(18, 19, 23, 0.04)",
       overflow: "hidden",
       display: "flex",
       flexDirection: "column",
     });
 
-    if (title || description || eyebrow || headerRight) {
+    if (title || description || headerRight) {
       const hdr = document.createElement("header");
       style(hdr, {
         display: "flex",
-        alignItems: "center",
+        alignItems: "flex-start",
         justifyContent: "space-between",
-        gap: "10px",
-        padding: "9px 14px",
-        borderBottom: "1px solid var(--border-default)",
-        background: "color-mix(in srgb, var(--bg-secondary) 50%, var(--surface-card))",
+        gap: "16px",
+        padding: flushBody ? "20px 24px 16px" : "22px 24px 6px",
+        borderBottom: flushBody ? "1px solid var(--dm-outline, var(--border-default))" : "0",
+        background: "transparent",
       });
 
       const left = document.createElement("div");
-      style(left, { display: "flex", alignItems: "center", gap: "8px", minWidth: "0", flexWrap: "wrap" });
-
-      if (eyebrow) {
-        const chip = document.createElement("span");
-        chip.textContent = eyebrow;
-        style(chip, {
-          padding: "2px 6px",
-          borderRadius: "5px",
-          background: "var(--accent-wash)",
-          color: "var(--accent-primary)",
-          fontSize: "9.5px",
-          fontWeight: "750",
-          letterSpacing: "0.06em",
-          textTransform: "uppercase",
-          flexShrink: "0",
-        });
-        left.appendChild(chip);
-      }
+      style(left, {
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "flex-start",
+        gap: "4px",
+        minWidth: "0",
+      });
 
       if (title) {
         const strong = document.createElement("strong");
         strong.textContent = title;
         style(strong, {
-          fontSize: "12.5px",
-          fontWeight: "650",
-          color: "var(--text-primary)",
+          fontSize: "20px",
+          fontWeight: "450",
+          lineHeight: "1.22",
+          letterSpacing: "-0.008em",
+          color: "var(--dm-text-primary, var(--text-primary))",
         });
         left.appendChild(strong);
       }
@@ -416,8 +491,10 @@
         const sub = document.createElement("span");
         sub.textContent = description;
         style(sub, {
-          fontSize: "11.5px",
-          color: "var(--text-muted)",
+          fontSize: "14.5px",
+          fontWeight: "400",
+          lineHeight: "1.45",
+          color: "var(--dm-text-secondary, var(--text-muted))",
         });
         left.appendChild(sub);
       }
@@ -429,10 +506,10 @@
 
     const body = document.createElement("div");
     style(body, {
-      padding: flushBody ? "0" : "14px 16px",
+      padding: flushBody ? "0" : "10px 24px 24px",
       display: "flex",
       flexDirection: "column",
-      gap: "12px",
+      gap: "16px",
     });
     card.appendChild(body);
 
@@ -555,17 +632,17 @@
         x: cx,
         y: cy - 4,
         "text-anchor": "middle",
-        fill: "var(--text-muted)",
-        "font-size": "10",
+        fill: "var(--dm-text-secondary, var(--text-muted))",
+        "font-size": "10.5",
       });
       centerTop.textContent = yKey;
       const centerVal = svgEl("text", {
         x: cx,
         y: cy + 14,
         "text-anchor": "middle",
-        fill: "var(--text-primary)",
-        "font-size": "15",
-        "font-weight": "700",
+        fill: "var(--dm-text-primary, var(--text-primary))",
+        "font-size": "16",
+        "font-weight": "500",
       });
       centerVal.textContent = formatCompact(total);
       svg.append(centerTop, centerVal);
@@ -574,7 +651,7 @@
       style(legend, {
         display: "flex",
         flexDirection: "column",
-        gap: "6px",
+        gap: "8px",
         flex: "1",
         minWidth: "180px",
       });
@@ -585,7 +662,7 @@
           alignItems: "center",
           justifyContent: "space-between",
           gap: "10px",
-          fontSize: "12px",
+          fontSize: "13px",
         });
         const left = document.createElement("div");
         style(left, { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" });
@@ -593,14 +670,14 @@
         style(swatch, {
           width: "9px",
           height: "9px",
-          borderRadius: "2.5px",
+          borderRadius: "999px",
           background: s.color,
           flexShrink: "0",
         });
         const lbl = document.createElement("span");
         lbl.textContent = s.label;
         style(lbl, {
-          color: "var(--text-primary)",
+          color: "var(--dm-text-primary, var(--text-primary))",
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
@@ -610,9 +687,9 @@
         const right = document.createElement("span");
         right.textContent = `${formatCompact(s.value)} (${((s.value / total) * 100).toFixed(1)}%)`;
         style(right, {
-          color: "var(--text-secondary)",
+          color: "var(--dm-text-secondary, var(--text-secondary))",
           fontFamily: "var(--mono)",
-          fontSize: "11px",
+          fontSize: "12px",
           flexShrink: "0",
         });
         item.append(left, right);
@@ -670,15 +747,15 @@
           y1: y,
           x2: W - padR,
           y2: y,
-          stroke: "var(--border-default)",
+          stroke: "var(--dm-outline, var(--border-default))",
           "stroke-width": "1",
         });
         const label = svgEl("text", {
           x: padL - 8,
           y: y + 3.5,
           "text-anchor": "end",
-          fill: "var(--text-muted)",
-          "font-size": "10",
+          fill: "var(--dm-text-secondary, var(--text-muted))",
+          "font-size": "10.5",
         });
         label.textContent = formatCompact(val);
         svg.append(line, label);
@@ -707,7 +784,7 @@
             y: top,
             width: barW,
             height: h,
-            rx: "3.5",
+            rx: "6",
             fill: colors[sIdx % colors.length],
             stroke: "none",
           });
@@ -721,8 +798,8 @@
               x: bx + barW / 2,
               y: Math.max(10, top - 5),
               "text-anchor": "middle",
-              fill: "var(--text-secondary)",
-              "font-size": "9.5",
+              fill: "var(--dm-text-secondary, var(--text-secondary))",
+              "font-size": "10",
             });
             valTxt.textContent = formatCompact(v);
             svg.appendChild(valTxt);
@@ -737,8 +814,8 @@
             x: padL + (i + 0.5) * groupStep,
             y: H - padB + 17,
             "text-anchor": "middle",
-            fill: "var(--text-muted)",
-            "font-size": "10",
+            fill: "var(--dm-text-secondary, var(--text-muted))",
+            "font-size": "10.5",
           });
           xTxt.textContent = shortLbl;
           const t = svgEl("title");
@@ -820,8 +897,8 @@
             x: xForIdx(i),
             y: H - padB + 17,
             "text-anchor": "middle",
-            fill: "var(--text-muted)",
-            "font-size": "10",
+            fill: "var(--dm-text-secondary, var(--text-muted))",
+            "font-size": "10.5",
           });
           xTxt.textContent = shortLbl;
           svg.appendChild(xTxt);
@@ -836,19 +913,19 @@
       style(legend, {
         display: "flex",
         flexWrap: "wrap",
-        gap: "14px",
+        gap: "16px",
         justifyContent: "center",
-        fontSize: "11px",
-        color: "var(--text-secondary)",
+        fontSize: "12.5px",
+        color: "var(--dm-text-secondary, var(--text-secondary))",
       });
       yKeys.forEach((yk, sIdx) => {
         const item = document.createElement("span");
-        style(item, { display: "inline-flex", alignItems: "center", gap: "6px" });
+        style(item, { display: "inline-flex", alignItems: "center", gap: "7px" });
         const dot = document.createElement("span");
         style(dot, {
           width: "8px",
           height: "8px",
-          borderRadius: "2px",
+          borderRadius: "999px",
           background: colors[sIdx % colors.length],
         });
         const txt = document.createElement("span");
@@ -883,13 +960,13 @@
     const pageSize = comp.page_size && comp.page_size > 0 ? Number(comp.page_size) : 0;
 
     const toolbar = document.createElement("div");
-    style(toolbar, { display: "flex", alignItems: "center", gap: "8px" });
+    style(toolbar, { display: "flex", alignItems: "center", gap: "10px" });
     const countChip = document.createElement("span");
     countChip.textContent = `${rawRows.length} rows`;
     style(countChip, {
-      fontSize: "10.5px",
-      color: "var(--text-muted)",
-      fontFamily: "var(--mono)",
+      fontSize: "12.5px",
+      fontWeight: "450",
+      color: "var(--dm-text-secondary, var(--text-muted))",
     });
     toolbar.appendChild(countChip);
 
@@ -898,13 +975,13 @@
       search.type = "search";
       search.placeholder = "Filter…";
       style(search, {
-        padding: "3px 8px",
-        borderRadius: "6px",
-        border: "1px solid var(--border-default)",
-        background: "var(--bg-primary)",
-        color: "var(--text-primary)",
-        fontSize: "11px",
-        width: "145px",
+        padding: "6px 14px",
+        borderRadius: "999px",
+        border: "1px solid var(--dm-outline, var(--border-default))",
+        background: "var(--dm-surface-gray, var(--bg-primary))",
+        color: "var(--dm-text-primary, var(--text-primary))",
+        fontSize: "13px",
+        width: "180px",
       });
       search.addEventListener("input", () => {
         filterQuery = search.value.trim().toLowerCase();
@@ -921,15 +998,15 @@
     style(table, {
       width: "100%",
       borderCollapse: "collapse",
-      fontSize: "12px",
-      color: "var(--text-primary)",
+      fontSize: "13.5px",
+      color: "var(--dm-text-primary, var(--text-primary))",
     });
 
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
     style(headRow, {
-      background: "var(--bg-primary)",
-      borderBottom: "1px solid var(--border-default)",
+      background: "transparent",
+      borderBottom: "1px solid var(--dm-outline, var(--border-default))",
     });
 
     const tbody = document.createElement("tbody");
@@ -945,10 +1022,11 @@
         th.textContent = `${col.header}${indicator}`;
         style(th, {
           textAlign: "left",
-          padding: "8px 14px",
-          fontWeight: "650",
-          fontSize: "11px",
-          color: "var(--text-secondary)",
+          padding: "12px 18px",
+          fontWeight: "500",
+          fontSize: "13px",
+          letterSpacing: "0.005em",
+          color: "var(--dm-text-primary, var(--text-secondary))",
           whiteSpace: "nowrap",
           cursor: canSort ? "pointer" : "default",
           userSelect: "none",
@@ -1003,13 +1081,13 @@
         const tr = document.createElement("tr");
         const isLast = idx === rows.length - 1 && !(pageSize > 0 && totalRows > pageSize);
         style(tr, {
-          borderBottom: isLast ? "0" : "1px solid var(--border-default)",
+          borderBottom: isLast ? "0" : "1px solid var(--dm-outline, var(--border-default))",
           background:
             comp.striped && idx % 2 === 1
-              ? "color-mix(in srgb, var(--bg-primary) 55%, var(--surface-card))"
+              ? "var(--dm-surface-gray, var(--bg-primary))"
               : "transparent",
         });
-        for (const col of columns) {
+        columns.forEach((col, colIdx) => {
           const td = document.createElement("td");
           const raw = row[col.accessor_key];
           const text = formatCellValue(raw);
@@ -1018,14 +1096,18 @@
             (typeof raw === "string" && /^[$+-]?[\d,.]+%?$/.test(raw.trim()));
           td.textContent = text;
           style(td, {
-            padding: "8px 14px",
+            padding: "12px 18px",
             textAlign: isNumeric ? "right" : "left",
             fontFamily: isNumeric ? "var(--mono)" : "inherit",
-            fontSize: isNumeric ? "11.5px" : "12px",
+            fontSize: isNumeric ? "13px" : "13.5px",
+            color:
+              colIdx === 0 && !isNumeric
+                ? "var(--dm-text-primary, var(--text-primary))"
+                : "var(--dm-text-secondary, var(--text-secondary))",
             whiteSpace: isNumeric ? "nowrap" : "normal",
           });
           tr.appendChild(td);
-        }
+        });
         tbody.appendChild(tr);
       });
 
@@ -1036,30 +1118,31 @@
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
-          padding: "7px 14px",
-          fontSize: "11px",
-          color: "var(--text-muted)",
-          background: "var(--bg-primary)",
-          borderTop: "1px solid var(--border-default)",
+          padding: "12px 18px",
+          fontSize: "13px",
+          color: "var(--dm-text-secondary, var(--text-muted))",
+          background: "transparent",
+          borderTop: "1px solid var(--dm-outline, var(--border-default))",
         });
         const info = document.createElement("span");
         info.textContent = `Page ${page + 1} of ${totalPages}`;
         const btnWrap = document.createElement("div");
-        style(btnWrap, { display: "flex", gap: "6px" });
+        style(btnWrap, { display: "flex", gap: "8px" });
         const mkBtn = (lbl, disabled, onClick) => {
           const b = document.createElement("button");
           b.type = "button";
           b.textContent = lbl;
           b.disabled = disabled;
           style(b, {
-            padding: "3px 9px",
-            borderRadius: "5px",
-            border: "1px solid var(--border-default)",
-            background: "var(--surface-card)",
-            color: "var(--text-secondary)",
+            padding: "6px 14px",
+            borderRadius: "999px",
+            border: "1px solid var(--dm-outline, var(--border-default))",
+            background: "var(--dm-surface-gray, var(--surface-card))",
+            color: "var(--dm-text-primary, var(--text-secondary))",
             cursor: disabled ? "default" : "pointer",
-            opacity: disabled ? "0.45" : "1",
-            fontSize: "11px",
+            opacity: disabled ? "0.4" : "1",
+            fontSize: "12.5px",
+            fontWeight: "500",
           });
           b.addEventListener("click", onClick);
           return b;
@@ -1101,41 +1184,50 @@
         el.textContent = comp.content ?? "";
         const map = {
           h1: {
-            fontSize: "19px",
-            fontWeight: "750",
-            letterSpacing: "-0.01em",
-            lineHeight: "1.25",
-            color: "var(--text-primary)",
+            fontSize: "22px",
+            fontWeight: "450",
+            letterSpacing: "-0.012em",
+            lineHeight: "1.2",
+            color: "var(--dm-text-primary, var(--text-primary))",
           },
           h2: {
-            fontSize: inGrid ? "20px" : "16px",
-            fontWeight: "750",
-            letterSpacing: "-0.01em",
-            lineHeight: "1.25",
-            color: "var(--text-primary)",
+            fontSize: inGrid ? "28px" : "19px",
+            fontWeight: "450",
+            letterSpacing: inGrid ? "-0.015em" : "-0.01em",
+            lineHeight: inGrid ? "1.12" : "1.22",
+            color: "var(--dm-text-primary, var(--text-primary))",
           },
           h3: {
-            fontSize: "13.5px",
-            fontWeight: "650",
-            lineHeight: "1.35",
-            color: "var(--text-primary)",
+            fontSize: "16.5px",
+            fontWeight: "450",
+            letterSpacing: "-0.006em",
+            lineHeight: "1.32",
+            color: "var(--dm-text-primary, var(--text-primary))",
           },
           h4: {
-            fontSize: "12.5px",
-            fontWeight: "650",
+            fontSize: "14.5px",
+            fontWeight: "500",
             lineHeight: "1.4",
-            color: "var(--text-primary)",
+            color: "var(--dm-text-primary, var(--text-primary))",
           },
-          caption: { fontSize: "11.5px", color: "var(--text-muted)", lineHeight: "1.4" },
+          caption: {
+            fontSize: "13px",
+            color: "var(--dm-text-secondary, var(--text-muted))",
+            lineHeight: "1.45",
+          },
           code: {
             fontFamily: "var(--mono)",
-            fontSize: "11.5px",
-            background: "var(--bg-primary)",
-            border: "1px solid var(--border-default)",
-            padding: "1px 5px",
-            borderRadius: "4px",
+            fontSize: "12.5px",
+            background: "var(--dm-surface-gray-subtle, var(--bg-primary))",
+            border: "1px solid var(--dm-outline, var(--border-default))",
+            padding: "1px 6px",
+            borderRadius: "6px",
           },
-          body: { fontSize: "13px", lineHeight: "1.5", color: "var(--text-primary)" },
+          body: {
+            fontSize: "14.5px",
+            lineHeight: "1.55",
+            color: "var(--dm-text-primary, var(--text-primary))",
+          },
         };
         style(el, map[v] || map.body);
         return el;
@@ -1148,13 +1240,13 @@
         style(span, {
           display: "inline-flex",
           alignItems: "center",
-          padding: "2px 8px",
+          padding: "4px 10px",
           borderRadius: "999px",
-          fontSize: "10.5px",
-          fontWeight: "650",
+          fontSize: "12px",
+          fontWeight: "500",
           background: vc.bg,
           color: vc.fg,
-          border: `1px solid ${vc.border}`,
+          border: "1px solid transparent",
           alignSelf: "flex-start",
         });
         return span;
@@ -1164,8 +1256,8 @@
         const hr = document.createElement("hr");
         style(hr, {
           border: "0",
-          borderTop: "1px solid var(--border-default)",
-          margin: "4px 0",
+          borderTop: "1px solid var(--dm-outline, var(--border-default))",
+          margin: "6px 0",
           width: "100%",
         });
         return hr;
@@ -1174,7 +1266,7 @@
       case "stack": {
         const div = document.createElement("div");
         const horiz = String(comp.direction || "vertical").toLowerCase() === "horizontal";
-        const gapPx = Math.max(1, Number(comp.gap ?? 3)) * 3.5;
+        const gapPx = Math.max(1, Number(comp.gap ?? 3)) * 4;
         style(div, {
           display: "flex",
           flexDirection: horiz ? "row" : "column",
@@ -1193,8 +1285,8 @@
         const cols = Math.max(1, Math.min(6, Number(comp.columns) || 2));
         style(div, {
           display: "grid",
-          gridTemplateColumns: `repeat(auto-fit, minmax(${cols >= 3 ? "155px" : "210px"}, 1fr))`,
-          gap: "10px",
+          gridTemplateColumns: `repeat(auto-fit, minmax(${cols >= 3 ? "165px" : "220px"}, 1fr))`,
+          gap: "14px",
           alignItems: "stretch",
         });
         for (const child of comp.children || []) {
@@ -1208,7 +1300,7 @@
         style(div, {
           display: "flex",
           flexDirection: "column",
-          gap: "10px",
+          gap: "12px",
         });
         for (const child of comp.children || []) {
           div.appendChild(renderInnerComponent(child, surfaceRoot, inGrid));
@@ -1225,11 +1317,11 @@
           display: "flex",
           flexDirection: "column",
           justifyContent: "space-between",
-          gap: "6px",
-          padding: "11px 13px",
-          borderRadius: "8px",
-          background: "var(--bg-primary)",
-          border: "1px solid var(--border-default)",
+          gap: "8px",
+          padding: inGrid ? "18px 20px" : "20px 22px",
+          borderRadius: "20px",
+          background: "var(--dm-surface-gray, var(--bg-primary))",
+          border: "1px solid var(--dm-outline, var(--border-default))",
         });
 
         if (comp.title) {
@@ -1239,16 +1331,16 @@
             t,
             inGrid
               ? {
-                  fontSize: "10px",
-                  fontWeight: "750",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.06em",
-                  color: "var(--text-muted)",
+                  fontSize: "13.5px",
+                  fontWeight: "450",
+                  letterSpacing: "0.005em",
+                  color: "var(--dm-text-secondary, var(--text-muted))",
                 }
               : {
-                  fontSize: "12.5px",
-                  fontWeight: "650",
-                  color: "var(--text-primary)",
+                  fontSize: "16.5px",
+                  fontWeight: "450",
+                  letterSpacing: "-0.006em",
+                  color: "var(--dm-text-primary, var(--text-primary))",
                 }
           );
           tile.appendChild(t);
@@ -1256,12 +1348,16 @@
         if (comp.description) {
           const d = document.createElement("div");
           d.textContent = comp.description;
-          style(d, { fontSize: "11.5px", color: "var(--text-muted)" });
+          style(d, {
+            fontSize: "13.5px",
+            lineHeight: "1.45",
+            color: "var(--dm-text-secondary, var(--text-muted))",
+          });
           tile.appendChild(d);
         }
         if (Array.isArray(comp.content) && comp.content.length) {
           const body = document.createElement("div");
-          style(body, { display: "flex", flexDirection: "column", gap: "6px" });
+          style(body, { display: "flex", flexDirection: "column", gap: "8px" });
           for (const child of comp.content) {
             body.appendChild(renderInnerComponent(child, tile, inGrid));
           }
@@ -1272,10 +1368,9 @@
           style(ftr, {
             display: "flex",
             flexWrap: "wrap",
-            gap: "6px",
+            gap: "8px",
             justifyContent: "flex-end",
-            paddingTop: "8px",
-            borderTop: "1px solid var(--border-default)",
+            paddingTop: "10px",
           });
           for (const child of comp.footer) {
             ftr.appendChild(renderInnerComponent(child, tile, false));
@@ -1287,13 +1382,13 @@
 
       case "tabs": {
         const wrap = document.createElement("div");
-        style(wrap, { display: "flex", flexDirection: "column", gap: "10px" });
+        style(wrap, { display: "flex", flexDirection: "column", gap: "14px" });
         const bar = document.createElement("div");
         style(bar, {
           display: "flex",
-          gap: "6px",
-          borderBottom: "1px solid var(--border-default)",
-          paddingBottom: "6px",
+          gap: "4px",
+          borderBottom: "1px solid var(--dm-outline, var(--border-default))",
+          paddingBottom: "0",
         });
         const panel = document.createElement("div");
         const tabs = Array.isArray(comp.tabs) ? comp.tabs : [];
@@ -1303,10 +1398,15 @@
           activeIdx = idx;
           Array.from(bar.children).forEach((btn, i) => {
             style(btn, {
-              background: i === activeIdx ? "var(--accent-wash)" : "var(--bg-primary)",
-              color: i === activeIdx ? "var(--accent-primary)" : "var(--text-secondary)",
-              borderColor:
-                i === activeIdx ? "var(--accent-primary)" : "var(--border-default)",
+              background: "transparent",
+              color:
+                i === activeIdx
+                  ? "var(--dm-text-primary, var(--text-primary))"
+                  : "var(--dm-text-secondary, var(--text-secondary))",
+              borderBottom:
+                i === activeIdx
+                  ? "2px solid var(--dm-text-primary, var(--text-primary))"
+                  : "2px solid transparent",
             });
           });
           panel.replaceChildren();
@@ -1320,11 +1420,13 @@
           b.type = "button";
           b.textContent = tab.label || `Tab ${idx + 1}`;
           style(b, {
-            border: "1px solid var(--border-default)",
-            borderRadius: "6px",
-            padding: "5px 10px",
-            fontSize: "11.5px",
-            fontWeight: "650",
+            border: "0",
+            borderBottom: "2px solid transparent",
+            borderRadius: "0",
+            padding: "10px 16px",
+            marginBottom: "-1px",
+            fontSize: "14px",
+            fontWeight: "500",
             cursor: "pointer",
           });
           b.addEventListener("click", () => selectTab(idx));
@@ -1342,17 +1444,17 @@
         const { element, toolbar } = renderTableParts(comp);
         const box = document.createElement("div");
         style(box, {
-          border: "1px solid var(--border-default)",
-          borderRadius: "8px",
+          border: "1px solid var(--dm-outline, var(--border-default))",
+          borderRadius: "18px",
           overflow: "hidden",
         });
         const bar = document.createElement("div");
         style(bar, {
           display: "flex",
           justifyContent: "flex-end",
-          padding: "6px 10px",
-          background: "var(--bg-primary)",
-          borderBottom: "1px solid var(--border-default)",
+          padding: "10px 16px",
+          background: "transparent",
+          borderBottom: "1px solid var(--dm-outline, var(--border-default))",
         });
         bar.appendChild(toolbar);
         box.append(bar, element);
@@ -1363,21 +1465,21 @@
         const dl = document.createElement("div");
         style(dl, {
           display: "grid",
-          gridTemplateColumns: "minmax(130px, auto) 1fr",
-          gap: "7px 16px",
-          padding: "10px 12px",
-          borderRadius: "7px",
-          background: "var(--bg-primary)",
-          border: "1px solid var(--border-default)",
-          fontSize: "12px",
+          gridTemplateColumns: "minmax(140px, auto) 1fr",
+          gap: "10px 20px",
+          padding: "16px 18px",
+          borderRadius: "18px",
+          background: "var(--dm-surface-gray, var(--bg-primary))",
+          border: "1px solid var(--dm-outline, var(--border-default))",
+          fontSize: "13.5px",
         });
         for (const pair of comp.pairs || []) {
           const k = document.createElement("div");
           k.textContent = pair.key;
-          style(k, { color: "var(--text-muted)", fontWeight: "600" });
+          style(k, { color: "var(--dm-text-secondary, var(--text-muted))", fontWeight: "450" });
           const v = document.createElement("div");
           v.textContent = pair.value;
-          style(v, { color: "var(--text-primary)", fontWeight: "650" });
+          style(v, { color: "var(--dm-text-primary, var(--text-primary))", fontWeight: "500" });
           dl.append(k, v);
         }
         return dl;
@@ -1387,12 +1489,13 @@
         const list = document.createElement(comp.ordered ? "ol" : "ul");
         style(list, {
           margin: "0",
-          paddingLeft: "20px",
+          paddingLeft: "22px",
           display: "flex",
           flexDirection: "column",
-          gap: "4px",
-          fontSize: "12.5px",
-          color: "var(--text-primary)",
+          gap: "6px",
+          fontSize: "14.5px",
+          lineHeight: "1.55",
+          color: "var(--dm-text-primary, var(--text-primary))",
         });
         for (const item of comp.items || []) {
           const li = document.createElement("li");
@@ -1407,12 +1510,12 @@
         pre.textContent = comp.code ?? "";
         style(pre, {
           margin: "0",
-          padding: "10px 12px",
-          borderRadius: "7px",
-          background: "var(--bg-primary)",
-          border: "1px solid var(--border-default)",
-          color: "var(--text-primary)",
-          fontSize: "11.5px",
+          padding: "14px 16px",
+          borderRadius: "14px",
+          background: "var(--dm-surface-gray, var(--bg-primary))",
+          border: "1px solid var(--dm-outline, var(--border-default))",
+          color: "var(--dm-text-primary, var(--text-primary))",
+          fontSize: "12.5px",
           overflowX: "auto",
           fontFamily: "var(--mono)",
         });
@@ -1421,50 +1524,28 @@
 
       case "alert":
       case "toast": {
-        const box = document.createElement("div");
-        const vc = variantColors(comp.variant);
-        style(box, {
-          padding: "10px 12px",
-          borderRadius: "8px",
-          background: vc.bg,
-          border: `1px solid ${vc.border}`,
-          display: "flex",
-          flexDirection: "column",
-          gap: "3px",
-        });
-        const title = document.createElement("div");
-        title.textContent = comp.title || comp.message || "";
-        style(title, { fontWeight: "650", fontSize: "12.5px", color: vc.fg });
-        box.appendChild(title);
-        if (comp.description) {
-          const desc = document.createElement("div");
-          desc.textContent = comp.description;
-          style(desc, { fontSize: "12px", color: "var(--text-secondary)" });
-          box.appendChild(desc);
-        }
-        return box;
+        return createHelperAlert(comp, true);
       }
 
       case "progress": {
         const wrap = document.createElement("div");
-        style(wrap, { display: "flex", flexDirection: "column", gap: "6px" });
+        style(wrap, { display: "flex", flexDirection: "column", gap: "8px" });
         const pct = Math.max(0, Math.min(100, Number(comp.value) || 0));
         const top = document.createElement("div");
-        style(top, { display: "flex", justifyContent: "space-between", fontSize: "12px" });
+        style(top, { display: "flex", justifyContent: "space-between", fontSize: "13.5px" });
         const lbl = document.createElement("span");
         lbl.textContent = comp.label || "Progress";
-        style(lbl, { color: "var(--text-primary)", fontWeight: "600" });
+        style(lbl, { color: "var(--dm-text-primary, var(--text-primary))", fontWeight: "450" });
         const val = document.createElement("span");
         val.textContent = `${pct}%`;
-        style(val, { color: "var(--text-muted)", fontFamily: "var(--mono)" });
+        style(val, { color: "var(--dm-text-secondary, var(--text-muted))", fontFamily: "var(--mono)" });
         top.append(lbl, val);
 
         const track = document.createElement("div");
         style(track, {
-          height: "7px",
+          height: "8px",
           borderRadius: "999px",
-          background: "var(--bg-primary)",
-          border: "1px solid var(--border-default)",
+          background: "var(--dm-surface-gray, var(--bg-primary))",
           overflow: "hidden",
         });
         const bar = document.createElement("div");
@@ -1472,7 +1553,7 @@
           width: `${pct}%`,
           height: "100%",
           borderRadius: "999px",
-          background: "var(--accent-primary)",
+          background: "var(--dm-text-primary, var(--accent-primary))",
         });
         track.appendChild(bar);
         wrap.append(top, track);
@@ -1488,10 +1569,10 @@
       case "slider":
       case "switch": {
         const field = document.createElement("label");
-        style(field, { display: "flex", flexDirection: "column", gap: "4px", fontSize: "11.5px" });
+        style(field, { display: "flex", flexDirection: "column", gap: "6px", fontSize: "13.5px" });
         const lbl = document.createElement("span");
         lbl.textContent = `${comp.label || comp.name}${comp.required ? " *" : ""}`;
-        style(lbl, { fontWeight: "650", color: "var(--text-secondary)" });
+        style(lbl, { fontWeight: "450", color: "var(--dm-text-secondary, var(--text-secondary))" });
         field.appendChild(lbl);
 
         let control;
@@ -1511,7 +1592,7 @@
           }
         } else if (type === "switch") {
           const row = document.createElement("div");
-          style(row, { display: "flex", alignItems: "center", gap: "8px", padding: "2px 0" });
+          style(row, { display: "flex", alignItems: "center", gap: "10px", padding: "4px 0" });
           control = document.createElement("input");
           control.type = "checkbox";
           control.checked = !!comp.default_checked;
@@ -1538,12 +1619,12 @@
 
         if (type !== "switch") {
           style(control, {
-            padding: "7px 10px",
-            borderRadius: "6px",
-            border: "1px solid var(--border-default)",
-            background: "var(--bg-primary)",
-            color: "var(--text-primary)",
-            fontSize: "12.5px",
+            padding: type === "select" ? "10px 34px 10px 14px" : "10px 14px",
+            borderRadius: "12px",
+            border: "1px solid var(--dm-outline, var(--border-default))",
+            background: "var(--dm-surface-gray, var(--bg-primary))",
+            color: "var(--dm-text-primary, var(--text-primary))",
+            fontSize: "14px",
           });
           field.appendChild(control);
         }
@@ -1561,9 +1642,9 @@
         const btnStyles =
           v === "primary"
             ? {
-                background: "var(--accent-primary)",
-                color: "#fff",
-                border: "1px solid var(--accent-primary)",
+                background: "var(--primary-btn-bg, #121317)",
+                color: "var(--primary-btn-fg, #fff)",
+                border: "1px solid transparent",
               }
             : v === "danger"
               ? {
@@ -1571,17 +1652,32 @@
                   color: "#fff",
                   border: "1px solid var(--accent-error)",
                 }
-              : {
-                  background: "var(--bg-primary)",
-                  color: "var(--text-secondary)",
-                  border: "1px solid var(--border-default)",
-                };
+              : v === "outline"
+                ? {
+                    background: "transparent",
+                    color: "var(--dm-text-primary, var(--text-primary))",
+                    border: "1px solid var(--dm-outline, var(--border-default))",
+                    boxShadow: "0 0 0 1px var(--dm-outline, var(--border-default))",
+                  }
+                : v === "ghost"
+                  ? {
+                      background: "transparent",
+                      color: "var(--dm-text-secondary, var(--text-secondary))",
+                      border: "1px solid transparent",
+                    }
+                  : {
+                      background: "var(--dm-surface-gray, var(--bg-primary))",
+                      color: "var(--dm-text-primary, var(--text-secondary))",
+                      border: "1px solid var(--dm-outline, var(--border-default))",
+                    };
         style(btn, {
-          padding: "6px 13px",
-          borderRadius: "6px",
-          fontSize: "12px",
-          fontWeight: "650",
+          padding: "10px 22px",
+          borderRadius: "999px",
+          fontSize: "14px",
+          fontWeight: "500",
+          letterSpacing: "-0.004em",
           cursor: btn.disabled ? "default" : "pointer",
+          opacity: btn.disabled ? "0.45" : "1",
           alignSelf: "flex-start",
           ...btnStyles,
         });
@@ -1642,7 +1738,6 @@
       const { element, toolbar } = renderTableParts(tableComp);
       const { card, body } = createStandaloneCard({
         title,
-        eyebrow: "Table",
         headerRight: toolbar,
         flushBody: true,
       });
@@ -1654,10 +1749,8 @@
     // Pattern 2: `render_chart` emits `[Chart]`.
     if (comps.length === 1 && comps[0]?.type === "chart") {
       const chartComp = comps[0];
-      const kind = String(chartComp.kind || "bar").toUpperCase();
       const { card, body } = createStandaloneCard({
         title: chartComp.title || "Chart",
-        eyebrow: kind,
       });
       const chartClone = { ...chartComp, title: null };
       body.appendChild(renderChartInner(chartClone));
@@ -1696,7 +1789,6 @@
         const { card, body } = createStandaloneCard({
           title: secTitle,
           description: pendingTitle ? `${pendingTitle}${pendingSubtitle ? ` · ${pendingSubtitle}` : ""}` : null,
-          eyebrow: "KPIs",
         });
         pendingTitle = null;
         pendingSubtitle = null;
@@ -1719,18 +1811,9 @@
           tableElement = parts.element;
         }
 
-        const eyebrow = singleTable
-          ? "Table"
-          : singleChart
-            ? String(contentArr[0].kind || "Chart").toUpperCase()
-            : pendingTitle
-              ? pendingTitle
-              : null;
-
         const { card, body } = createStandaloneCard({
           title: comp.title || pendingTitle || "Details",
           description: comp.description || (comp.title && pendingTitle ? pendingSubtitle : null),
-          eyebrow,
           headerRight,
           flushBody: singleTable,
         });
@@ -1752,11 +1835,10 @@
           style(ftr, {
             display: "flex",
             flexWrap: "wrap",
-            gap: "8px",
+            gap: "10px",
             justifyContent: "flex-end",
-            padding: "10px 14px",
-            borderTop: "1px solid var(--border-default)",
-            background: "var(--bg-primary)",
+            padding: "4px 24px 22px",
+            background: "transparent",
           });
           for (const child of comp.footer) {
             ftr.appendChild(renderInnerComponent(child, card, false));
@@ -1768,11 +1850,22 @@
         continue;
       }
 
-      // Any other top-level component (`alert`, `progress`, `toast`, `table`, `chart`, etc.)
+      if (t === "toast") {
+        showHelperToast(comp);
+        continue;
+      }
+
+      if (t === "alert") {
+        pendingTitle = null;
+        pendingSubtitle = null;
+        cards.push(createHelperAlert(comp, false));
+        continue;
+      }
+
+      // Any other top-level component (`progress`, `table`, `chart`, etc.)
       const { card, body } = createStandaloneCard({
         title: comp.title || pendingTitle || null,
         description: pendingSubtitle || null,
-        eyebrow: t === "alert" || t === "toast" ? String(comp.variant || "Alert") : null,
       });
       pendingTitle = null;
       pendingSubtitle = null;
@@ -1781,6 +1874,96 @@
     }
 
     return cards;
+  };
+
+  let helperToastStack = null;
+
+  const showHelperToast = (comp) => {
+    if (!comp || !document.body) return;
+    if (!helperToastStack) {
+      helperToastStack = document.createElement("div");
+      style(helperToastStack, {
+        position: "fixed",
+        bottom: "24px",
+        right: "24px",
+        zIndex: "9999",
+        display: "flex",
+        flexDirection: "column-reverse",
+        gap: "12px",
+        maxWidth: "min(420px, calc(100vw - 40px))",
+        pointerEvents: "none",
+      });
+      document.body.appendChild(helperToastStack);
+    }
+
+    const vc = variantColors(comp.variant);
+    const toast = document.createElement("div");
+    style(toast, {
+      pointerEvents: "auto",
+      display: "flex",
+      alignItems: "flex-start",
+      gap: "14px",
+      padding: "18px 20px",
+      borderRadius: "22px",
+      background: "var(--dm-surface-gray, var(--surface-card, #eff2f7))",
+      border: "1px solid var(--dm-outline, rgba(33, 34, 38, 0.08))",
+      boxShadow:
+        "0 20px 44px -14px rgba(18, 19, 23, 0.16), 0 4px 14px -2px rgba(18, 19, 23, 0.08)",
+      color: "var(--dm-text-primary, var(--text-primary, #121317))",
+      fontSize: "15.5px",
+    });
+
+    const msgCol = document.createElement("div");
+    style(msgCol, { flex: "1", minWidth: "0" });
+    const title = document.createElement("div");
+    title.textContent = comp.message || comp.title || "Notification";
+    style(title, {
+      fontWeight: "450",
+      fontSize: "16px",
+      lineHeight: "1.35",
+      letterSpacing: "-0.008em",
+      color: "var(--dm-text-primary, var(--text-primary, #121317))",
+    });
+    msgCol.appendChild(title);
+    if (comp.description) {
+      const desc = document.createElement("div");
+      desc.textContent = comp.description;
+      style(desc, {
+        fontSize: "14px",
+        lineHeight: "1.48",
+        marginTop: "4px",
+        color: "var(--dm-text-secondary, var(--text-secondary, #45474d))",
+      });
+      msgCol.appendChild(desc);
+    }
+    toast.appendChild(msgCol);
+
+    const dismiss = () => toast.remove();
+    if (comp.dismissible !== false) {
+      const closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.innerHTML = "&times;";
+      style(closeBtn, {
+        border: "0",
+        background: "transparent",
+        color: "var(--dm-text-secondary, inherit)",
+        cursor: "pointer",
+        fontSize: "18px",
+        lineHeight: "1",
+        width: "28px",
+        height: "28px",
+        borderRadius: "50%",
+        padding: "0",
+      });
+      closeBtn.addEventListener("click", dismiss);
+      toast.appendChild(closeBtn);
+    }
+
+    const duration = Math.max(0, Number(comp.duration ?? 5000));
+    if (duration > 0) {
+      setTimeout(dismiss, duration);
+    }
+    helperToastStack.appendChild(toast);
   };
 
   // Extracts an `adk_ui::UiResponse` (`{ components: [...] }`) from a tool JSON object.

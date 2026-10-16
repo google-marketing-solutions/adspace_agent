@@ -160,10 +160,12 @@ fn escape_html(input: &str) -> String {
 fn html_page(title: &str, body: &str, status: &str) -> Html<String> {
     let safe_title = escape_html(title);
     Html(format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{safe_title}</title>\
-         <style>body{{font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem;color:#202124}}\
-         h1{{font-size:1.4rem}}code{{background:#f1f3f4;padding:.1rem .3rem;border-radius:4px}}</style></head>\
-         <body><h1>{safe_title}</h1>{body}<script>{}</script></body></html>",
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{safe_title}</title>\
+         <style>body{{font-family:\"Google Sans Flex\",\"Google Sans\",-apple-system,BlinkMacSystemFont,sans-serif;background:#f8f9fc;color:#121317;margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box}}\
+         .card{{background:#ffffff;border:1px solid rgba(33,34,38,0.08);border-radius:28px;padding:32px 36px;max-width:440px;width:100%;box-shadow:0 16px 40px -12px rgba(18,19,23,0.08),0 2px 8px -2px rgba(18,19,23,0.04)}}\
+         h1{{font-size:22px;font-weight:450;letter-spacing:-0.012em;margin:0 0 10px}}p{{font-size:15px;line-height:1.55;color:#45474d;margin:0}}\
+         code{{background:#f8f9fc;border:1px solid rgba(33,34,38,0.08);padding:2px 6px;border-radius:6px;font-size:13px}}</style></head>\
+         <body><div class=\"card\"><h1>{safe_title}</h1>{body}</div><script>{}</script></body></html>",
         callback_script(status)
     ))
 }

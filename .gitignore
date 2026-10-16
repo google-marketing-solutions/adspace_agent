@@ -6,5 +6,6 @@ sessions.db-*
 *.db-journal
 .artifacts/
 .adk/
+.credentials/
 google-ads.yaml
 DEVELOPMENT.md

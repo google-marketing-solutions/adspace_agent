@@ -50,7 +50,8 @@ GOOGLE_ADS_LOGIN_CUSTOMER_ID=
 # GOOGLE_ADS_TOOL_FILTER=googleads_customers_google_ads_search,googleads_google_ads_fields_search,googleads_customers_generate_audience_definition,googleads_customers_generate_audience_composition_insights
 # SKILLS_BUCKET_NAME=adspace-agent
 # LOCAL_SKILLS_DIR=./skills
-# SESSION_SERVICE_URI=sqlite:///./sessions.db
+# SESSION_SERVICE_URI=sqlite:///./sessions.db  # or firestore:// in Cloud Run
+# SESSION_ENCRYPTION_KEY=                      # base64 32-byte AES-256-GCM key
 # ARTIFACT_SERVICE_URI=gs://adspace-agent
 # MEMORY_SERVICE_URI=memory://
 ```
@@ -108,8 +109,8 @@ later tool needs more, Google's incremental authorization adds the new scope
 to what the session already granted, so you are only ever asked for the
 difference. `cargo run -- list-tools all --scopes` prints the scope of every
 tool. A new session starts without credentials; tokens are persisted with the
-session (so they survive restarts with `SESSION_SERVICE_URI=sqlite://...`) and
-disappear with it. There is no server-side token store.
+session (so they survive restarts with `SESSION_SERVICE_URI=sqlite://...` or
+`firestore://...`) and disappear with it. There is no server-side token store.
 
 ## Exploring Available Tools
 
@@ -183,39 +184,58 @@ gcloud services enable \
   displayvideo.googleapis.com \
   doubleclickbidmanager.googleapis.com \
   drive.googleapis.com \
+  firestore.googleapis.com \
   googleads.googleapis.com \
   run.googleapis.com \
   merchantapi.googleapis.com \
   searchads360.googleapis.com \
+  secretmanager.googleapis.com \
   storage.googleapis.com \
   youtube.googleapis.com
 ```
 
 ### Cloud Run
 
+Store sensitive values in Secret Manager (`adspace-agent-rs-client-id`,
+`adspace-agent-rs-client-secret`, `adspace-agent-rs-google-ads-developer-token`,
+`adspace-agent-rs-session-encryption-key`) and bind them with `--set-secrets`:
+
 ```shell
-gcloud run deploy adspace-agent \
+gcloud run deploy adspace-agent-rs \
   --source . \
   --region us-central1 \
-  --memory 4Gi \
-  --cpu 1 \
+  --memory 32Gi \
+  --cpu 8 \
   --port 8000 \
+  --set-secrets "\
+CLIENT_ID=adspace-agent-rs-client-id:latest,\
+CLIENT_SECRET=adspace-agent-rs-client-secret:latest,\
+GOOGLE_ADS_DEVELOPER_TOKEN=adspace-agent-rs-google-ads-developer-token:latest,\
+SESSION_ENCRYPTION_KEY=adspace-agent-rs-session-encryption-key:latest" \
   --set-env-vars "\
 GOOGLE_CLOUD_LOCATION=global,\
 GOOGLE_CLOUD_PROJECT={YOUR_GOOGLE_CLOUD_PROJECT},\
 GOOGLE_GENAI_USE_VERTEXAI=TRUE,\
-GOOGLE_ADS_DEVELOPER_TOKEN={YOUR_GOOGLE_ADS_DEVELOPER_TOKEN},\
 GOOGLE_ADS_LOGIN_CUSTOMER_ID={YOUR_GOOGLE_ADS_LOGIN_CUSTOMER_ID},\
-CLIENT_ID={YOUR_CLIENT_ID},\
-CLIENT_SECRET={YOUR_CLIENT_SECRET},\
 PUBLIC_BASE_URL=https://{YOUR_CLOUD_RUN_URL},\
 SKILLS_BUCKET_NAME={YOUR_SKILLS_BUCKET_NAME},\
+SESSION_SERVICE_URI=firestore://,\
 ARTIFACT_SERVICE_URI=gs://{YOUR_ARTIFACT_BUCKET}"
 ```
 
-The [Dockerfile](Dockerfile) builds a release binary and ships it on a
-`debian:trixie-slim` image — no Python runtime is needed because code
-execution happens server-side in Gemini.
+The [Dockerfile](Dockerfile) uses `cargo-chef` to cache compiled Rust
+dependencies and ships the release binary on a `debian:trixie-slim` image — no
+Python runtime is needed because code execution happens server-side in Gemini.
+
+For fast incremental deploys (skipping compilation of unchanged crates), build
+with [cloudbuild.yaml](cloudbuild.yaml) and deploy the resulting image:
+
+```shell
+gcloud builds submit --config cloudbuild.yaml --region us-central1
+gcloud run deploy adspace-agent-rs \
+  --image us-central1-docker.pkg.dev/{YOUR_GOOGLE_CLOUD_PROJECT}/cloud-run-source-deploy/adspace-agent-rs:latest \
+  --region us-central1
+```
 
 ## Differences from the Python agent
 

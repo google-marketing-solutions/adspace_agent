@@ -18,8 +18,12 @@ use adk_rust::session::{
     AppendEventRequest, CreateRequest, DeleteRequest, Event, GetRequest, InMemorySessionService,
     ListRequest, Session, SessionService, SqliteSessionService,
 };
+use adk_session::{
+    EncryptedSession, EncryptionKey, FirestoreSessionConfig, FirestoreSessionService,
+};
 use anyhow::Context;
 use async_trait::async_trait;
+use base64::Engine as _;
 use tokio::sync::RwLock;
 
 use crate::config::env_opt;
@@ -53,16 +57,86 @@ pub fn normalize_sqlite_uri(uri: &str) -> String {
     }
 }
 
+/// Parses a `firestore://` URI into an optional root collection override.
+///
+/// `firestore://` or `firestore` selects the default `"adk_sessions"` root
+/// collection (`Some(None)`); `firestore://custom_root` selects
+/// `Some(Some("custom_root"))`.
+pub fn parse_firestore_uri(uri: &str) -> Option<Option<String>> {
+    if uri == "firestore" {
+        return Some(None);
+    }
+    let rest = uri.strip_prefix("firestore://")?;
+    let trimmed = rest.trim_matches('/');
+    if trimmed.is_empty() {
+        Some(None)
+    } else {
+        Some(Some(trimmed.to_string()))
+    }
+}
+
+/// Wraps a [`SessionService`] in [`EncryptedSession`] when
+/// `SESSION_ENCRYPTION_KEY` is set.
+fn maybe_encrypt_session_service<S: SessionService + 'static>(
+    inner: S,
+) -> anyhow::Result<Arc<dyn SessionService>> {
+    if env_opt("SESSION_ENCRYPTION_KEY").is_none() {
+        return Ok(Arc::new(inner));
+    }
+    let current = EncryptionKey::from_env("SESSION_ENCRYPTION_KEY")
+        .map_err(|e| anyhow::anyhow!("loading SESSION_ENCRYPTION_KEY: {e}"))?;
+    let mut previous = Vec::new();
+    if let Some(raw_prev) = env_opt("SESSION_ENCRYPTION_PREVIOUS_KEYS") {
+        for (idx, item) in raw_prev
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .enumerate()
+        {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(item)
+                .with_context(|| {
+                    format!(
+                        "decoding SESSION_ENCRYPTION_PREVIOUS_KEYS entry #{}",
+                        idx + 1
+                    )
+                })?;
+            let key = EncryptionKey::from_bytes(&bytes).map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid SESSION_ENCRYPTION_PREVIOUS_KEYS entry #{}: {e}",
+                    idx + 1
+                )
+            })?;
+            previous.push(key);
+        }
+    }
+    tracing::info!(
+        "Session encryption: AES-256-GCM enabled ({} previous key(s))",
+        previous.len()
+    );
+    Ok(Arc::new(
+        EncryptedSession::new(inner, current, previous).with_legacy_migration(true),
+    ))
+}
+
 /// Builds the session service from `SESSION_SERVICE_URI`.
+///
+/// Supported schemes:
+/// - `memory://` — ephemeral in-memory store
+/// - `sqlite:///path/to/sessions.db` — local SQLite file (default)
+/// - `firestore://` or `firestore://<root_collection>` — Google Cloud Firestore
+///
+/// Set `SESSION_ENCRYPTION_KEY` (base64 32-byte key) to encrypt session state
+/// and event payloads at rest with AES-256-GCM.
 ///
 /// # Errors
 ///
-/// Returns an error when the SQLite database cannot be opened.
+/// Returns an error when the configured backend cannot be initialised.
 pub async fn build_session_service() -> anyhow::Result<Arc<dyn SessionService>> {
     let uri = env_opt("SESSION_SERVICE_URI").unwrap_or_else(|| DEFAULT_SESSION_DB.to_string());
     if uri.starts_with("memory://") || uri == "memory" {
         tracing::info!("Session service: in-memory");
-        return Ok(Arc::new(InMemorySessionService::new()));
+        return maybe_encrypt_session_service(InMemorySessionService::new());
     }
     if uri.starts_with("sqlite") {
         let normalized = normalize_sqlite_uri(&uri);
@@ -75,10 +149,24 @@ pub async fn build_session_service() -> anyhow::Result<Arc<dyn SessionService>> 
             .migrate()
             .await
             .with_context(|| format!("migrating session database {normalized}"))?;
-        return Ok(Arc::new(SerializedSqliteSessionService::new(service)));
+        return maybe_encrypt_session_service(SerializedSqliteSessionService::new(service));
+    }
+    if let Some(root_collection) = parse_firestore_uri(&uri) {
+        let project_id = env_opt("GOOGLE_CLOUD_PROJECT").context(
+            "GOOGLE_CLOUD_PROJECT must be set when SESSION_SERVICE_URI uses firestore://",
+        )?;
+        let root_label = root_collection.as_deref().unwrap_or("adk_sessions");
+        tracing::info!("Session service: Firestore (project={project_id}, root={root_label})");
+        let service = FirestoreSessionService::new(FirestoreSessionConfig {
+            project_id,
+            root_collection,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("initialising Firestore session service: {e}"))?;
+        return maybe_encrypt_session_service(service);
     }
     anyhow::bail!(
-        "Unsupported SESSION_SERVICE_URI '{uri}'. Use memory:// or sqlite:///path/to/sessions.db"
+        "Unsupported SESSION_SERVICE_URI '{uri}'. Use memory://, sqlite:///path/to/sessions.db, or firestore://"
     )
 }
 
@@ -413,5 +501,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed.len(), 16);
+    }
+
+    #[test]
+    fn parses_firestore_uris() {
+        assert_eq!(parse_firestore_uri("firestore"), Some(None));
+        assert_eq!(parse_firestore_uri("firestore://"), Some(None));
+        assert_eq!(parse_firestore_uri("firestore:///"), Some(None));
+        assert_eq!(
+            parse_firestore_uri("firestore://custom_sessions"),
+            Some(Some("custom_sessions".to_string()))
+        );
+        assert_eq!(
+            parse_firestore_uri("firestore:///custom_sessions/"),
+            Some(Some("custom_sessions".to_string()))
+        );
+        assert_eq!(parse_firestore_uri("sqlite:///./sessions.db"), None);
+        assert_eq!(parse_firestore_uri("memory://"), None);
+    }
+
+    #[tokio::test]
+    async fn encrypted_session_round_trips_state() {
+        let key = EncryptionKey::generate();
+        let inner = InMemorySessionService::new();
+        let service = EncryptedSession::new(inner, key, vec![]).with_legacy_migration(true);
+        let mut initial = std::collections::HashMap::new();
+        initial.insert(
+            "CREDENTIALS_CACHE_KEY".to_string(),
+            serde_json::json!({ "access_token": "ya29.secret" }),
+        );
+        let created = service
+            .create(CreateRequest {
+                app_name: "adspace_agent".into(),
+                user_id: "user@example.com".into(),
+                session_id: Some("sess-1".into()),
+                state: initial,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            created.state().get("CREDENTIALS_CACHE_KEY"),
+            Some(serde_json::json!({ "access_token": "ya29.secret" }))
+        );
+        let loaded = service
+            .get(GetRequest {
+                app_name: "adspace_agent".into(),
+                user_id: "user@example.com".into(),
+                session_id: "sess-1".into(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            loaded.state().get("CREDENTIALS_CACHE_KEY"),
+            Some(serde_json::json!({ "access_token": "ya29.secret" }))
+        );
     }
 }

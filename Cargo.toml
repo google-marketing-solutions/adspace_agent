@@ -37,7 +37,7 @@ adk-rust = { version = "2.3.0", default-features = false, features = [
     "cli",
 ] }
 axum = "0.8.9"
-adk-session = { version = "2.3.0", features = ["sqlite"] }
+adk-session = { version = "2.3.0", features = ["sqlite", "firestore", "encrypted-session"] }
 adk-gemini = { version = "2.3.0", features = ["vertex"] }
 adk-ui = { version = "2.2.0", features = ["adk-core"] }
 

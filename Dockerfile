@@ -12,14 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ---- build stage -----------------------------------------------------------
-FROM rust:1.99-trixie AS builder
+# ---- chef & planner stages -------------------------------------------------
+FROM lukemathwalker/cargo-chef:latest-rust-1.99-trixie AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     libdbus-1-dev \
+    libssl-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
+
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ---- build stage -----------------------------------------------------------
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+# Compile third-party dependencies in a cached layer before copying src/.
+RUN cargo chef cook --release --locked --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
@@ -32,6 +44,7 @@ FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libdbus-1-3 \
+    libssl3t64 \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/target/release/adspace-agent /usr/local/bin/adspace-agent

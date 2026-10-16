@@ -1050,32 +1050,6 @@ select:focus-visible {
   background: var(--accent-primary);
 }
 
-.pane-header {
-  position: relative;
-  z-index: 20;
-  min-height: 54px;
-  padding: 8px 18px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  background: var(--bg-secondary);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  border-bottom: 1px solid var(--border-default);
-  flex: none;
-}
-
-.pane-header h2 {
-  font-size: 14px;
-  font-weight: 650;
-  letter-spacing: -0.015em;
-  margin: 1px 0 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .eyebrow {
   background: var(--gemini-gradient);
   -webkit-background-clip: text;
@@ -1085,22 +1059,6 @@ select:focus-visible {
   text-transform: uppercase;
   font-weight: 700;
   letter-spacing: 0.1em;
-}
-
-.count-badge {
-  padding: 1px 8px;
-  border-radius: 999px;
-  font-size: 10.5px;
-  font-family: var(--mono);
-  background: var(--accent-wash);
-  color: var(--accent-primary);
-  border: 1px solid color-mix(in srgb, var(--accent-primary) 35%, var(--border-default));
-}
-
-.pane-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 7px;
 }
 
 /* Session Token Telemetry Pill & Popover */
@@ -1340,6 +1298,37 @@ select:focus-visible {
 }
 
 /* Left Pane: Chat Transcript & Floating Gemini Composer */
+.chat-floating-actions {
+  position: absolute;
+  top: 14px;
+  right: 18px;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  pointer-events: none;
+}
+
+.chat-floating-actions .popover-anchor,
+.chat-floating-actions .quiet-button {
+  pointer-events: auto;
+}
+
+.chat-floating-actions .usage-pill,
+.chat-floating-actions .quiet-button {
+  background: var(--bg-secondary);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: var(--shadow-sm);
+}
+
+.chat-floating-actions .usage-pill:hover,
+.chat-floating-actions .quiet-button:hover {
+  border-color: color-mix(in srgb, var(--accent-primary) 50%, var(--border-default));
+  color: var(--accent-primary);
+  background: color-mix(in srgb, var(--accent-wash) 70%, var(--bg-secondary));
+}
+
 .transcript {
   flex: 1;
   min-height: 0;
@@ -1348,6 +1337,10 @@ select:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.transcript > .message-row:first-child {
+  margin-top: 32px;
 }
 
 .message-row {
@@ -1923,6 +1916,31 @@ select:focus-visible {
   color: var(--accent-primary);
 }
 
+.canvas-floating-actions {
+  position: absolute;
+  top: 14px;
+  right: 18px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  pointer-events: none;
+}
+
+.canvas-floating-actions .quiet-button {
+  pointer-events: auto;
+  background: var(--bg-secondary);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: var(--shadow-sm);
+}
+
+.canvas-floating-actions .quiet-button:hover {
+  border-color: color-mix(in srgb, var(--accent-primary) 50%, var(--border-default));
+  color: var(--accent-primary);
+  background: color-mix(in srgb, var(--accent-wash) 70%, var(--bg-secondary));
+}
+
 .canvas-body {
   position: relative;
   z-index: 1;
@@ -1941,6 +1959,10 @@ select:focus-visible {
   width: 100%;
   max-width: 960px;
   margin: 0 auto;
+}
+
+.canvas-surfaces:not(:empty) {
+  padding-top: 30px;
 }
 
 .canvas-empty {

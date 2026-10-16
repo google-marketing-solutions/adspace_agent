@@ -385,12 +385,7 @@
       <main id="workspace" class="studio-workspace hidden">
         <!-- Left Pane: Chat Interface -->
         <section class="chat-pane" aria-label="Conversation">
-          <div class="pane-header">
-            <div>
-              <div class="eyebrow">Conversation</div>
-              <h2 id="chat-session-title">Session</h2>
-            </div>
-            <div class="pane-header-actions">
+          <div class="chat-floating-actions">
               <div id="session-usage-anchor" class="popover-anchor">
                 <button
                   id="session-usage-btn"
@@ -503,7 +498,6 @@
                 <span class="google-symbols" aria-hidden="true">refresh</span>
                 <span>Refresh</span>
               </button>
-            </div>
           </div>
 
           <div id="chat-transcript" class="transcript" aria-live="polite"></div>
@@ -547,12 +541,12 @@
 
         <!-- Right Pane: Interactive ADK-UI Canvas -->
         <section class="canvas-pane" aria-label="Interactive UI Canvas">
-          <div class="pane-header canvas-header">
-            <div>
-              <div class="eyebrow">Generative UI · adk-ui</div>
-              <h2>Interactive Canvas <small id="canvas-count-badge" class="count-badge">0</small></h2>
-            </div>
-            <div class="pane-header-actions">
+          <div id="canvas-tabs" class="canvas-tabs hidden" role="tablist"></div>
+
+          <div class="canvas-stage-viewport">
+            <div id="canvas-stage" class="stage" aria-hidden="true"></div>
+
+            <div class="canvas-floating-actions">
               <button id="export-ui-btn" type="button" class="quiet-button" title="Download active UI specification as JSON">
                 <span>Export JSON</span>
               </button>
@@ -560,12 +554,6 @@
                 <span>Clear</span>
               </button>
             </div>
-          </div>
-
-          <div id="canvas-tabs" class="canvas-tabs hidden" role="tablist"></div>
-
-          <div class="canvas-stage-viewport">
-            <div id="canvas-stage" class="stage" aria-hidden="true"></div>
 
             <div id="canvas-body" class="canvas-body">
               <div id="canvas-empty" class="canvas-empty">

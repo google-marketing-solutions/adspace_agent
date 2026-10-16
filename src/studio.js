@@ -128,7 +128,6 @@
   const authGateHint = $("auth-gate-hint");
   const googleLoginBtn = $("google-login-btn");
   const workspace = $("workspace");
-  const chatSessionTitle = $("chat-session-title");
   const sessionUsageBtn = $("session-usage-btn");
   const sessionUsagePopover = $("session-usage-popover");
   const refreshSessionBtn = $("refresh-session-btn");
@@ -140,7 +139,6 @@
   const composerContextHint = $("composer-context-hint");
   const composerUserHint = $("composer-user-hint");
   const paneResizer = $("pane-resizer");
-  const canvasCountBadge = $("canvas-count-badge");
   const canvasTabs = $("canvas-tabs");
   const canvasEmpty = $("canvas-empty");
   const canvasSurfacesEl = $("canvas-surfaces");
@@ -623,7 +621,6 @@
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       activeSession = await resp.json();
-      chatSessionTitle.textContent = `Session ${activeSession.id.slice(0, 8)}`;
       $("menu-session-id").textContent = activeSession.id;
       if (isSessionSwitch) {
         activeSurfaceId = "all";
@@ -4040,7 +4037,6 @@
   };
 
   const renderCanvas = () => {
-    canvasCountBadge.textContent = String(canvasSurfaces.length);
     canvasSurfacesEl.replaceChildren();
     canvasTabs.replaceChildren();
 

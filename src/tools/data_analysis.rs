@@ -7,7 +7,7 @@
 //! | `PYTHON_EXECUTOR` | Tool | Notes |
 //! |---|---|---|
 //! | `gemini` (default) | `gemini_code_execution` | Gemini writes and runs Python server-side (numpy, pandas, matplotlib, scikit-learn, ... available). No infrastructure; stateless per turn. |
-//! | `docker` | `python_code` | Container-backed CPython (`PYTHON_DOCKER_IMAGE`, default `python:3.12-slim`). Requires a Docker daemon. |
+//! | `docker` | `python_code` | Container-backed CPython (`PYTHON_DOCKER_IMAGE`, default `python:3.15-slim`). Requires a Docker daemon. |
 //! | `vertex` | `vertex_sandbox_code_execution` | Vertex AI Agent Engine managed sandbox (`VERTEX_SANDBOX_NAME` or `VERTEX_AGENT_ENGINE`). Stateful per session. |
 //! | `monty` | `monty_python_code` | In-process sandboxed Monty interpreter (Python subset). Needs `--features monty`. |
 
@@ -81,7 +81,7 @@ pub fn build_python_tool(kind: PythonExecutorKind) -> anyhow::Result<Arc<dyn Too
             runtime: std::env::var("PYTHON_DOCKER_RUNTIME")
                 .unwrap_or_else(|_| "docker".to_string()),
             default_image: std::env::var("PYTHON_DOCKER_IMAGE")
-                .unwrap_or_else(|_| "python:3.12-slim".to_string()),
+                .unwrap_or_else(|_| "python:3.15-slim".to_string()),
             extra_flags: vec![],
             auto_remove: true,
         })),

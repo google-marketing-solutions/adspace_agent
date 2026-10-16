@@ -4584,7 +4584,7 @@
   });
 
   // ---------------------------------------------------------------------------
-  // Interactive Canvas Stage (Google DeepMind Gemini 4 Argon WebGL Stage)
+  // Interactive Canvas Stage (Argon Dotted Grid WebGL Stage)
   // ---------------------------------------------------------------------------
   let canvasStageInstance = null;
   let canvasStageAbort = null;
@@ -4617,26 +4617,12 @@
         config: {
           dark_mode_preset: "argon-dark",
           light_mode_preset: "argon-light",
-          mesh_1_text: "4",
-          mesh_1_depth: 41,
-          mesh_1_pos_x: 18,
-          mesh_1_pos_y: 33,
-          mesh_2_text: "4",
-          mesh_2_depth: 80,
-          mesh_2_pos_x: -50,
-          mesh_2_pos_y: -43,
-          spark_prominence: 24,
-          show_hero_motif: true,
-          hero_motif_symbol: "spark",
-          motif_scale: 115,
-          motif_opacity: 28,
-          motif_pos_x: 0,
-          motif_pos_y: -6,
-          motif_idle_evap: 65,
-          motif_hover_evap: 80,
-          seed: 10,
-          grain: 14,
-          animate_grain: false,
+          grid_step: 24,
+          dot_radius: 1.4,
+          hover_reach: 155,
+          hover_push: 7.5,
+          hover_swirl: 2.2,
+          hover_scale: 1.35,
         },
       });
       canvasStageInstance = instance;

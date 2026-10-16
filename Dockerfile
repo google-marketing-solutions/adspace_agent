@@ -13,7 +13,12 @@
 # limitations under the License.
 
 # ---- build stage -----------------------------------------------------------
-FROM rust:1.95-bookworm AS builder
+FROM rust:1.99-trixie AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake \
+    libdbus-1-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -21,9 +26,12 @@ RUN cargo build --release --locked
 
 # ---- runtime stage ---------------------------------------------------------
 # Python code runs server-side in Gemini (PYTHON_EXECUTOR=gemini, the default),
-# so the runtime image needs nothing beyond the binary and CA certificates.
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+# so the runtime image needs nothing beyond the binary, D-Bus (for adk-cli's
+# keyring dependency), and CA certificates.
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libdbus-1-3 \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/target/release/adspace-agent /usr/local/bin/adspace-agent

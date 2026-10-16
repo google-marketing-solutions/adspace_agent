@@ -1314,6 +1314,11 @@ select:focus-visible {
   pointer-events: auto;
 }
 
+.chat-floating-actions .quiet-button {
+  height: 30px;
+  padding: 0 12px;
+}
+
 .chat-floating-actions .usage-pill,
 .chat-floating-actions .quiet-button {
   background: var(--bg-secondary);
@@ -1929,6 +1934,8 @@ select:focus-visible {
 
 .canvas-floating-actions .quiet-button {
   pointer-events: auto;
+  height: 30px;
+  padding: 0 12px;
   background: var(--bg-secondary);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);

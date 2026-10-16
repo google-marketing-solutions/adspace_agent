@@ -49,7 +49,7 @@ pub const DEFAULT_COMPACTION_TOKEN_THRESHOLD: u64 = 500_000;
 pub const DEFAULT_COMPACTION_EVENT_RETENTION_SIZE: u64 = 3;
 
 /// Google Ads API version used for the discovery document.
-pub const GOOGLE_ADS_API_VERSION: &str = "v25";
+pub const GOOGLE_ADS_API_VERSION: &str = "v26";
 
 /// Google Ads tools enabled when `GOOGLE_ADS_TOOL_FILTER` is unset.
 pub const DEFAULT_GOOGLE_ADS_TOOL_FILTER: &[&str] = &[

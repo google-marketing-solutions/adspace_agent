@@ -19,7 +19,7 @@ built on [adk-rust](https://github.com/zavora-ai/adk-rust) 2.3.0.
 
 ### Prerequisites
 
-- Rust 1.95+ (`rustup`)
+- Rust 1.99+ (`rustup`)
 - `gcloud auth application-default login` (Vertex AI, Cloud Storage, BigQuery)
 
 ### Environment Variables
@@ -214,7 +214,7 @@ ARTIFACT_SERVICE_URI=gs://{YOUR_ARTIFACT_BUCKET}"
 ```
 
 The [Dockerfile](Dockerfile) builds a release binary and ships it on a
-`debian:bookworm-slim` image — no Python runtime is needed because code
+`debian:trixie-slim` image — no Python runtime is needed because code
 execution happens server-side in Gemini.
 
 ## Differences from the Python agent

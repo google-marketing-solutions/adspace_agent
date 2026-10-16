@@ -2,7 +2,7 @@
 name = "adspace-agent"
 version = "0.13.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.99"
 license = "Apache-2.0"
 description = "AdSpace Agent is designed to provide a standardized way to integrate an LLM with Google Ads, YouTube, Google Cloud, and Google Search to form a more comprehensive campaign and marketing plan for agencies."
 authors = ["Tony Coconate <coconate@google.com>", "Brian Craft <bcraft@google.com>"]
@@ -36,32 +36,32 @@ adk-rust = { version = "2.3.0", default-features = false, features = [
     "vertex-sandbox",
     "cli",
 ] }
-axum = "0.8"
+axum = "0.8.9"
 adk-session = { version = "2.3.0", features = ["sqlite"] }
 adk-gemini = { version = "2.3.0", features = ["vertex"] }
 adk-ui = { version = "2.2.0", features = ["adk-core"] }
 
-anyhow = "1.0"
-async-trait = "0.1"
-futures = "0.3"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", features = ["preserve_order"] }
-tokio = { version = "1.40", features = ["full"] }
-tracing = "0.1"
-dotenvy = "0.15"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-google-cloud-auth = { version = "1", default-features = false, features = ["default-rustls-provider"] }
-thiserror = "2"
-chrono = { version = "0.4", features = ["serde"] }
-regex = "1"
-csv = "1.3"
-uuid = { version = "1", features = ["v4"] }
-clap = { version = "4", features = ["derive", "env"] }
-url = "2"
-base64 = "0.22"
-sha2 = "0.10"
-hmac = "0.12"
-indexmap = { version = "2", features = ["serde"] }
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+futures = "0.3.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+tokio = { version = "1.53.3", features = ["full"] }
+tracing = "0.1.44"
+dotenvy = "0.15.7"
+reqwest = { version = "0.13.5", default-features = false, features = ["form", "json", "query", "rustls", "stream"] }
+google-cloud-auth = { version = "1.17.0", default-features = false, features = ["default-rustls-provider"] }
+thiserror = "2.0.21"
+chrono = { version = "0.4.45", features = ["serde"] }
+regex = "1.13.1"
+csv = "1.4.0"
+uuid = { version = "1.28.0", features = ["v4"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+url = "2.5.8"
+base64 = "0.23.1"
+sha2 = "0.11.1"
+hmac = "0.13.0"
+indexmap = { version = "2.14.2", features = ["serde"] }
 
 [features]
 default = []
@@ -71,5 +71,5 @@ default = []
 monty = ["adk-rust/code-embedded-python"]
 
 [dev-dependencies]
-tempfile = "3"
-tower = { version = "0.5", features = ["util"] }
+tempfile = "3.27.0"
+tower = { version = "0.5.3", features = ["util"] }

@@ -786,7 +786,7 @@ mod tests {
     fn doc() -> DiscoveryDocument {
         DiscoveryDocument::parse(
             r#"{
-          "name": "googleads", "version": "v25",
+          "name": "googleads", "version": "v26",
           "rootUrl": "https://googleads.googleapis.com/", "servicePath": "",
           "schemas": {
             "SearchRequest": {"id": "SearchRequest", "type": "object", "properties": {
@@ -807,8 +807,8 @@ mod tests {
           "resources": {"customers": {"resources": {"googleAds": {"methods": {
             "search": {
               "id": "googleads.customers.googleAds.search",
-              "path": "v25/{+customerId}/googleAds:search",
-              "flatPath": "v25/customers/{customersId}/googleAds:search",
+              "path": "v26/{+customerId}/googleAds:search",
+              "flatPath": "v26/customers/{customersId}/googleAds:search",
               "httpMethod": "POST",
               "description": "Returns all rows that match the search query.",
               "parameters": {
@@ -839,7 +839,7 @@ mod tests {
         assert_eq!(spec.base_url, "https://googleads.googleapis.com");
         assert_eq!(
             spec.path_template,
-            "/v25/customers/{customersId}/googleAds:search"
+            "/v26/customers/{customersId}/googleAds:search"
         );
         assert_eq!(spec.body_kind, BodyKind::Object);
         let names: Vec<&str> = spec.parameters.iter().map(|p| p.name.as_str()).collect();
@@ -918,7 +918,7 @@ mod tests {
         assert_eq!(req.method, "POST");
         assert_eq!(
             req.url,
-            "https://googleads.googleapis.com/v25/customers/123%20456/googleAds:search"
+            "https://googleads.googleapis.com/v26/customers/123%20456/googleAds:search"
         );
         assert_eq!(
             req.query,

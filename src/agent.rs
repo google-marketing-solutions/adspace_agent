@@ -1320,7 +1320,7 @@ mod tests {
         let ads = &configs[0];
         assert_eq!(
             ads.discovery_url.as_deref(),
-            Some("https://googleads.googleapis.com/$discovery/rest?version=v25")
+            Some("https://googleads.googleapis.com/$discovery/rest?version=v26")
         );
         assert!(
             ads.additional_headers

@@ -4356,43 +4356,13 @@
       if (textEl) textEl.remove();
     }
 
-    // 3. Tool calls container (updated only when tool calls changed)
-    const toolsSig = visibleTools.length ? JSON.stringify(visibleTools) : "";
-    if (article.dataset.toolsSig !== toolsSig) {
-      article.dataset.toolsSig = toolsSig;
-      article.querySelectorAll(":scope > details.tool-call").forEach((el) => el.remove());
-      const beforeEl = article.querySelector(":scope > .message-usage");
-      for (const tp of visibleTools) {
-        const details = document.createElement("details");
-        details.className = "tool-call";
-        const summary = document.createElement("summary");
-        const isResp = "functionResponse" in tp || "function_response" in tp;
-        const name =
-          tp.name ||
-          tp.functionCall?.name ||
-          tp.function_call?.name ||
-          tp.functionResponse?.name ||
-          tp.function_response?.name ||
-          "tool";
-        summary.textContent = isResp ? `Result · ${name}` : `Tool · ${name}`;
-        const pre = document.createElement("pre");
-        pre.textContent = JSON.stringify(tp, null, 2);
-        details.append(summary, pre);
-        if (beforeEl) {
-          article.insertBefore(details, beforeEl);
-        } else {
-          article.appendChild(details);
-        }
-      }
-    }
-
-    // 4. Per-turn token telemetry & cost footer inside bubble
-    updateUsageFooter(article, { isUser, usage });
+    // Clear any legacy usage footer inside bubble
+    const legacyUsage = article.querySelector(":scope > .message-usage");
+    if (legacyUsage) legacyUsage.remove();
   };
 
   const updateMessageCol = (col, item) => {
-    const hasBubble =
-      item.partial || Boolean(item.textContent) || item.visibleTools.length > 0;
+    const hasBubble = item.partial || Boolean(item.textContent);
     let article = col.querySelector(":scope > article.message");
 
     if (hasBubble) {
@@ -4402,11 +4372,50 @@
         col.prepend(article);
       }
       updateMessageArticle(article, item);
-      // Clear any standalone usage on col when bubble owns the usage footer
-      updateUsageFooter(col, { isUser: true, usage: null });
-    } else {
-      if (article) article.remove();
-      updateUsageFooter(col, { isUser: item.isUser, usage: item.usage });
+    } else if (article) {
+      article.remove();
+    }
+
+    // Tool calls live outside the chat bubble as soft-gray pills
+    const toolsSig = item.visibleTools.length ? JSON.stringify(item.visibleTools) : "";
+    if (col.dataset.toolsSig !== toolsSig) {
+      col.dataset.toolsSig = toolsSig;
+      let toolGroup = col.querySelector(":scope > .chat-tool-calls");
+      if (item.visibleTools.length === 0) {
+        if (toolGroup) toolGroup.remove();
+      } else {
+        if (!toolGroup) {
+          toolGroup = document.createElement("div");
+          toolGroup.className = "chat-tool-calls";
+          const beforeEl =
+            col.querySelector(":scope > .chat-canvas-buttons") ||
+            col.querySelector(":scope > .message-usage");
+          if (beforeEl) {
+            col.insertBefore(toolGroup, beforeEl);
+          } else {
+            col.appendChild(toolGroup);
+          }
+        }
+        toolGroup.replaceChildren();
+        for (const tp of item.visibleTools) {
+          const details = document.createElement("details");
+          details.className = "tool-call";
+          const summary = document.createElement("summary");
+          const isResp = "functionResponse" in tp || "function_response" in tp;
+          const name =
+            tp.name ||
+            tp.functionCall?.name ||
+            tp.function_call?.name ||
+            tp.functionResponse?.name ||
+            tp.function_response?.name ||
+            "tool";
+          summary.textContent = isResp ? `Result · ${name}` : `Tool · ${name}`;
+          const pre = document.createElement("pre");
+          pre.textContent = JSON.stringify(tp, null, 2);
+          details.append(summary, pre);
+          toolGroup.appendChild(details);
+        }
+      }
     }
 
     // Canvas jump buttons live outside the chat bubble (styled like .cover__buttons)
@@ -4460,6 +4469,9 @@
         }
       }
     }
+
+    // Per-turn token telemetry & cost printed cleanly below the message/pills
+    updateUsageFooter(col, { isUser: item.isUser, usage: item.usage });
   };
 
   const renderTranscript = () => {

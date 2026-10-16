@@ -1410,13 +1410,15 @@ select:focus-visible {
 .message-user {
   max-width: min(88%, 540px);
   border-radius: 22px 22px 6px 22px;
-  background: var(--bg-primary);
-  border-color: var(--border-default);
+  background: rgb(214, 237, 255);
+  color: #121317;
+  border-color: rgba(18, 19, 23, 0.08);
 }
 
 .message-user.message-ui-event {
   border-radius: 18px 18px 6px 18px;
   background: var(--surface-card);
+  color: var(--text-primary);
   border-color: var(--border-default);
 }
 
@@ -1596,33 +1598,52 @@ select:focus-visible {
   text-underline-offset: 2px;
 }
 
-.tool-call {
-  margin: 0 14px 10px;
-  border: 1px solid var(--border-default);
-  border-radius: 12px;
-  background: var(--bg-primary);
-  font-size: 12px;
-  overflow: hidden;
+.chat-tool-calls {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 100%;
 }
 
-.tool-call:first-child {
-  margin-top: 10px;
+.tool-call {
+  margin: 0;
+  max-width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: 18px;
+  background: var(--dm-surface-gray);
+  font-size: 12.5px;
+  overflow: hidden;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.tool-call[open] {
+  width: 100%;
+  border-radius: 16px;
 }
 
 .tool-call summary {
-  padding: 7px 12px;
+  padding: 8px 14px;
   color: var(--text-secondary);
   font-weight: 500;
   cursor: pointer;
+  user-select: none;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.tool-call summary:hover {
+  background: var(--dm-surface-gray-subtle);
+  color: var(--text-primary);
 }
 
 .tool-call pre {
   margin: 0;
-  padding: 9px 12px;
-  max-height: 180px;
+  padding: 10px 14px;
+  max-height: 200px;
   overflow: auto;
   border-top: 1px solid var(--border-default);
-  font: 10.5px/1.5 var(--mono);
+  background: transparent;
+  font: 11px/1.5 var(--mono);
   color: var(--text-secondary);
 }
 
@@ -1723,6 +1744,14 @@ select:focus-visible {
   max-width: 100%;
   justify-content: flex-start;
   gap: 8px;
+  background-color: var(--dm-surface-gray);
+  border-color: var(--border-strong);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.button.button--protected.canvas-jump-btn:hover {
+  background-color: var(--dm-surface-gray-subtle);
 }
 
 .canvas-jump-icon {
@@ -1754,24 +1783,18 @@ select:focus-visible {
   flex-shrink: 0;
 }
 
-.message-col > .message-usage {
-  border: 1px solid var(--border-default);
-  border-radius: 999px;
-  padding: 4px 12px;
-}
-
 .message-usage {
-  padding: 7px 16px 9px;
-  border-top: 1px solid var(--border-default);
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   font-size: 11px;
   color: var(--text-muted);
-  background: var(--bg-primary);
+  background: transparent;
   cursor: pointer;
 }
 

@@ -387,9 +387,9 @@ select:focus-visible {
 
 .status-running,
 .status-authorizing {
-  color: var(--text-primary);
-  border-color: var(--border-strong);
-  background: var(--dm-surface-gray-subtle);
+  color: #0b3d91;
+  border-color: rgba(26, 115, 232, 0.28);
+  background: rgb(214, 237, 255);
 }
 
 .status-failed {
@@ -398,12 +398,17 @@ select:focus-visible {
 
 .status-running i,
 .status-authorizing i {
-  animation: pulse 0.9s infinite alternate;
+  width: 10px;
+  height: 10px;
+  background: transparent;
+  border: 1.75px solid rgba(11, 87, 208, 0.24);
+  border-top-color: #0b57d0;
+  animation: status-spin 0.65s linear infinite;
 }
 
-@keyframes pulse {
+@keyframes status-spin {
   to {
-    opacity: 0.25;
+    transform: rotate(360deg);
   }
 }
 

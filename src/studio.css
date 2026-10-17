@@ -864,8 +864,9 @@ select:focus-visible {
   margin: 0 14px;
   padding: 12px 14px;
   border-radius: 16px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border-default);
+  /* Borderless tile, matching .usage-kpi-card. */
+  background: var(--dm-surface-gray-subtle);
+  border-bottom: 0;
 }
 
 .user-session-meta div {
@@ -887,7 +888,6 @@ select:focus-visible {
   background: var(--surface-card);
   padding: 2px 8px;
   border-radius: 6px;
-  border: 1px solid var(--border-default);
   max-width: 175px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1248,8 +1248,8 @@ select:focus-visible {
 .usage-kpi-card {
   padding: 12px 14px;
   border-radius: 16px;
-  border: 1px solid var(--border-default);
-  background: var(--bg-primary);
+  /* Borderless tile: the tinted surface alone separates it from the popover. */
+  background: var(--dm-surface-gray-subtle);
   display: flex;
   flex-direction: column;
   gap: 3px;

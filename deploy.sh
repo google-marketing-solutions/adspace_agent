@@ -81,7 +81,7 @@ gcloud run deploy "$SERVICE" \
   --region "$REGION" \
   --image "$IMAGE" \
   --quiet \
-  "${extra_args[@]}"
+  ${extra_args[@]+"${extra_args[@]}"}
 
 echo "==> Live:"
 gcloud run services describe "$SERVICE" \

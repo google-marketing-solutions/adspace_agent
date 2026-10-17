@@ -25,7 +25,8 @@ use adk_rust::{
     State, Tool, ToolContext, Toolset,
 };
 use adspace_agent::auth::{
-    CREDENTIALS_STATE_KEY, GoogleOAuthFlow, OAuthClientConfig, OAuthToken, SessionCredentialManager,
+    GoogleOAuthFlow, OAuthClientConfig, OAuthToken, SessionCredentialManager,
+    USER_CREDENTIALS_STATE_KEY,
 };
 use adspace_agent::tools::bigquery::{
     BIGQUERY_READ_ONLY_SCOPE, BIGQUERY_SCOPE, BigQueryToolset, MAX_RESULT_ROWS,
@@ -56,7 +57,7 @@ impl SessionToolContext {
         };
         Arc::new(Self {
             state: HashMap::from([(
-                CREDENTIALS_STATE_KEY.to_string(),
+                USER_CREDENTIALS_STATE_KEY.to_string(),
                 serde_json::to_value(token).unwrap(),
             )]),
             actions: Mutex::new(EventActions::default()),

@@ -14,7 +14,12 @@
 
 target
 .git
+.github
 .env
 sessions.db*
+*.db-journal
 .credentials
 .artifacts
+.adk
+google-ads.yaml
+.DS_Store

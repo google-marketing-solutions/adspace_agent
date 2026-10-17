@@ -29,7 +29,7 @@ use adk_rust::session::{CreateRequest, GetRequest, InMemorySessionService, Sessi
 use adk_rust::{Content, Llm, LlmRequest, LlmResponse, LlmResponseStream};
 use adspace_agent::auth::{
     AuthenticatedUser, CREDENTIALS_STATE_KEY, GoogleOAuthFlow, OAuthClientConfig, OAuthToken,
-    SessionCredentialManager, SessionRef,
+    SessionCredentialManager, SessionRef, USER_CREDENTIALS_STATE_KEY,
 };
 use adspace_agent::config::APP_NAME;
 use adspace_agent::server::{AdminAllowList, OAuthRoutes, USER_COOKIE_NAME, build_app};
@@ -253,7 +253,12 @@ async fn every_api_route_requires_the_owning_users_cookie() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body["state"].get(CREDENTIALS_STATE_KEY).is_none(), "{body}");
+    assert!(
+        body["state"].get(USER_CREDENTIALS_STATE_KEY).is_none(),
+        "{body}"
+    );
     assert!(!body.to_string().contains("ya29.victim-secret"), "{body}");
+    assert!(!body.to_string().contains("1//victim-refresh"), "{body}");
     let resp = server
         .get(&session_paths[1], Some(&victim_cookie))
         .send()

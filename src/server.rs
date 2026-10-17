@@ -48,7 +48,7 @@ use crate::agent::{AgentRuntime, TurnRunner};
 use crate::auth::oauth::OAUTH_CALLBACK_PATH;
 use crate::auth::{
     AuthenticatedUser, CREDENTIALS_STATE_KEY, LOGIN_SENTINEL_APP, OAuthToken,
-    SessionCredentialManager, SessionRef,
+    SessionCredentialManager, SessionRef, USER_CREDENTIALS_STATE_KEY,
 };
 use crate::config::{APP_NAME, PRESET_IMAGE_MODELS, PRESET_MODELS, PRESET_VIDEO_MODELS};
 
@@ -543,7 +543,8 @@ fn extract_api_path_user_id(path: &str) -> Option<String> {
 }
 
 /// Whether an `/api/…` response can carry session events / state (and hence
-/// the OAuth token stored under [`CREDENTIALS_STATE_KEY`]).
+/// the OAuth token stored under [`USER_CREDENTIALS_STATE_KEY`] /
+/// [`CREDENTIALS_STATE_KEY`]).
 fn carries_session_state(path: &str) -> bool {
     if path.contains("/artifacts") {
         return false;
@@ -556,10 +557,15 @@ fn carries_session_state(path: &str) -> bool {
         || path.starts_with("/api/debug/")
 }
 
+/// State keys whose values are OAuth tokens and must never reach a browser.
+const CREDENTIAL_KEYS: [&str; 2] = [USER_CREDENTIALS_STATE_KEY, CREDENTIALS_STATE_KEY];
+
 fn scrub_credentials_from_json(val: &mut serde_json::Value) {
     match val {
         serde_json::Value::Object(map) => {
-            map.remove(CREDENTIALS_STATE_KEY);
+            for key in CREDENTIAL_KEYS {
+                map.remove(key);
+            }
             for v in map.values_mut() {
                 scrub_credentials_from_json(v);
             }
@@ -1509,7 +1515,7 @@ mod tests {
         assert!(err_html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
 
         // 5. `guard_adk_routes` blocks unauthenticated user API calls and scrubs
-        // `CREDENTIALS_STATE_KEY` from session responses.
+        // both credential keys from session responses.
         let api_app = Router::new()
             .route(
                 "/api/apps/{app}/users/{user_id}/sessions",
@@ -1518,6 +1524,7 @@ mod tests {
                         "id": "s1",
                         "state": {
                             CREDENTIALS_STATE_KEY: { "access_token": "secret-token" },
+                            USER_CREDENTIALS_STATE_KEY: { "access_token": "user-secret-token" },
                             "visible": "ok"
                         }
                     }]))
@@ -1555,6 +1562,11 @@ mod tests {
             serde_json::from_slice(&to_bytes(authed.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
         assert!(scrubbed[0]["state"].get(CREDENTIALS_STATE_KEY).is_none());
+        assert!(
+            scrubbed[0]["state"]
+                .get(USER_CREDENTIALS_STATE_KEY)
+                .is_none()
+        );
         assert_eq!(scrubbed[0]["state"]["visible"], "ok");
 
         // 6. `/auth/models` allows administrators to update agent, image, and video models.
@@ -1734,6 +1746,7 @@ mod tests {
             "id": "e1",
             "actions": { "stateDelta": {
                 CREDENTIALS_STATE_KEY: { "access_token": "ya29.secret", "refresh_token": "1//r" },
+                USER_CREDENTIALS_STATE_KEY: { "access_token": "ya29.user-secret" },
                 "other": 1
             } }
         });
@@ -1748,7 +1761,9 @@ mod tests {
         assert!(text.starts_with("event: message\ndata: "), "{text}");
         assert!(text.ends_with("\n\n"));
         assert!(!text.contains("ya29.secret"));
+        assert!(!text.contains("ya29.user-secret"));
         assert!(!text.contains(CREDENTIALS_STATE_KEY));
+        assert!(!text.contains(USER_CREDENTIALS_STATE_KEY));
         assert!(text.contains("\"other\":1"));
 
         // Keep-alive comments and non-JSON data pass through; a trailing
@@ -1778,7 +1793,10 @@ mod tests {
         let cookie = signed_cookie(&credentials, "nate@example.com");
         let event = serde_json::json!({
             "id": "e1",
-            "actions": { "stateDelta": { CREDENTIALS_STATE_KEY: { "access_token": "ya29.secret" } } }
+            "actions": { "stateDelta": {
+                CREDENTIALS_STATE_KEY: { "access_token": "ya29.secret" },
+                USER_CREDENTIALS_STATE_KEY: { "access_token": "ya29.secret-user" }
+            } }
         });
         let sse_body = format!("data: {event}\n\ndata: {event}\n\n");
         let api_app = Router::new()
@@ -1849,6 +1867,12 @@ mod tests {
                 .get(CREDENTIALS_STATE_KEY)
                 .is_none()
         );
+        assert!(
+            json["events"][0]["actions"]["stateDelta"]
+                .get(USER_CREDENTIALS_STATE_KEY)
+                .is_none()
+        );
+        assert!(!json.to_string().contains("ya29."), "{json}");
 
         // Path-scoped routes are refused for another user's id.
         let foreign = api_app

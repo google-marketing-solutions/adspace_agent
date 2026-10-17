@@ -39,7 +39,7 @@ pub use adc::AdcTokenProvider;
 pub use oauth::{
     AuthRequired, AuthenticatedUser, CREDENTIALS_STATE_KEY, GoogleOAuthFlow, LOGIN_SENTINEL_APP,
     OAuthClientConfig, OAuthToken, OAuthUiEvent, SessionCredentialManager, SessionRef,
-    SessionTokenProvider, UserLogin, auth_required,
+    SessionTokenProvider, USER_CREDENTIALS_STATE_KEY, UserLogin, UserRef, auth_required,
 };
 
 /// Something that can produce a valid OAuth 2.0 bearer access token.

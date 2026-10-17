@@ -16,20 +16,32 @@
 //!
 //! The agent needs the *user's* Google credentials (not the service's) to
 //! call Google Ads, Campaign Manager 360, Display & Video 360, Drive, YouTube
-//! and friends. Credentials belong to the chat session, exactly like the
-//! Python agent's `CREDENTIALS_CACHE_KEY` state entry:
+//! and friends. Credentials belong to the **user** (adk-session's user-scoped
+//! state, key [`USER_CREDENTIALS_STATE_KEY`], merged into every session of
+//! that user), so a user authorizes once per scope, not once per chat:
 //!
 //! 1. A tool that needs a token asks the [`SessionCredentialManager`], which
-//!    reads the token from the session state (refreshing it when expired).
+//!    reads the token from the session's (merged) state, refreshing it when
+//!    expired.
 //! 2. If no usable token exists, the manager returns an [`AuthRequired`]
 //!    error carrying an authorization URL whose `state` parameter is a signed
 //!    claim naming the session. The tool surfaces that URL to the user
-//!    through the LLM.
+//!    through the LLM (or the web UI opens it in a popup).
 //! 3. The user authorizes; Google redirects to our `/oauth2/callback` route,
 //!    which calls [`SessionCredentialManager::complete_authorization`] and
 //!    [`SessionCredentialManager::persist`] to write the tokens into that
-//!    session's state.
-//! 4. The next tool call of the session finds the stored token.
+//!    user's state through the requesting session.
+//! 4. The next tool call of any session of that user finds the stored token.
+//!
+//! Scopes are requested incrementally with least privilege: each consent
+//! link asks only for what the calling tool needs, Google's
+//! `include_granted_scopes` folds it into what the user already granted, and
+//! the consent screen (`prompt=consent`) is forced only when no refresh token
+//! is held yet — later additions show just the new scope.
+//!
+//! Older deployments stored the token per session under
+//! [`CREDENTIALS_STATE_KEY`]; that key is still read as a fallback and
+//! cleared once the user-scoped entry is written.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,9 +76,14 @@ pub const OAUTH_CALLBACK_PATH: &str = "/oauth2/callback";
 /// Sentinel `app_name` in [`SessionRef`] indicating a user Google Sign-In flow
 /// (rather than a tool scope authorization for an existing chat session).
 pub const LOGIN_SENTINEL_APP: &str = "__adspace_login__";
-/// Session-state key holding the session's Google credentials (same name the
-/// Python agent used).
+/// Legacy *session*-scoped state key of the Google credentials (same name the
+/// Python agent used). Still read as a fallback; new grants are written under
+/// [`USER_CREDENTIALS_STATE_KEY`].
 pub const CREDENTIALS_STATE_KEY: &str = "CREDENTIALS_CACHE_KEY";
+/// User-scoped state key holding the user's Google credentials
+/// (`user:CREDENTIALS_CACHE_KEY`): adk-session merges `user:`-prefixed
+/// entries into every session of the same `(app_name, user_id)`.
+pub const USER_CREDENTIALS_STATE_KEY: &str = "user:CREDENTIALS_CACHE_KEY";
 
 /// Signed-in Google user profile for the custom AdSpace Agent web interface.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -324,17 +341,30 @@ impl GoogleOAuthFlow {
     }
 
     /// Builds the consent-screen URL for `scopes`, binding it to `state`.
-    pub fn authorization_url(&self, scopes: &[String], state: &str) -> String {
+    ///
+    /// `include_granted_scopes=true` makes the resulting token cover what the
+    /// user already granted plus `scopes` (incremental authorization).
+    /// `prompt=consent` is only sent when `force_consent` — i.e. when no
+    /// refresh token is held yet and one must be minted; for later scope
+    /// additions Google then shows just the new scope(s) instead of
+    /// re-listing every previous grant.
+    pub fn authorization_url(&self, scopes: &[String], state: &str, force_consent: bool) -> String {
         let mut url = url::Url::parse(&self.auth_endpoint).expect("valid auth endpoint");
-        url.query_pairs_mut()
-            .append_pair("client_id", &self.config.client_id)
-            .append_pair("redirect_uri", &self.config.redirect_uri)
-            .append_pair("response_type", "code")
-            .append_pair("scope", &scopes.join(" "))
-            .append_pair("access_type", "offline")
-            .append_pair("prompt", "consent")
-            .append_pair("include_granted_scopes", "true")
-            .append_pair("state", state);
+        {
+            let mut query = url.query_pairs_mut();
+            query
+                .append_pair("client_id", &self.config.client_id)
+                .append_pair("redirect_uri", &self.config.redirect_uri)
+                .append_pair("response_type", "code")
+                .append_pair("scope", &scopes.join(" "))
+                .append_pair("access_type", "offline");
+            if force_consent {
+                query.append_pair("prompt", "consent");
+            }
+            query
+                .append_pair("include_granted_scopes", "true")
+                .append_pair("state", state);
+        }
         url.to_string()
     }
 
@@ -493,6 +523,15 @@ impl SessionRef {
         }
     }
 
+    /// The user owning the session (credentials are shared across all of the
+    /// user's sessions of the same app).
+    pub fn user(&self) -> UserRef {
+        UserRef {
+            app_name: self.app_name.clone(),
+            user_id: self.user_id.clone(),
+        }
+    }
+
     /// Typed identity triple used by the session service.
     ///
     /// # Errors
@@ -510,6 +549,22 @@ impl SessionRef {
 impl std::fmt::Display for SessionRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}/{}", self.app_name, self.user_id, self.session_id)
+    }
+}
+
+/// Identity of the user a credential belongs to: one grant serves every
+/// session of the user within an app.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UserRef {
+    /// ADK app name.
+    pub app_name: String,
+    /// User id.
+    pub user_id: String,
+}
+
+impl std::fmt::Display for UserRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.app_name, self.user_id)
     }
 }
 
@@ -614,6 +669,25 @@ fn unb64(text: &str) -> anyhow::Result<Vec<u8>> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(text)?)
 }
 
+/// Parses a stored credentials value; `Null` and garbage count as absent.
+fn parse_token(value: serde_json::Value) -> Option<OAuthToken> {
+    if value.is_null() {
+        return None;
+    }
+    match serde_json::from_value(value) {
+        Ok(token) => Some(token),
+        Err(e) => {
+            tracing::warn!("Ignoring unreadable credentials in session state: {e}");
+            None
+        }
+    }
+}
+
+/// Combines the grant held so far with a newer token response: the new
+/// access token and expiry, the previous refresh token when the exchange
+/// returned none (Google only mints one on a consent screen), and the union
+/// of the scopes (with `include_granted_scopes` the response already lists
+/// every scope the user granted).
 fn merge_tokens(older: &OAuthToken, newer: &OAuthToken) -> OAuthToken {
     let mut scopes = older.scopes.clone();
     for s in &newer.scopes {
@@ -674,12 +748,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Google credentials attached to the chat session.
+/// Google credentials of the signed-in user, reached through the chat session.
 ///
-/// Tokens are stored in the session state (key [`CREDENTIALS_STATE_KEY`]):
-/// every session authorizes on its own. The OAuth `state` parameter is a
-/// signed, short-lived claim naming the session, so the redirect handler can
-/// write the exchanged tokens straight into that session.
+/// Tokens are stored in the user-scoped session state (key
+/// [`USER_CREDENTIALS_STATE_KEY`]), so one grant serves every session of the
+/// user and scopes accumulate incrementally. The OAuth `state` parameter is a
+/// signed, short-lived claim naming the session that asked, so the redirect
+/// handler can write the exchanged tokens through that session and wake it.
 ///
 /// When interactive waiting is enabled (`serve` mode), [`Self::access_token`]
 /// broadcasts an [`OAuthUiEvent::AuthRequired`] event to `/ui/` (which opens
@@ -705,11 +780,12 @@ pub struct SessionCredentialManager {
     pending: Mutex<HashMap<SessionRef, PendingSessionAuth>>,
     /// Popup-open acknowledgments keyed by the opaque request id.
     acks: Mutex<HashMap<String, PopupAck>>,
-    /// Newly granted tokens for active sessions (bridges the gap between
+    /// Newly granted tokens keyed by user (bridges the gap between
     /// `/oauth2/callback` persisting to `SessionService` and the in-flight
-    /// `ToolContext::session()` snapshot of the currently running turn).
+    /// `ToolContext::session()` snapshot of the currently running turn — in
+    /// this or any other session of the same user).
     /// Entries expire after [`LIVE_TOKEN_TTL`].
-    live_tokens: Mutex<HashMap<SessionRef, (Instant, OAuthToken)>>,
+    live_tokens: Mutex<HashMap<UserRef, (Instant, OAuthToken)>>,
     /// Session store an in-flight waiter polls for a token persisted by the
     /// callback — possibly on another server instance (see
     /// [`Self::attach_session_service`]).
@@ -853,32 +929,30 @@ impl SessionCredentialManager {
         &self.flow
     }
 
-    /// The token stored in the session state, if any (no refresh performed).
+    /// The token stored in the session's state, if any (no refresh performed):
+    /// the user-scoped entry ([`USER_CREDENTIALS_STATE_KEY`]) first, then the
+    /// legacy per-session one ([`CREDENTIALS_STATE_KEY`]).
     ///
     /// The runner's tool context exposes the live session through
     /// [`ToolContext::session`] (its [`ReadonlyContext::state`] is `None`),
     /// so that is consulted first; `state()` is the fallback for contexts
     /// that only implement the read-only view.
     pub fn stored_token(ctx: &dyn ToolContext) -> Option<OAuthToken> {
-        let value = ctx
-            .session()
-            .and_then(|s| s.state().get(CREDENTIALS_STATE_KEY))
-            .or_else(|| ctx.state().and_then(|s| s.get(CREDENTIALS_STATE_KEY)))?;
-        if value.is_null() {
-            return None;
-        }
-        match serde_json::from_value(value) {
-            Ok(token) => Some(token),
-            Err(e) => {
-                tracing::warn!("Ignoring unreadable credentials in session state: {e}");
-                None
-            }
-        }
+        [USER_CREDENTIALS_STATE_KEY, CREDENTIALS_STATE_KEY]
+            .into_iter()
+            .find_map(|key| Self::stored_value(ctx, key).and_then(parse_token))
     }
 
-    fn current_token(&self, ctx: &dyn ToolContext, session: &SessionRef) -> Option<OAuthToken> {
+    /// The raw value under `key` in the context's state (`None` when absent).
+    fn stored_value(ctx: &dyn ToolContext, key: &str) -> Option<serde_json::Value> {
+        ctx.session()
+            .and_then(|s| s.state().get(key))
+            .or_else(|| ctx.state().and_then(|s| s.get(key)))
+    }
+
+    fn current_token(&self, ctx: &dyn ToolContext, user: &UserRef) -> Option<OAuthToken> {
         let from_ctx = Self::stored_token(ctx);
-        let from_live = self.live_token(session);
+        let from_live = self.live_token(user);
         match (from_ctx, from_live) {
             (Some(a), Some(b)) => Some(merge_tokens(&a, &b)),
             (Some(a), None) => Some(a),
@@ -888,22 +962,24 @@ impl SessionCredentialManager {
     }
 
     /// The in-memory copy of a recently granted token, unless it expired.
-    fn live_token(&self, session: &SessionRef) -> Option<OAuthToken> {
+    fn live_token(&self, user: &UserRef) -> Option<OAuthToken> {
         lock(&self.live_tokens)
-            .get(session)
+            .get(user)
             .filter(|(at, _)| at.elapsed() < LIVE_TOKEN_TTL)
             .map(|(_, token)| token.clone())
     }
 
-    /// Remembers a freshly granted token for `session`, evicting stale entries.
-    fn remember_live_token(&self, session: &SessionRef, token: &OAuthToken) {
+    /// Remembers a freshly granted token for `user`, evicting stale entries.
+    fn remember_live_token(&self, user: &UserRef, token: &OAuthToken) {
         let mut live = lock(&self.live_tokens);
         live.retain(|_, (at, _)| at.elapsed() < LIVE_TOKEN_TTL);
-        live.insert(session.clone(), (Instant::now(), token.clone()));
+        live.insert(user.clone(), (Instant::now(), token.clone()));
     }
 
-    /// Writes (or, with `None`, clears) the token in the session state through
-    /// the tool's event actions.
+    /// Writes (or, with `None`, clears) the user's token through the tool's
+    /// event actions: under [`USER_CREDENTIALS_STATE_KEY`], and — when the
+    /// session still carries a legacy per-session copy — clears
+    /// [`CREDENTIALS_STATE_KEY`] so there is a single source of truth.
     pub fn store_token(ctx: &dyn ToolContext, token: Option<&OAuthToken>) {
         let value = token
             .and_then(|t| serde_json::to_value(t).ok())
@@ -911,16 +987,23 @@ impl SessionCredentialManager {
         let mut actions = ctx.actions();
         actions
             .state_delta
-            .insert(CREDENTIALS_STATE_KEY.to_string(), value);
+            .insert(USER_CREDENTIALS_STATE_KEY.to_string(), value);
+        if Self::stored_value(ctx, CREDENTIALS_STATE_KEY).is_some_and(|v| !v.is_null()) {
+            actions
+                .state_delta
+                .insert(CREDENTIALS_STATE_KEY.to_string(), serde_json::Value::Null);
+        }
         ctx.set_actions(actions);
     }
 
-    /// Returns a valid access token for the invocation's session covering
+    /// Returns a valid access token for the invocation's user covering
     /// `scopes`, refreshing (and re-storing) it when expired.
     ///
     /// When interactive waiting is enabled (`serve` mode), this triggers the
     /// OAuth popup immediately and awaits the callback in-flight so the tool
-    /// call completes seamlessly in the same turn.
+    /// call completes seamlessly in the same turn. The consent screen is
+    /// forced only when no refresh token is held for the user yet; adding a
+    /// scope to an existing grant shows just the new scope.
     ///
     /// # Errors
     ///
@@ -932,7 +1015,10 @@ impl SessionCredentialManager {
         scopes: &[String],
     ) -> anyhow::Result<String> {
         let session = SessionRef::from_context(ctx);
-        if let Some(token) = self.current_token(ctx, &session) {
+        let user = session.user();
+        let mut has_refresh_token = false;
+        if let Some(token) = self.current_token(ctx, &user) {
+            has_refresh_token = token.refresh_token.is_some();
             if token.covers(scopes) {
                 if !token.is_expired() {
                     if Self::stored_token(ctx).as_ref() != Some(&token) {
@@ -944,35 +1030,44 @@ impl SessionCredentialManager {
                     match self.flow.refresh(&token).await {
                         Ok(refreshed) => {
                             let merged = merge_tokens(&token, &refreshed);
-                            self.remember_live_token(&session, &merged);
+                            self.remember_live_token(&user, &merged);
                             Self::store_token(ctx, Some(&merged));
                             return Ok(merged.access_token);
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "Failed to refresh Google credentials of session {session}: {e}"
+                                "Failed to refresh Google credentials of user {user}: {e}"
                             );
-                            lock(&self.live_tokens).remove(&session);
+                            lock(&self.live_tokens).remove(&user);
                             Self::store_token(ctx, None);
+                            has_refresh_token = false;
                         }
                     }
                 }
             } else {
                 tracing::info!(
-                    "Credentials of session {session} lack required scopes; requesting authorization"
+                    "Credentials of user {user} lack required scopes; requesting incremental authorization"
                 );
             }
         }
+        // Without a refresh token the consent screen must be shown so Google
+        // mints one; otherwise ask only for the new scope(s).
+        let force_consent = !has_refresh_token;
 
         let wait_timeout = *self.wait_timeout.read().unwrap_or_else(|e| e.into_inner());
         let Some(timeout) = wait_timeout else {
-            return Err(self.begin_authorization(&session, scopes).into());
+            return Err(self
+                .begin_authorization_with_consent(&session, scopes, force_consent)
+                .into());
         };
         if !self.flow.config.is_configured() || session.session_id.is_empty() || scopes.is_empty() {
-            return Err(self.begin_authorization(&session, scopes).into());
+            return Err(self
+                .begin_authorization_with_consent(&session, scopes, force_consent)
+                .into());
         }
 
-        let (mut rx, auth_req, request_id) = self.start_or_join_pending(&session, scopes);
+        let (mut rx, auth_req, request_id) =
+            self.start_or_join_pending(&session, scopes, force_consent);
         let outcome = self
             .wait_for_authorization(&session, scopes, &mut rx, timeout)
             .await;
@@ -1028,7 +1123,9 @@ impl SessionCredentialManager {
         }
     }
 
-    /// A valid token covering `scopes` already persisted in the session store.
+    /// A valid token covering `scopes` already persisted in the session store
+    /// (the user-scoped entry, merged into the session; legacy per-session
+    /// entry as fallback).
     async fn persisted_token(&self, session: &SessionRef, scopes: &[String]) -> Option<OAuthToken> {
         let sessions = self
             .sessions
@@ -1045,15 +1142,16 @@ impl SessionCredentialManager {
             })
             .await
             .ok()?;
-        let value = loaded.state().get(CREDENTIALS_STATE_KEY)?;
-        let token: OAuthToken = serde_json::from_value(value).ok()?;
+        let token = [USER_CREDENTIALS_STATE_KEY, CREDENTIALS_STATE_KEY]
+            .into_iter()
+            .find_map(|key| loaded.state().get(key).and_then(parse_token))?;
         (token.covers(scopes) && !token.is_expired()).then_some(token)
     }
 
     /// Finishes the in-flight authorization of `session` with `token`: keeps
-    /// the token in memory and wakes every waiter.
+    /// the token in memory for the user and wakes every waiter of the session.
     fn complete_pending(&self, session: &SessionRef, token: &OAuthToken) {
-        self.remember_live_token(session, token);
+        self.remember_live_token(&session.user(), token);
         if let Some(pending) = lock(&self.pending).remove(session) {
             let _ = pending.tx.send(Ok(token.clone()));
         }
@@ -1080,6 +1178,7 @@ impl SessionCredentialManager {
         &self,
         session: &SessionRef,
         scopes: &[String],
+        force_consent: bool,
     ) -> (
         broadcast::Receiver<Result<OAuthToken, String>>,
         AuthRequired,
@@ -1110,7 +1209,7 @@ impl SessionCredentialManager {
                 combined.push(scope.clone());
             }
         }
-        let auth_req = self.begin_authorization(session, &combined);
+        let auth_req = self.begin_authorization_with_consent(session, &combined, force_consent);
         let tx = pending
             .get(session)
             .map(|p| p.tx.clone())
@@ -1171,8 +1270,19 @@ impl SessionCredentialManager {
     }
 
     /// Starts an authorization for `session` asking for `scopes`
-    /// (least privilege), returning the instructions.
+    /// (least privilege), returning the instructions. Always shows the consent
+    /// screen (safe default for callers that cannot tell whether a refresh
+    /// token exists); [`Self::access_token`] skips it for incremental grants.
     pub fn begin_authorization(&self, session: &SessionRef, scopes: &[String]) -> AuthRequired {
+        self.begin_authorization_with_consent(session, scopes, true)
+    }
+
+    fn begin_authorization_with_consent(
+        &self,
+        session: &SessionRef,
+        scopes: &[String],
+        force_consent: bool,
+    ) -> AuthRequired {
         let unavailable = |message: &str| AuthRequired {
             auth_url: String::new(),
             scopes: Vec::new(),
@@ -1198,7 +1308,9 @@ impl SessionCredentialManager {
             );
         }
         let state = self.sign_state(session, &requested);
-        let auth_url = self.flow.authorization_url(&requested, &state);
+        let auth_url = self
+            .flow
+            .authorization_url(&requested, &state, force_consent);
         let names: Vec<&str> = requested
             .iter()
             .map(|s| s.rsplit('/').next().unwrap_or(s))
@@ -1207,7 +1319,7 @@ impl SessionCredentialManager {
             auth_url: auth_url.clone(),
             scopes: requested.clone(),
             message: format!(
-                "Authorization required for this chat session (requested access: {}). Show the user this link as a markdown link labelled \"Authorize Google access\" and ask them to open it and grant the permission; the conversation resumes automatically once access is granted (if it does not, they can say \"done\"): {auth_url}",
+                "Authorization required (requested access: {}). Show the user this link as a markdown link labelled \"Authorize Google access\" and ask them to open it and grant the permission; the conversation resumes automatically once access is granted (if it does not, they can say \"done\"): {auth_url}",
                 names.join(", ")
             ),
         }
@@ -1228,7 +1340,7 @@ impl SessionCredentialManager {
     ) -> anyhow::Result<(SessionRef, OAuthToken)> {
         let claims = self.verify_state(state)?;
         let token = self.flow.exchange_code(code, &claims.scopes).await?;
-        let merged = match self.live_token(&claims.session) {
+        let merged = match self.live_token(&claims.session.user()) {
             Some(existing) => merge_tokens(&existing, &token),
             None => token,
         };
@@ -1258,9 +1370,10 @@ impl SessionCredentialManager {
             .is_some_and(|p| p.tx.receiver_count() > 0)
     }
 
-    /// Stores `token` in the state of `session` by appending a state-only
-    /// event, and wakes any in-flight tool call awaiting authorization for
-    /// that session.
+    /// Stores `token` in the user-scoped state ([`USER_CREDENTIALS_STATE_KEY`])
+    /// by appending a state-only event to `session`, and wakes any in-flight
+    /// tool call awaiting authorization for that session. Every other session
+    /// of the user sees the token through adk-session's user state merge.
     ///
     /// # Errors
     ///
@@ -1274,7 +1387,7 @@ impl SessionCredentialManager {
         let mut event = Event::new(format!("oauth2-{}", uuid::Uuid::new_v4().simple()));
         event.author = "system".to_string();
         event.actions.state_delta.insert(
-            CREDENTIALS_STATE_KEY.to_string(),
+            USER_CREDENTIALS_STATE_KEY.to_string(),
             serde_json::to_value(token)?,
         );
         sessions
@@ -1292,7 +1405,10 @@ impl SessionCredentialManager {
             session_id: session.session_id.clone(),
             status: "ok".to_string(),
         });
-        tracing::info!("Stored Google credentials in session {session}");
+        tracing::info!(
+            "Stored Google credentials of user {} (via session {session})",
+            session.user()
+        );
         Ok(())
     }
 
@@ -1459,7 +1575,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
 
-    use adk_rust::session::{CreateRequest, GetRequest, InMemorySessionService};
+    use adk_rust::session::{CreateRequest, GetRequest, InMemorySessionService, KEY_PREFIX_USER};
     use adk_rust::{
         Artifacts, CallbackContext, Content, EventActions, MemoryEntry, Session, State,
     };
@@ -1491,6 +1607,7 @@ mod tests {
     /// reachable through `ToolContext::session()`, while
     /// `ReadonlyContext::state()` stays at its default `None`.
     struct FakeToolContext {
+        session_ref: SessionRef,
         state: StdMutex<HashMap<String, Value>>,
         actions: StdMutex<EventActions>,
         content: Content,
@@ -1498,13 +1615,19 @@ mod tests {
 
     impl FakeToolContext {
         fn with_state(entries: &[(&str, Value)]) -> Arc<dyn ToolContext> {
+            Self::for_session(
+                session(),
+                entries.iter().map(|(k, v)| (k.to_string(), v.clone())),
+            )
+        }
+
+        fn for_session(
+            session_ref: SessionRef,
+            entries: impl IntoIterator<Item = (String, Value)>,
+        ) -> Arc<dyn ToolContext> {
             Arc::new(Self {
-                state: StdMutex::new(
-                    entries
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), v.clone()))
-                        .collect(),
-                ),
+                session_ref,
+                state: StdMutex::new(entries.into_iter().collect()),
                 actions: StdMutex::new(EventActions::default()),
                 content: Content::new("user"),
             })
@@ -1531,13 +1654,13 @@ mod tests {
             "adspace_agent"
         }
         fn user_id(&self) -> &str {
-            "local-user"
+            &self.session_ref.user_id
         }
         fn app_name(&self) -> &str {
-            "adspace_agent"
+            &self.session_ref.app_name
         }
         fn session_id(&self) -> &str {
-            "s-1"
+            &self.session_ref.session_id
         }
         fn branch(&self) -> &str {
             ""
@@ -1549,13 +1672,13 @@ mod tests {
 
     impl Session for FakeToolContext {
         fn id(&self) -> &str {
-            "s-1"
+            &self.session_ref.session_id
         }
         fn app_name(&self) -> &str {
-            "adspace_agent"
+            &self.session_ref.app_name
         }
         fn user_id(&self) -> &str {
-            "local-user"
+            &self.session_ref.user_id
         }
         fn state(&self) -> &dyn State {
             self
@@ -1603,17 +1726,54 @@ mod tests {
     #[test]
     fn authorization_url_contains_required_params() {
         let flow = GoogleOAuthFlow::new(config());
-        let url = flow.authorization_url(
-            &["https://www.googleapis.com/auth/adwords".to_string()],
-            "abc",
-        );
+        let scopes = ["https://www.googleapis.com/auth/adwords".to_string()];
+        let url = flow.authorization_url(&scopes, "abc", true);
         assert!(url.starts_with(GOOGLE_AUTH_ENDPOINT));
         assert!(url.contains("client_id=cid"));
         assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A8000%2Foauth2%2Fcallback"));
         assert!(url.contains("access_type=offline"));
-        assert!(url.contains("prompt=consent"));
+        assert!(url.contains("prompt=consent"), "first grant forces consent");
+        assert!(url.contains("include_granted_scopes=true"));
         assert!(url.contains("state=abc"));
         assert!(url.contains("scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fadwords"));
+
+        // An incremental request keeps offline access and the granted-scope
+        // merge but does not re-prompt for everything already granted.
+        let incremental = flow.authorization_url(&scopes, "abc", false);
+        assert!(!incremental.contains("prompt="), "{incremental}");
+        assert!(incremental.contains("access_type=offline"));
+        assert!(incremental.contains("include_granted_scopes=true"));
+    }
+
+    #[test]
+    fn user_scoped_key_follows_the_adk_session_prefix() {
+        assert_eq!(
+            USER_CREDENTIALS_STATE_KEY,
+            format!("{KEY_PREFIX_USER}{CREDENTIALS_STATE_KEY}")
+        );
+    }
+
+    #[test]
+    fn merged_tokens_keep_the_refresh_token_and_union_the_scopes() {
+        let older = OAuthToken {
+            access_token: "old".into(),
+            refresh_token: Some("1//refresh".into()),
+            expires_at: None,
+            scopes: vec!["a".into()],
+        };
+        // An incremental exchange (no consent screen) returns no refresh
+        // token but lists every granted scope.
+        let newer = OAuthToken {
+            access_token: "new".into(),
+            refresh_token: None,
+            expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+            scopes: vec!["a".into(), "b".into()],
+        };
+        let merged = merge_tokens(&older, &newer);
+        assert_eq!(merged.access_token, "new");
+        assert_eq!(merged.refresh_token.as_deref(), Some("1//refresh"));
+        assert_eq!(merged.scopes, vec!["a", "b"]);
+        assert!(merged.expires_at.is_some());
     }
 
     #[test]
@@ -1811,14 +1971,54 @@ mod tests {
             scopes: vec!["s".into()],
         };
         SessionCredentialManager::store_token(ctx.as_ref(), Some(&token));
+        let delta = ctx.actions().state_delta;
         assert_eq!(
-            ctx.actions().state_delta[CREDENTIALS_STATE_KEY],
+            delta[USER_CREDENTIALS_STATE_KEY],
             serde_json::to_value(&token).unwrap()
+        );
+        assert!(
+            !delta.contains_key(CREDENTIALS_STATE_KEY),
+            "no legacy entry to clean up"
         );
         SessionCredentialManager::store_token(ctx.as_ref(), None);
         assert_eq!(
-            ctx.actions().state_delta[CREDENTIALS_STATE_KEY],
+            ctx.actions().state_delta[USER_CREDENTIALS_STATE_KEY],
             Value::Null
+        );
+
+        // A session that still carries the legacy per-session copy gets it
+        // cleared when the user-scoped entry is written.
+        let legacy = FakeToolContext::with_state(&[(
+            CREDENTIALS_STATE_KEY,
+            serde_json::to_value(&token).unwrap(),
+        )]);
+        assert_eq!(
+            SessionCredentialManager::stored_token(legacy.as_ref()),
+            Some(token.clone()),
+            "legacy entries are still read"
+        );
+        SessionCredentialManager::store_token(legacy.as_ref(), Some(&token));
+        let delta = legacy.actions().state_delta;
+        assert_eq!(
+            delta[USER_CREDENTIALS_STATE_KEY],
+            serde_json::to_value(&token).unwrap()
+        );
+        assert_eq!(delta[CREDENTIALS_STATE_KEY], Value::Null);
+
+        // The user-scoped entry wins over a stale legacy one.
+        let both = FakeToolContext::with_state(&[
+            (
+                CREDENTIALS_STATE_KEY,
+                json!({ "access_token": "stale", "scopes": [] }),
+            ),
+            (
+                USER_CREDENTIALS_STATE_KEY,
+                serde_json::to_value(&token).unwrap(),
+            ),
+        ]);
+        assert_eq!(
+            SessionCredentialManager::stored_token(both.as_ref()),
+            Some(token)
         );
     }
 
@@ -1868,9 +2068,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            loaded.state().get(CREDENTIALS_STATE_KEY),
-            Some(serde_json::to_value(&token).unwrap())
+            loaded.state().get(USER_CREDENTIALS_STATE_KEY),
+            Some(serde_json::to_value(&token).unwrap()),
+            "the grant lands in the user-scoped state"
         );
+        assert!(loaded.state().get(CREDENTIALS_STATE_KEY).is_none());
         // The event carries no content, so it never reaches the model.
         assert_eq!(loaded.events().len(), 1);
         assert!(
@@ -1984,9 +2186,9 @@ mod tests {
             expires_at: None,
             scopes: vec![],
         };
-        let stale = SessionRef {
-            session_id: "stale".into(),
-            ..session()
+        let stale = UserRef {
+            user_id: "stale-user".into(),
+            ..session().user()
         };
         if let Some(long_ago) = Instant::now().checked_sub(LIVE_TOKEN_TTL + Duration::from_secs(1))
         {
@@ -1995,21 +2197,27 @@ mod tests {
                 manager.live_token(&stale).is_none(),
                 "stale entries are ignored"
             );
-            manager.remember_live_token(&session(), &token);
+            manager.remember_live_token(&session().user(), &token);
             assert!(
                 !lock(&manager.live_tokens).contains_key(&stale),
                 "stale entries are evicted on insert"
             );
         }
-        assert_eq!(manager.live_token(&session()), Some(token));
+        assert_eq!(manager.live_token(&session().user()), Some(token.clone()));
+        // Live tokens are per user: another session of the same user sees it.
+        let sibling = SessionRef {
+            session_id: "s-2".into(),
+            ..session()
+        };
+        assert_eq!(manager.live_token(&sibling.user()), Some(token));
     }
 
     #[tokio::test]
     async fn a_waiter_timing_out_does_not_orphan_co_waiters_or_leak_acks() {
         let manager = manager();
         let scopes = ["s".to_string()];
-        let (rx1, _, request1) = manager.start_or_join_pending(&session(), &scopes);
-        let (rx2, _, request2) = manager.start_or_join_pending(&session(), &scopes);
+        let (rx1, _, request1) = manager.start_or_join_pending(&session(), &scopes, true);
+        let (rx2, _, request2) = manager.start_or_join_pending(&session(), &scopes, true);
         assert!(request1.is_some(), "first waiter starts the authorization");
         assert!(request2.is_none(), "second waiter joins it");
         assert_eq!(lock(&manager.acks).len(), 1);
@@ -2088,8 +2296,191 @@ mod tests {
         assert_eq!(got, "from-other-instance");
         assert!(!waiting.has_pending_waiter(&session()));
         assert_eq!(
-            ctx.actions().state_delta[CREDENTIALS_STATE_KEY],
+            ctx.actions().state_delta[USER_CREDENTIALS_STATE_KEY],
             serde_json::to_value(&token).unwrap()
+        );
+    }
+
+    /// Tool context of `session_ref` loaded from the session store, shaped
+    /// like the runner's (merged app/user/session state).
+    async fn context_from_store(
+        sessions: &dyn SessionService,
+        session_ref: &SessionRef,
+    ) -> Arc<dyn ToolContext> {
+        let loaded = sessions
+            .get(GetRequest {
+                app_name: session_ref.app_name.clone(),
+                user_id: session_ref.user_id.clone(),
+                session_id: session_ref.session_id.clone(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await
+            .unwrap();
+        FakeToolContext::for_session(session_ref.clone(), loaded.state().all())
+    }
+
+    #[tokio::test]
+    async fn a_grant_serves_every_session_of_the_user_but_no_one_else() {
+        let sessions: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let session_a = session();
+        let session_b = SessionRef {
+            session_id: "s-2".into(),
+            ..session()
+        };
+        let stranger = SessionRef {
+            user_id: "other-user".into(),
+            session_id: "s-3".into(),
+            ..session()
+        };
+        for s in [&session_a, &session_b, &stranger] {
+            sessions
+                .create(CreateRequest {
+                    app_name: s.app_name.clone(),
+                    user_id: s.user_id.clone(),
+                    session_id: Some(s.session_id.clone()),
+                    state: HashMap::new(),
+                })
+                .await
+                .unwrap();
+        }
+        let manager = manager();
+        let scopes = ["https://www.googleapis.com/auth/adwords".to_string()];
+
+        // Before any grant, session B needs authorization.
+        let ctx_b = context_from_store(sessions.as_ref(), &session_b).await;
+        assert!(
+            auth_required(
+                &manager
+                    .access_token(ctx_b.as_ref(), &scopes)
+                    .await
+                    .unwrap_err()
+            )
+            .is_some()
+        );
+
+        // The user authorizes in session A (callback persists the token).
+        let token = OAuthToken {
+            access_token: "ya29.granted-in-a".into(),
+            refresh_token: Some("1//refresh".into()),
+            expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+            scopes: scopes.to_vec(),
+        };
+        manager
+            .persist(sessions.as_ref(), &session_a, &token)
+            .await
+            .unwrap();
+
+        // Session B of the same user uses it without any AuthRequired, both
+        // through the stored (merged) state ...
+        let ctx_b = context_from_store(sessions.as_ref(), &session_b).await;
+        assert_eq!(
+            manager.access_token(ctx_b.as_ref(), &scopes).await.unwrap(),
+            "ya29.granted-in-a"
+        );
+        assert!(
+            ctx_b.actions().state_delta.is_empty(),
+            "nothing to rewrite: the merged state already holds the grant"
+        );
+        // ... and, for a turn whose session snapshot predates the grant,
+        // through the user-keyed live token.
+        let stale_b = FakeToolContext::for_session(session_b.clone(), HashMap::new());
+        assert_eq!(
+            manager
+                .access_token(stale_b.as_ref(), &scopes)
+                .await
+                .unwrap(),
+            "ya29.granted-in-a"
+        );
+        assert_eq!(
+            stale_b.actions().state_delta[USER_CREDENTIALS_STATE_KEY],
+            serde_json::to_value(&token).unwrap(),
+            "the snapshot is brought up to date under the user key"
+        );
+
+        // Another user never sees it.
+        let ctx_stranger = context_from_store(sessions.as_ref(), &stranger).await;
+        let err = manager
+            .access_token(ctx_stranger.as_ref(), &scopes)
+            .await
+            .unwrap_err();
+        assert!(auth_required(&err).is_some());
+        assert!(SessionCredentialManager::stored_token(ctx_stranger.as_ref()).is_none());
+    }
+
+    #[tokio::test]
+    async fn consent_is_forced_only_until_a_refresh_token_exists() {
+        let manager = manager();
+        let ads = "https://www.googleapis.com/auth/adwords".to_string();
+        let drive = "https://www.googleapis.com/auth/drive.readonly".to_string();
+
+        // First grant: nothing held yet → the consent screen is required so
+        // Google mints a refresh token.
+        let fresh = FakeToolContext::with_state(&[]);
+        let err = manager
+            .access_token(fresh.as_ref(), std::slice::from_ref(&ads))
+            .await
+            .unwrap_err();
+        let first = auth_required(&err).unwrap();
+        assert!(
+            first.auth_url.contains("prompt=consent"),
+            "{}",
+            first.auth_url
+        );
+        assert!(first.auth_url.contains("include_granted_scopes=true"));
+
+        // Incremental grant: a refresh token is held, a new scope is needed →
+        // no prompt, so Google shows only the new scope.
+        let granted = OAuthToken {
+            access_token: "a".into(),
+            refresh_token: Some("1//refresh".into()),
+            expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+            scopes: vec![ads.clone()],
+        };
+        let held = FakeToolContext::with_state(&[(
+            USER_CREDENTIALS_STATE_KEY,
+            serde_json::to_value(&granted).unwrap(),
+        )]);
+        let err = manager
+            .access_token(held.as_ref(), std::slice::from_ref(&drive))
+            .await
+            .unwrap_err();
+        let incremental = auth_required(&err).unwrap();
+        assert!(
+            !incremental.auth_url.contains("prompt="),
+            "{}",
+            incremental.auth_url
+        );
+        assert!(incremental.auth_url.contains("include_granted_scopes=true"));
+        assert_eq!(incremental.scopes, vec![drive.clone()], "least privilege");
+
+        // A grant without refresh token (or one whose refresh failed) must
+        // consent again.
+        let no_refresh = FakeToolContext::with_state(&[(
+            USER_CREDENTIALS_STATE_KEY,
+            serde_json::to_value(&OAuthToken {
+                refresh_token: None,
+                ..granted
+            })
+            .unwrap(),
+        )]);
+        let err = manager
+            .access_token(no_refresh.as_ref(), std::slice::from_ref(&drive))
+            .await
+            .unwrap_err();
+        assert!(
+            auth_required(&err)
+                .unwrap()
+                .auth_url
+                .contains("prompt=consent")
+        );
+
+        // The public entry point stays on the safe side.
+        assert!(
+            manager
+                .begin_authorization(&session(), std::slice::from_ref(&drive))
+                .auth_url
+                .contains("prompt=consent")
         );
     }
 }

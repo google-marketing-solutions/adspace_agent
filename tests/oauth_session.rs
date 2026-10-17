@@ -17,10 +17,12 @@
 //! 1. a tool context of session `s-1` asks for credentials and gets an
 //!    `AUTH_REQUIRED` link whose `state` names that session;
 //! 2. Google (mocked) redirects to `/oauth2/callback?code&state`;
-//! 3. the handler exchanges the code, writes the tokens into session `s-1`
-//!    and resumes that chat with a turn of its own (no "done" needed);
-//! 4. a later tool call of `s-1` finds a valid token in its state, while
-//!    another session still has none.
+//! 3. the handler exchanges the code, writes the tokens into the *user's*
+//!    state (reachable from every session of that user) and resumes that chat
+//!    with a turn of its own (no "done" needed);
+//! 4. a later tool call of `s-1` — and of the user's other session `s-2` —
+//!    finds a valid token, while another user still has none and a new scope
+//!    is requested incrementally without re-prompting consent.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -37,7 +39,7 @@ use adk_rust::{
 use adspace_agent::agent::TurnRunner;
 use adspace_agent::auth::{
     CREDENTIALS_STATE_KEY, GoogleOAuthFlow, OAuthClientConfig, OAuthToken, OAuthUiEvent,
-    SessionCredentialManager, SessionRef, auth_required,
+    SessionCredentialManager, SessionRef, USER_CREDENTIALS_STATE_KEY, auth_required,
 };
 use adspace_agent::server::{AdminAllowList, OAuthRoutes, oauth_router, resume_message};
 use async_trait::async_trait;
@@ -220,11 +222,15 @@ async fn oauth_callback_attaches_tokens_to_the_requesting_session() {
     let credentials = Arc::new(SessionCredentialManager::new(flow));
 
     let sessions: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
-    for id in ["s-1", "s-2"] {
+    for (user, id) in [
+        ("local-user", "s-1"),
+        ("local-user", "s-2"),
+        ("other-user", "s-3"),
+    ] {
         sessions
             .create(CreateRequest {
                 app_name: "adspace_agent".into(),
-                user_id: "local-user".into(),
+                user_id: user.into(),
                 session_id: Some(id.into()),
                 state: HashMap::new(),
             })
@@ -238,6 +244,11 @@ async fn oauth_callback_attaches_tokens_to_the_requesting_session() {
     };
     let s2 = SessionRef {
         session_id: "s-2".into(),
+        ..s1.clone()
+    };
+    let other_user = SessionRef {
+        user_id: "other-user".into(),
+        session_id: "s-3".into(),
         ..s1.clone()
     };
 
@@ -346,7 +357,8 @@ async fn oauth_callback_attaches_tokens_to_the_requesting_session() {
     );
     assert_eq!(llm.requests.lock().unwrap().len(), 1, "one background turn");
 
-    // The tokens are now in session s-1's state ...
+    // The tokens are now in the user's state (merged into every session of
+    // `local-user`; no legacy per-session copy) ...
     let loaded = sessions
         .get(GetRequest {
             app_name: "adspace_agent".into(),
@@ -358,7 +370,8 @@ async fn oauth_callback_attaches_tokens_to_the_requesting_session() {
         .await
         .unwrap();
     let stored: OAuthToken =
-        serde_json::from_value(loaded.state().get(CREDENTIALS_STATE_KEY).unwrap()).unwrap();
+        serde_json::from_value(loaded.state().get(USER_CREDENTIALS_STATE_KEY).unwrap()).unwrap();
+    assert!(loaded.state().get(CREDENTIALS_STATE_KEY).is_none());
     assert_eq!(stored.access_token, "ya29.session-token");
     assert_eq!(stored.refresh_token.as_deref(), Some("1//refresh"));
     assert_eq!(
@@ -378,10 +391,50 @@ async fn oauth_callback_attaches_tokens_to_the_requesting_session() {
             .unwrap(),
         "ya29.session-token"
     );
-    // ... while session s-2 still has to authorize on its own.
+    // ... and so does session s-2 of the same user: one grant per user, not
+    // per chat ...
     let ctx = tool_context(sessions.as_ref(), &s2).await;
-    let err = credentials.access_token(&ctx, &[]).await.unwrap_err();
+    assert_eq!(
+        credentials
+            .access_token(
+                &ctx,
+                &["https://www.googleapis.com/auth/adwords".to_string()]
+            )
+            .await
+            .unwrap(),
+        "ya29.session-token"
+    );
+    // ... while another user's session still has to authorize, and a scope
+    // the user has not granted yet asks only for that scope, without
+    // re-prompting consent for what was already granted.
+    let ctx = tool_context(sessions.as_ref(), &other_user).await;
+    let err = credentials
+        .access_token(
+            &ctx,
+            &["https://www.googleapis.com/auth/adwords".to_string()],
+        )
+        .await
+        .unwrap_err();
     assert!(auth_required(&err).is_some());
+    let ctx = tool_context(sessions.as_ref(), &s2).await;
+    let err = credentials
+        .access_token(
+            &ctx,
+            &["https://www.googleapis.com/auth/drive.readonly".to_string()],
+        )
+        .await
+        .unwrap_err();
+    let incremental = auth_required(&err).expect("new scope needs a grant");
+    assert_eq!(
+        incremental.scopes,
+        vec!["https://www.googleapis.com/auth/drive.readonly"]
+    );
+    assert!(
+        !incremental.auth_url.contains("prompt="),
+        "{}",
+        incremental.auth_url
+    );
+    assert!(required.auth_url.contains("prompt=consent"), "first grant");
 
     // A replayed/forged state is rejected, and an unknown session is reported.
     let page = reqwest::get(format!("{agent}/oauth2/callback?code=x&state=forged.sig"))

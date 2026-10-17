@@ -24,7 +24,8 @@ use adk_rust::{
     State, Tool, ToolContext,
 };
 use adspace_agent::auth::{
-    CREDENTIALS_STATE_KEY, GoogleOAuthFlow, OAuthClientConfig, OAuthToken, SessionCredentialManager,
+    GoogleOAuthFlow, OAuthClientConfig, OAuthToken, SessionCredentialManager,
+    USER_CREDENTIALS_STATE_KEY,
 };
 use adspace_agent::google_api::toolset::MAX_RESPONSE_BYTES;
 use adspace_agent::google_api::{
@@ -76,7 +77,7 @@ impl SessionToolContext {
         };
         Arc::new(Self {
             state: HashMap::from([(
-                CREDENTIALS_STATE_KEY.to_string(),
+                USER_CREDENTIALS_STATE_KEY.to_string(),
                 serde_json::to_value(token).unwrap(),
             )]),
             actions: Mutex::new(EventActions::default()),

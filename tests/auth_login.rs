@@ -187,7 +187,9 @@ async fn sign_in_is_bound_to_the_browser_and_requires_a_verified_email() {
     let user = credentials
         .verify_user_cookie(cookie_pair(user_cookie).trim_start_matches("adspace_user="))
         .expect("cookie verifies");
-    assert_eq!(user.id, "nate@example.com");
+    // The user id is the Google `sub`, never the (changeable) email address.
+    assert_eq!(user.id, "1122334455");
+    assert_eq!(user.email, "nate@example.com");
     assert_eq!(user.sub.as_deref(), Some("1122334455"));
 
     // 5. `/auth/me` recognises the cookie.

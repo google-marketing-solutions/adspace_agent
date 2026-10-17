@@ -120,7 +120,9 @@ session (so they survive restarts with `SESSION_SERVICE_URI=sqlite://...` or
 ### Who can call what
 
 The same OAuth client also signs users into the studio (`/auth/login`, Google
-Sign-In with a verified email). The signed-in user is carried in the
+Sign-In with a verified email). The session `user_id` is the Google account
+subject (`sub`), so it survives email changes and cannot be claimed by another
+account. The signed-in user is carried in the
 `adspace_user` cookie (HMAC-signed, `HttpOnly`, `SameSite=Lax`, `Secure` when
 `PUBLIC_BASE_URL` is `https://`), and the sign-in itself is bound to the
 browser that started it with a nonce cookie, so a callback URL cannot be

@@ -71,7 +71,8 @@ pub const CREDENTIALS_STATE_KEY: &str = "CREDENTIALS_CACHE_KEY";
 /// Signed-in Google user profile for the custom AdSpace Agent web interface.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthenticatedUser {
-    /// Stable user identifier (Google email address when available, else `sub`).
+    /// Stable user identifier: the Google account subject (`sub` claim), which
+    /// never changes even when the email address does.
     pub id: String,
     /// Google account email address.
     pub email: String,
@@ -354,14 +355,17 @@ impl GoogleOAuthFlow {
     /// Fetches the user's Google profile (`sub`, `email`, `name`, `picture`)
     /// from OpenID Connect userinfo using `access_token`.
     ///
-    /// The email address is the user id, so it must be **verified**: Google
-    /// accounts created with a third-party address can carry an unverified
-    /// email, which would otherwise let one account sign in as another.
+    /// The Google account subject (`sub`) is the user id: it is stable across
+    /// email changes and cannot be spoofed by another account. The email is
+    /// still required to be **verified** because it feeds the `ADMIN_EMAILS`
+    /// allow-list: Google accounts created with a third-party address can carry
+    /// an unverified email, which would otherwise let one account claim
+    /// another's administrator rights.
     ///
     /// # Errors
     ///
-    /// Returns an error if the userinfo request fails, the profile carries
-    /// neither `sub` nor `email`, or the email is not verified.
+    /// Returns an error if the userinfo request fails, the profile carries no
+    /// `sub`, or the email is present but not verified.
     pub async fn fetch_user_info(&self, access_token: &str) -> anyhow::Result<AuthenticatedUser> {
         let resp = self
             .http
@@ -375,8 +379,8 @@ impl GoogleOAuthFlow {
             anyhow::bail!("Google userinfo request failed ({status}): {body}");
         }
         let info: GoogleUserInfoResponse = serde_json::from_str(&body)?;
-        if info.email.is_empty() && info.sub.is_empty() {
-            anyhow::bail!("Google userinfo returned neither a subject nor an email address");
+        if info.sub.is_empty() {
+            anyhow::bail!("Google userinfo returned no subject (`sub`) for the account");
         }
         if !info.email.is_empty() && info.email_verified != Some(true) {
             anyhow::bail!(
@@ -389,7 +393,7 @@ impl GoogleOAuthFlow {
         } else {
             info.email
         };
-        let id = email.clone();
+        let id = info.sub.clone();
         let name = if info.name.is_empty() {
             email.split('@').next().unwrap_or("User").to_string()
         } else {
@@ -400,7 +404,7 @@ impl GoogleOAuthFlow {
             email,
             name,
             picture: info.picture.filter(|p| !p.is_empty()),
-            sub: Some(info.sub).filter(|s| !s.is_empty()),
+            sub: Some(info.sub),
             iat: Utc::now().timestamp(),
         })
     }

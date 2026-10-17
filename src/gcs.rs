@@ -18,6 +18,9 @@
 //! list objects under a prefix. Authenticates with any
 //! [`AccessTokenProvider`] (normally [`crate::auth::AdcTokenProvider`]).
 
+use std::fmt::Write as _;
+use std::time::Duration;
+
 use anyhow::{Context, bail};
 use serde::Deserialize;
 
@@ -27,6 +30,8 @@ use crate::auth::SharedTokenProvider;
 pub const GCS_API_BASE: &str = "https://storage.googleapis.com/storage/v1";
 /// Base URL of the upload endpoint.
 pub const GCS_UPLOAD_BASE: &str = "https://storage.googleapis.com/upload/storage/v1";
+/// Upper bound on list pages followed for one prefix (1000 objects each).
+const MAX_LIST_PAGES: usize = 1000;
 
 /// Google Cloud Storage client.
 #[derive(Clone)]
@@ -64,7 +69,11 @@ impl GcsClient {
     /// Creates a client.
     pub fn new(token_provider: SharedTokenProvider) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(120))
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default(),
             token_provider,
             api_base: GCS_API_BASE.to_string(),
             upload_base: GCS_UPLOAD_BASE.to_string(),
@@ -82,8 +91,20 @@ impl GcsClient {
         self
     }
 
+    /// Percent-encodes a bucket or object name for use as a single URL path
+    /// segment (RFC 3986): `/` becomes `%2F`, a space `%20`. Form encoding
+    /// (`+` for space) is wrong here — in a path segment `+` is a literal plus
+    /// and `My Doc.md` would 404.
     fn encode(segment: &str) -> String {
-        url::form_urlencoded::byte_serialize(segment.as_bytes()).collect()
+        let mut out = String::with_capacity(segment.len());
+        for byte in segment.bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                out.push(byte as char);
+            } else {
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+        out
     }
 
     /// Uploads `content` to `gs://{bucket}/{object_path}` and returns the URL.
@@ -187,7 +208,7 @@ impl GcsClient {
         let mut names = Vec::new();
         let mut prefixes = Vec::new();
         let mut page_token: Option<String> = None;
-        loop {
+        for _ in 0..MAX_LIST_PAGES {
             let mut req = self
                 .http
                 .get(format!("{}/b/{}/o", self.api_base, Self::encode(bucket)))
@@ -209,11 +230,14 @@ impl GcsClient {
             names.extend(page.items.into_iter().map(|i| i.name));
             prefixes.extend(page.prefixes);
             match page.next_page_token {
-                Some(t) if !t.is_empty() => page_token = Some(t),
-                _ => break,
+                // A repeated token would loop forever; treat it as the end.
+                Some(t) if !t.is_empty() && page_token.as_deref() != Some(t.as_str()) => {
+                    page_token = Some(t);
+                }
+                _ => return Ok((names, prefixes)),
             }
         }
-        Ok((names, prefixes))
+        bail!("GCS list of gs://{bucket}/{prefix} did not finish within {MAX_LIST_PAGES} pages")
     }
 }
 
@@ -243,10 +267,14 @@ mod tests {
     }
 
     #[test]
-    fn encodes_object_names() {
+    fn encodes_object_names_as_path_segments() {
         assert_eq!(
             GcsClient::encode("cm360_trafficking/s 1/payloads.json"),
-            "cm360_trafficking%2Fs+1%2Fpayloads.json"
+            "cm360_trafficking%2Fs%201%2Fpayloads.json"
         );
+        assert_eq!(GcsClient::encode("My Doc+1.md"), "My%20Doc%2B1.md");
+        assert_eq!(GcsClient::encode("a?b#c&d=e"), "a%3Fb%23c%26d%3De");
+        assert_eq!(GcsClient::encode("ünï"), "%C3%BCn%C3%AF");
+        assert_eq!(GcsClient::encode("safe-._~09AZ"), "safe-._~09AZ");
     }
 }

@@ -29,9 +29,10 @@ use adk_rust::Toolset as _;
 use adspace_agent::agent::{
     self, build_credential_manager, build_runtime, google_api_toolset_configs,
 };
-use adspace_agent::config::{GOOGLE_ADS_API_VERSION, Settings, YOUTUBE_TOOL_FILTER};
+use adspace_agent::config::{self, GOOGLE_ADS_API_VERSION, Settings, YOUTUBE_TOOL_FILTER};
 use adspace_agent::google_api::{DiscoveryFetcher, GoogleApiToolset, GoogleApiToolsetConfig};
 use adspace_agent::server;
+use adspace_agent::tools::bigquery::BigQueryToolset;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -123,6 +124,7 @@ async fn list_tools(target: ListTarget, sizes: bool, scopes: bool) -> anyhow::Re
     let settings = Settings::from_env()?;
     let credentials = build_credential_manager(&settings);
     let fetcher = DiscoveryFetcher::new();
+    let list_all = matches!(target, ListTarget::All);
     let configs: Vec<GoogleApiToolsetConfig> = match target {
         ListTarget::GoogleAds => vec![
             GoogleApiToolsetConfig::new("google_ads", "googleads", GOOGLE_ADS_API_VERSION)
@@ -168,6 +170,19 @@ async fn list_tools(target: ListTarget, sizes: bool, scopes: bool) -> anyhow::Re
     }
     names.sort();
     if scopes {
+        // The native BigQuery toolset is not Discovery based but requests a
+        // user scope too.
+        if list_all && settings.is_toolset_enabled("bigquery") {
+            let bigquery = BigQueryToolset::new(credentials.clone())
+                .with_read_only(config::env_bool_or("BIGQUERY_READ_ONLY", true));
+            let scope = bigquery.scopes().join(" ");
+            scope_lines.extend(
+                bigquery
+                    .tool_names()
+                    .into_iter()
+                    .map(|name| format!("{name}\t{scope}")),
+            );
+        }
         scope_lines.sort();
         for line in scope_lines {
             println!("{line}");

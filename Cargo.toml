@@ -36,7 +36,6 @@ adk-rust = { version = "2.3.0", default-features = false, features = [
     "minimal",
     "gemini-vertex",
     "tools",
-    "bigquery",
     "memory",
     "memory-tools",
     "artifacts",

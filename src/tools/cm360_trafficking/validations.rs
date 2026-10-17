@@ -360,7 +360,10 @@ pub fn validate_ad_id(row: &Row, row_num: usize) -> Option<ValidationError> {
     None
 }
 
-/// Validates ad name on insertion (required, at most 256 characters).
+/// Validates ad name: required on insertion and on edit (the ad name is the
+/// key every row is matched / grouped by, so an `Update` row without one
+/// would otherwise become an `ads.insert` named `""`); at most 256
+/// characters on insertion.
 pub fn validate_ad_name(row: &Row, row_num: usize) -> Option<ValidationError> {
     let status = trafficking_status(row);
     let ad_name = row.get("Ad Name");
@@ -369,6 +372,13 @@ pub fn validate_ad_name(row: &Row, row_num: usize) -> Option<ValidationError> {
             row_num,
             "Ad Name",
             "Ad Name is required when Trafficking Status is 'New'.",
+        ));
+    }
+    if status == "update" && is_empty(ad_name) {
+        return Some(ValidationError::new(
+            row_num,
+            "Ad Name",
+            "Ad Name is required when Trafficking Status is 'Update'.",
         ));
     }
     if status == "new" && ad_name.is_some_and(|name| name.chars().count() > MAX_AD_NAME_LENGTH) {
@@ -1136,6 +1146,43 @@ mod tests {
         assert_eq!(errors[0].row, 6);
         assert_eq!(errors[0].field, "Ad Name");
         assert!(errors[0].error.contains("Ad Name is required"));
+    }
+
+    #[test]
+    fn test_validation_fail_missing_ad_name_on_update() {
+        let errors = validate_csv(&[
+            ("status", "Update"),
+            ("ad_name", ""),
+            ("ad_id", "123"),
+            ("placement_id", "456"),
+        ]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].row, 6);
+        assert_eq!(errors[0].field, "Ad Name");
+        assert_eq!(
+            errors[0].error,
+            "Ad Name is required when Trafficking Status is 'Update'."
+        );
+        // Direct validator: NA-like values count as missing; other statuses
+        // are not checked.
+        assert!(
+            validate_ad_name(
+                &row(&[("Trafficking Status", "update"), ("Ad Name", "nan")]),
+                1
+            )
+            .is_some()
+        );
+        assert_eq!(
+            validate_ad_name(
+                &row(&[("Trafficking Status", "update"), ("Ad Name", "A")]),
+                1
+            ),
+            None
+        );
+        assert_eq!(
+            validate_ad_name(&row(&[("Trafficking Status", "trafficked")]), 1),
+            None
+        );
     }
 
     #[test]

@@ -88,7 +88,10 @@
   let canvasSurfaces = []; // [{ id, title, eyebrow, raw, cards }]
   let activeSurfaceId = "all";
   let popup = null;
-  const handledStates = new Set();
+  const handledAuthRequests = new Set();
+  // Whether the signed-in user may hot-swap the global models (`/auth/me` → `is_admin`).
+  // Absent (e.g. OAuth unconfigured) is treated as allowed.
+  let canManageModels = true;
 
   const loadStoredModelPricing = () => {
     try {
@@ -115,6 +118,41 @@
     videoModel: localStorage.getItem(STORAGE_KEYS.videoModel) || DEFAULT_MODELS.videoModel,
     pricingTier: localStorage.getItem(STORAGE_KEYS.pricingTier) || "standard",
     modelPricing: loadStoredModelPricing(),
+  };
+
+  // Per-model Paid Tier Standard rates served by the backend (`config::model_pricing`)
+  // in the `/auth/models` payload, keyed by lower-cased model name. The server is the
+  // source of truth; the local heuristics in `getDefaultModelPricing` are only a
+  // fallback for models the server did not price (or older servers without `pricing`).
+  let serverModelPricing = {};
+
+  const toFiniteRate = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+
+  const ingestServerPricing = (models) => {
+    const table = models && typeof models === "object" ? models.pricing : null;
+    if (!table || typeof table !== "object") return false;
+    const next = {};
+    for (const [name, p] of Object.entries(table)) {
+      if (!p || typeof p !== "object") continue;
+      const input = toFiniteRate(p.input_per_million);
+      const cached = toFiniteRate(p.cached_input_per_million);
+      const output = toFiniteRate(p.output_per_million);
+      if (input === null || cached === null || output === null) continue;
+      next[String(name).trim().toLowerCase()] = {
+        input,
+        inputLong: toFiniteRate(p.input_long_per_million) ?? input,
+        cached,
+        cachedLong: toFiniteRate(p.cached_input_long_per_million) ?? cached,
+        output,
+        outputLong: toFiniteRate(p.output_long_per_million) ?? output,
+        audioIn: toFiniteRate(p.audio_input_per_million) ?? input,
+      };
+    }
+    serverModelPricing = next;
+    return true;
   };
 
   // DOM Elements
@@ -233,6 +271,7 @@
   };
 
   const pushModelsToServer = async () => {
+    if (!canManageModels) return;
     try {
       const resp = await fetch("/auth/models", {
         method: "POST",
@@ -246,7 +285,12 @@
       if (!resp.ok) {
         const errData = await resp.json().catch(() => ({}));
         if (errData.error) showError(`Could not update model: ${errData.error}`);
+        return;
       }
+      // The response is the refreshed `/auth/models` payload, which prices the
+      // newly active model as well as the presets.
+      const data = await resp.json().catch(() => null);
+      if (ingestServerPricing(data)) applyPreferences({ rerender: false, syncModels: false });
     } catch {
       /* ignore offline / unauthenticated state */
     }
@@ -346,11 +390,12 @@
   };
 
   const handleAuthRequired = async (data) => {
-    if (!data || !data.auth_url || !data.state) return;
+    // The event carries an opaque `request_id` (never the signed OAuth state).
+    if (!data || !data.auth_url || !data.request_id) return;
     if (!currentUser || !activeSession) return;
     if (data.session_id && data.session_id !== activeSession.id) return;
-    if (handledStates.has(data.state)) return;
-    handledStates.add(data.state);
+    if (handledAuthRequests.has(data.request_id)) return;
+    handledAuthRequests.add(data.request_id);
 
     setStatus("authorizing", "authorizing…");
     const win = openPopup(data.auth_url);
@@ -359,7 +404,7 @@
       await fetch(ACK_PATH, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ state: data.state, opened }),
+        body: JSON.stringify({ request_id: data.request_id, opened }),
       });
     } catch {
       /* ignore */
@@ -460,6 +505,15 @@
         ctrl.disabled = !hasSession;
       });
     });
+    // Model selectors stay visible (so users can see the active models) but
+    // are disabled for non-admins, who would get a 403 from POST /auth/models.
+    settingsMenu.querySelectorAll("[data-admin-only]").forEach((el) => {
+      el.querySelectorAll("input, select").forEach((ctrl) => {
+        ctrl.disabled = !hasSession || !canManageModels;
+      });
+    });
+    const adminHint = $("setting-models-admin-hint");
+    if (adminHint) adminHint.classList.toggle("hidden", canManageModels);
   }
 
   const checkAuthStatus = () => {
@@ -471,6 +525,7 @@
         if (!data.authenticated || !data.user) {
           currentUser = null;
           activeSession = null;
+          canManageModels = true;
           authGate.classList.remove("hidden");
           workspace.classList.add("hidden");
           syncActiveStage();
@@ -485,6 +540,8 @@
         }
 
         currentUser = data.user;
+        // `is_admin` gates POST /auth/models; absent (e.g. OAuth unconfigured) means allowed.
+        canManageModels = data.is_admin !== false;
         authGate.classList.add("hidden");
         workspace.classList.remove("hidden");
         syncActiveStage();
@@ -502,22 +559,32 @@
         setAvatarImage($("menu-avatar-img"), $("menu-avatar-fallback"), currentUser);
 
         if (data.models) {
-          if (!localStorage.getItem(STORAGE_KEYS.model) && data.models.model) {
-            prefs.model = data.models.model;
-          }
-          if (!localStorage.getItem(STORAGE_KEYS.imageModel) && data.models.image_model) {
-            prefs.imageModel = data.models.image_model;
-          }
-          if (!localStorage.getItem(STORAGE_KEYS.videoModel) && data.models.video_model) {
-            prefs.videoModel = data.models.video_model;
-          }
-          applyPreferences({ rerender: false });
-          if (
-            data.models.model !== prefs.model ||
-            data.models.image_model !== prefs.imageModel ||
-            data.models.video_model !== prefs.videoModel
-          ) {
-            await pushModelsToServer();
+          ingestServerPricing(data.models);
+          if (!canManageModels) {
+            // Non-admins follow the server's global selection: show it and
+            // never try to push local preferences (that would 403).
+            if (data.models.model) prefs.model = data.models.model;
+            if (data.models.image_model) prefs.imageModel = data.models.image_model;
+            if (data.models.video_model) prefs.videoModel = data.models.video_model;
+            applyPreferences({ rerender: false });
+          } else {
+            if (!localStorage.getItem(STORAGE_KEYS.model) && data.models.model) {
+              prefs.model = data.models.model;
+            }
+            if (!localStorage.getItem(STORAGE_KEYS.imageModel) && data.models.image_model) {
+              prefs.imageModel = data.models.image_model;
+            }
+            if (!localStorage.getItem(STORAGE_KEYS.videoModel) && data.models.video_model) {
+              prefs.videoModel = data.models.video_model;
+            }
+            applyPreferences({ rerender: false });
+            if (
+              data.models.model !== prefs.model ||
+              data.models.image_model !== prefs.imageModel ||
+              data.models.video_model !== prefs.videoModel
+            ) {
+              await pushModelsToServer();
+            }
           }
         }
 
@@ -1929,7 +1996,8 @@
           padding: inGrid ? "18px 20px" : "20px 22px",
           borderRadius: "20px",
           background: "var(--dm-surface-gray)",
-          border: "1px solid var(--dm-outline)",
+          // KPI tiles inside a grid are borderless; standalone cards keep the outline.
+          border: inGrid ? "none" : "1px solid var(--dm-outline)",
         });
 
         if (comp.title) {
@@ -3085,14 +3153,14 @@
   // OpenTelemetry GenAI Token Usage (`adk_telemetry` / `gen_ai.usage.*`) & Cost
   // ---------------------------------------------------------------------------
 
+  // Base rates for a model. Prefers the table served by the backend (see
+  // `ingestServerPricing`); the heuristics below are a fallback that mirrors
+  // `config::model_pricing` in src/config.rs rule-for-rule (keep both in sync).
   // Official Paid Tier pricing per 1M tokens (USD) from https://ai.google.dev/gemini-api/docs/pricing
-  const getDefaultModelPricing = (model, tier = prefs.pricingTier) => {
-    const m = String(model || prefs.model || DEFAULT_MODELS.model)
-      .trim()
-      .toLowerCase();
-    let base;
-    if (m.includes("argon") || m.includes("gemini-4")) {
-      base = {
+  const getFallbackModelPricing = (m) => {
+    if (m.includes("gemini-4") || m.includes("argon")) {
+      // Gemini 4 Argon: $2.00 in, $0.10 cached, $10.00 out
+      return {
         input: 2.0,
         inputLong: 2.0,
         cached: 0.1,
@@ -3101,18 +3169,10 @@
         outputLong: 10.0,
         audioIn: 2.0,
       };
-    } else if (m.includes("3.8-flash") || m.includes("3.6-flash")) {
-      base = {
-        input: 0.75,
-        inputLong: 0.75,
-        cached: 0.075,
-        cachedLong: 0.075,
-        output: 3.75,
-        outputLong: 3.75,
-        audioIn: 0.75,
-      };
-    } else if (m.includes("3.5-flash-lite")) {
-      base = {
+    }
+    if (m.includes("gemini-3.5-flash-lite")) {
+      // Gemini 3.5 Flash-Lite: $0.30 in, $0.03 cached, $2.50 out
+      return {
         input: 0.3,
         inputLong: 0.3,
         cached: 0.03,
@@ -3121,8 +3181,10 @@
         outputLong: 2.5,
         audioIn: 0.3,
       };
-    } else if (m.includes("3.1-flash-lite")) {
-      base = {
+    }
+    if (m.includes("gemini-3.1-flash-lite")) {
+      // Gemini 3.1 Flash-Lite: $0.25 in ($0.50 audio), $0.025 cached, $1.50 out
+      return {
         input: 0.25,
         inputLong: 0.25,
         cached: 0.025,
@@ -3131,28 +3193,10 @@
         outputLong: 1.5,
         audioIn: 0.5,
       };
-    } else if (m.includes("3.1-pro") || (m.includes("gemini-3") && m.includes("pro"))) {
-      base = {
-        input: 2.0,
-        inputLong: 4.0,
-        cached: 0.2,
-        cachedLong: 0.4,
-        output: 12.0,
-        outputLong: 18.0,
-        audioIn: 2.0,
-      };
-    } else if (m.includes("gemini-3") && m.includes("flash")) {
-      base = {
-        input: 0.5,
-        inputLong: 0.5,
-        cached: 0.05,
-        cachedLong: 0.05,
-        output: 3.0,
-        outputLong: 3.0,
-        audioIn: 1.0,
-      };
-    } else if (m.includes("2.5-flash-lite") || m.includes("flash-lite")) {
-      base = {
+    }
+    if (m.includes("flash-lite") || m.includes("gemini-2.0-flash")) {
+      // Gemini 2.5 Flash-Lite / 2.0 Flash: $0.10 in ($0.30 audio), $0.01 cached, $0.40 out
+      return {
         input: 0.1,
         inputLong: 0.1,
         cached: 0.01,
@@ -3161,18 +3205,34 @@
         outputLong: 0.4,
         audioIn: 0.3,
       };
-    } else if (m.includes("2.0-flash")) {
-      base = {
-        input: 0.1,
-        inputLong: 0.1,
-        cached: 0.025,
-        cachedLong: 0.025,
-        output: 0.4,
-        outputLong: 0.4,
-        audioIn: 0.7,
+    }
+    if ((m.includes("gemini-3.8") || m.includes("gemini-3.6")) && m.includes("flash")) {
+      // Gemini 3.8 Flash & 3.6 Flash: $0.75 in, $0.075 cached, $3.75 out
+      return {
+        input: 0.75,
+        inputLong: 0.75,
+        cached: 0.075,
+        cachedLong: 0.075,
+        output: 3.75,
+        outputLong: 3.75,
+        audioIn: 0.75,
       };
-    } else if (m.includes("flash")) {
-      base = {
+    }
+    if (m.includes("gemini-3") && m.includes("flash")) {
+      // Gemini 3 Flash Preview: $0.50 in ($1.00 audio), $0.05 cached, $3.00 out
+      return {
+        input: 0.5,
+        inputLong: 0.5,
+        cached: 0.05,
+        cachedLong: 0.05,
+        output: 3.0,
+        outputLong: 3.0,
+        audioIn: 1.0,
+      };
+    }
+    if (m.includes("flash")) {
+      // Gemini 2.5 Flash: $0.30 in ($1.00 audio), $0.03 cached, $2.50 out
+      return {
         input: 0.3,
         inputLong: 0.3,
         cached: 0.03,
@@ -3181,17 +3241,36 @@
         outputLong: 2.5,
         audioIn: 1.0,
       };
-    } else {
-      base = {
-        input: 1.25,
-        inputLong: 2.5,
-        cached: 0.125,
-        cachedLong: 0.25,
-        output: 10.0,
-        outputLong: 15.0,
-        audioIn: 1.25,
+    }
+    if (m.includes("gemini-3")) {
+      // Gemini 3.1 Pro Preview: $2.00/$4.00 in, $0.20/$0.40 cached, $12.00/$18.00 out
+      return {
+        input: 2.0,
+        inputLong: 4.0,
+        cached: 0.2,
+        cachedLong: 0.4,
+        output: 12.0,
+        outputLong: 18.0,
+        audioIn: 2.0,
       };
     }
+    // Gemini 2.5 Pro: $1.25/$2.50 in, $0.125/$0.25 cached, $10.00/$15.00 out
+    return {
+      input: 1.25,
+      inputLong: 2.5,
+      cached: 0.125,
+      cachedLong: 0.25,
+      output: 10.0,
+      outputLong: 15.0,
+      audioIn: 1.25,
+    };
+  };
+
+  const getDefaultModelPricing = (model, tier = prefs.pricingTier) => {
+    const m = String(model || prefs.model || DEFAULT_MODELS.model)
+      .trim()
+      .toLowerCase();
+    const base = serverModelPricing[m] || getFallbackModelPricing(m);
 
     const mult = tier === "priority" ? 1.8 : tier === "batch" ? 0.5 : 1.0;
     const scale = (v) => Number((v * mult).toFixed(6));

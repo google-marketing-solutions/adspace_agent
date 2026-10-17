@@ -22,12 +22,14 @@
 //!
 //! Intentional deviations from the pandas-based original: cells that pandas
 //! would have turned into `NaN` (and the Python code would have stringified
-//! as `"nan"`) are treated as empty strings, and a numeric impression ratio
-//! that is integral is rendered without decimals (`"1.0"` → `"1"`).
+//! as `"nan"`) are treated as empty strings, a numeric impression ratio
+//! that is integral is rendered without decimals (`"1.0"` → `"1"`), and rows
+//! without an `Ad Name` never produce an (empty-named) ad.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use tracing::warn;
 
 use super::diff::{AD_INSERT_OPERATION, EVENT_TAG_INSERT_OPERATION, Operation};
 use super::sheet::{
@@ -120,7 +122,19 @@ pub fn parse_creative_type(val: Option<&str>) -> String {
     val.map(str::trim).unwrap_or_default().to_string()
 }
 
+/// First non-NA cell among the given column names (canonical header first,
+/// legacy aliases after it).
+fn first_present<'a>(row: &'a Row, columns: &[&str]) -> Option<&'a str> {
+    columns.iter().find_map(|column| row.get(column))
+}
+
 /// Groups rows into unique placements keyed by placement name.
+///
+/// Flight dates are read from the canonical `Pricing Schedule Start Date` /
+/// `Pricing Schedule End Date` columns and the compatibility from
+/// `Compatibility` (the same columns the validators check), falling back to
+/// the legacy `Placement Start Date` / `Placement End Date` /
+/// `Placement Type` names.
 ///
 /// `advertiser_id` and `campaign_name` are accepted for signature parity with
 /// Python but are not used in the payload.
@@ -137,10 +151,18 @@ pub fn group_placements(
             continue;
         }
         let site_identifier = extract_site_identifier(row);
-        let placement_start = row.get("Placement Start Date");
-        let placement_end = row.get("Placement End Date");
+        let placement_start = first_present(
+            row,
+            &["Pricing Schedule Start Date", "Placement Start Date"],
+        );
+        let placement_end =
+            first_present(row, &["Pricing Schedule End Date", "Placement End Date"]);
         let placement_size = row.get("Placement Size");
-        let compatibility = row.get_str("Placement Type");
+        let compatibility = first_present(row, &["Compatibility", "Placement Type"])
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .unwrap_or_default()
+            .to_string();
         let active_status = row.get_str("Placement Status");
 
         let payload = json!({
@@ -260,6 +282,16 @@ pub fn group_ads(
     for row in rows {
         let placement_name = row.get_str("Placement Name");
         let ad_name = row.get_str("Ad Name");
+        if ad_name.is_empty() {
+            // `validate_ad_name` rejects such rows before grouping; this guard
+            // makes sure a row that slips through never becomes an
+            // `ads.insert` named `""`.
+            warn!(
+                "Row {} has no Ad Name; skipping ad grouping for this row.",
+                row.row_number
+            );
+            continue;
+        }
         let ad_start = row.get("Ad Start Date");
         let ad_end = row.get("Ad End Date");
         let creative_id_val = row.get_str("Creative Name");
@@ -424,10 +456,43 @@ mod tests {
             placements["Test Placement 1"]["activeStatus"],
             "PLACEMENT_STATUS_INACTIVE"
         );
+        // Canonical header names feed the flight dates and compatibility.
+        assert_eq!(
+            placements["Test Placement 1"]["pricingSchedule"],
+            json!({"startDate": "3000-08-29", "endDate": "3000-09-25", "pricingType": ""})
+        );
+        assert_eq!(placements["Test Placement 1"]["compatibility"], "DISPLAY");
+    }
+
+    #[test]
+    fn group_placements_reads_canonical_columns_from_test_csv() {
+        let rows = test_rows(&[]);
+        let placements = group_placements(&rows, Some("1"), Some("2"), None);
+        let placement = &placements["Test~Placement~1 Test"];
+        assert_eq!(placement["pricingSchedule"]["startDate"], "3000-08-29");
+        assert_eq!(placement["pricingSchedule"]["endDate"], "3000-09-25");
+        assert_eq!(placement["compatibility"], "DISPLAY");
+        // The canonical column wins over a legacy alias when both are present.
+        let rows = vec![row(&[
+            ("Placement Name", "P"),
+            ("Pricing Schedule Start Date", "2026-01-01"),
+            ("Placement Start Date", "2025-01-01"),
+            ("Pricing Schedule End Date", ""),
+            ("Placement End Date", "2026-02-01"),
+            ("Compatibility", ""),
+            ("Placement Type", "IN_STREAM_VIDEO"),
+        ])];
+        let placement = &group_placements(&rows, None, None, None)["P"];
+        assert_eq!(placement["pricingSchedule"]["startDate"], "2026-01-01");
+        // An NA canonical cell falls back to the legacy alias.
+        assert_eq!(placement["pricingSchedule"]["endDate"], "2026-02-01");
+        assert_eq!(placement["compatibility"], "IN_STREAM_VIDEO");
     }
 
     #[test]
     fn test_cm360_actions_grouping_helpers() {
+        // Legacy column names (`Placement Start Date` / `Placement End Date` /
+        // `Placement Type`) are still accepted as aliases.
         let rows = vec![
             row(&[
                 ("Placement Name", "P1"),
@@ -823,6 +888,19 @@ mod tests {
                 {"id": "T3", "enabled": true},
             ])
         );
+    }
+
+    #[test]
+    fn group_ads_skips_rows_without_ad_name() {
+        let rows = vec![
+            row(&[("Placement Name", "P1"), ("Ad Name", "")]),
+            row(&[("Placement Name", "P2"), ("Ad Name", "NA")]),
+            row(&[("Placement Name", "P3")]),
+            row(&[("Placement Name", "P4"), ("Ad Name", " A ")]),
+        ];
+        let ads = group_ads(&rows, None, None, None);
+        assert_eq!(ads.keys().collect::<Vec<_>>(), vec!["A"]);
+        assert!(!ads.contains_key(""));
     }
 
     #[test]

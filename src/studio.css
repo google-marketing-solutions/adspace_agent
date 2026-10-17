@@ -698,6 +698,13 @@ select:focus-visible {
   color: var(--text-secondary);
 }
 
+.popover-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
 .popover-label-row {
   display: flex;
   align-items: center;

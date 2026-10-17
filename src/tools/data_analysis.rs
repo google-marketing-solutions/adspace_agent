@@ -21,7 +21,7 @@
 //! | `PYTHON_EXECUTOR` | Tool | Notes |
 //! |---|---|---|
 //! | `gemini` (default) | `gemini_code_execution` | Gemini writes and runs Python server-side (numpy, pandas, matplotlib, scikit-learn, ... available). No infrastructure; stateless per turn. |
-//! | `docker` | `python_code` | Container-backed CPython (`PYTHON_DOCKER_IMAGE`, default `python:3.15-slim`). Requires a Docker daemon. |
+//! | `docker` | `python_code` | Container-backed CPython (`PYTHON_DOCKER_IMAGE`, default `python:3.15-slim`). Requires a Docker daemon. Runs with no network, all capabilities dropped, a read-only root filesystem and memory/PID limits (see [`docker_hardening_flags`]). |
 //! | `vertex` | `vertex_sandbox_code_execution` | Vertex AI Agent Engine managed sandbox (`VERTEX_SANDBOX_NAME` or `VERTEX_AGENT_ENGINE`). Stateful per session. |
 //! | `monty` | `monty_python_code` | In-process sandboxed Monty interpreter (Python subset). Needs `--features monty`. |
 
@@ -82,6 +82,56 @@ impl PythonExecutorKind {
     }
 }
 
+/// Default `--memory` limit for the Docker executor (`PYTHON_DOCKER_MEMORY`).
+pub const DEFAULT_DOCKER_MEMORY: &str = "512m";
+/// Default `--pids-limit` for the Docker executor (`PYTHON_DOCKER_PIDS_LIMIT`).
+pub const DEFAULT_DOCKER_PIDS_LIMIT: &str = "256";
+/// Default size of the writable `/tmp` tmpfs mounted into the otherwise
+/// read-only container (`PYTHON_DOCKER_TMPFS_SIZE`).
+pub const DEFAULT_DOCKER_TMPFS_SIZE: &str = "256m";
+
+/// Extra `docker run` flags that harden the ephemeral Python container on top
+/// of adk's strict sandbox policy (`--network=none`, no mounts, no env).
+///
+/// adk-code's `ContainerCommandExecutor` appends `extra_flags` verbatim before
+/// the image name, so these compose with the policy-derived flags:
+///
+/// * `--memory` / `--pids-limit` bound memory and fork bombs
+///   (`PYTHON_DOCKER_MEMORY`, `PYTHON_DOCKER_PIDS_LIMIT`);
+/// * `--cap-drop=ALL` and `--security-opt=no-new-privileges` remove every
+///   Linux capability and block setuid escalation;
+/// * `--read-only` makes the image filesystem immutable, with a small
+///   `noexec,nosuid` tmpfs on `/tmp` so CPython, matplotlib caches and
+///   `tempfile` keep working (`PYTHON_DOCKER_TMPFS_SIZE`).
+///
+/// Values are read with a helper so the pure function can be unit-tested.
+pub fn docker_hardening_flags(env: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    let setting = |name: &str, default: &str| {
+        env(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    };
+    vec![
+        format!(
+            "--memory={}",
+            setting("PYTHON_DOCKER_MEMORY", DEFAULT_DOCKER_MEMORY)
+        ),
+        format!(
+            "--pids-limit={}",
+            setting("PYTHON_DOCKER_PIDS_LIMIT", DEFAULT_DOCKER_PIDS_LIMIT)
+        ),
+        "--cap-drop=ALL".to_string(),
+        "--security-opt=no-new-privileges".to_string(),
+        "--read-only".to_string(),
+        "--tmpfs".to_string(),
+        format!(
+            "/tmp:rw,noexec,nosuid,size={}",
+            setting("PYTHON_DOCKER_TMPFS_SIZE", DEFAULT_DOCKER_TMPFS_SIZE)
+        ),
+    ]
+}
+
 /// Builds the Python execution tool for the configured backend.
 ///
 /// # Errors
@@ -96,7 +146,7 @@ pub fn build_python_tool(kind: PythonExecutorKind) -> anyhow::Result<Arc<dyn Too
                 .unwrap_or_else(|_| "docker".to_string()),
             default_image: std::env::var("PYTHON_DOCKER_IMAGE")
                 .unwrap_or_else(|_| "python:3.15-slim".to_string()),
-            extra_flags: vec![],
+            extra_flags: docker_hardening_flags(|name| std::env::var(name).ok()),
             auto_remove: true,
         })),
         PythonExecutorKind::Vertex => {
@@ -173,6 +223,36 @@ mod tests {
         assert!(
             "host".parse::<PythonExecutorKind>().is_err(),
             "the host REPL was removed"
+        );
+    }
+
+    #[test]
+    fn docker_hardening_flags_have_safe_defaults_and_env_overrides() {
+        let defaults = docker_hardening_flags(|_| None);
+        assert_eq!(
+            defaults,
+            vec![
+                "--memory=512m",
+                "--pids-limit=256",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                "--read-only",
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,size=256m",
+            ]
+        );
+
+        let overridden = docker_hardening_flags(|name| match name {
+            "PYTHON_DOCKER_MEMORY" => Some("2g".into()),
+            "PYTHON_DOCKER_PIDS_LIMIT" => Some(" 64 ".into()),
+            "PYTHON_DOCKER_TMPFS_SIZE" => Some(String::new()),
+            _ => None,
+        });
+        assert!(overridden.contains(&"--memory=2g".to_string()));
+        assert!(overridden.contains(&"--pids-limit=64".to_string()));
+        assert!(
+            overridden.contains(&"/tmp:rw,noexec,nosuid,size=256m".to_string()),
+            "blank override falls back to the default"
         );
     }
 

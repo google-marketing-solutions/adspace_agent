@@ -14,15 +14,23 @@
 
 //! `GoogleApiToolset`: one LLM tool per REST method of a Google API.
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use adk_rust::{ReadonlyContext, Result, Tool, ToolContext, Toolset};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::discovery::{DiscoveryDocument, DiscoveryFetcher};
+use super::naming::dedupe_tool_names;
 use super::spec::{MethodSpec, SpecOptions, build_method_specs};
 use crate::auth::{SessionCredentialManager, auth_required};
+
+/// Largest upstream response body handed back to the model. Bigger bodies
+/// (media downloads, unpaged exports) are replaced by a structured error that
+/// asks the model to narrow the request.
+pub const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Configuration of a [`GoogleApiToolset`].
 #[derive(Debug, Clone)]
@@ -47,6 +55,10 @@ pub struct GoogleApiToolsetConfig {
     pub tool_name_prefix: Option<String>,
     /// Schema generation options.
     pub spec_options: SpecOptions,
+    /// Replaces the document's `rootUrl + servicePath` as the base of every
+    /// request (tests / emulators). Production always uses the validated
+    /// Discovery base URL.
+    pub base_url_override: Option<String>,
 }
 
 impl GoogleApiToolsetConfig {
@@ -66,6 +78,7 @@ impl GoogleApiToolsetConfig {
             scopes: None,
             tool_name_prefix: None,
             spec_options: SpecOptions::default(),
+            base_url_override: None,
         }
     }
 
@@ -110,6 +123,13 @@ impl GoogleApiToolsetConfig {
     /// Sets the schema generation options.
     pub fn with_spec_options(mut self, options: SpecOptions) -> Self {
         self.spec_options = options;
+        self
+    }
+
+    /// Sends every request to `base_url` instead of the Discovery base URL
+    /// (tests / emulators).
+    pub fn with_base_url_override(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url_override = Some(base_url.into());
         self
     }
 }
@@ -222,6 +242,9 @@ impl GoogleApiTool {
         if !prepared.query.is_empty() {
             req = req.query(&prepared.query);
         }
+        for (name, value) in &prepared.headers {
+            req = req.header(name.as_str(), value.as_str());
+        }
         for (name, value) in &self.shared.additional_headers {
             req = req.header(name.as_str(), value.as_str());
         }
@@ -231,9 +254,28 @@ impl GoogleApiTool {
         tracing::info!("Calling {} {}", prepared.method, prepared.url);
         let resp = req.send().await?;
         let status = resp.status();
-        let text = resp.text().await?;
+        let bytes = match read_body_limited(resp, MAX_RESPONSE_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(BodyError::TooLarge(limit)) => {
+                return Ok(json!({
+                    "error": {
+                        "code": "RESPONSE_TOO_LARGE",
+                        "status": status.as_u16(),
+                        "message": format!(
+                            "{} {} returned more than {limit} bytes, which is too much to hand to the model.",
+                            prepared.method, prepared.url
+                        ),
+                        "hint": "Narrow the request: ask for fewer results (pageSize / maxResults), \
+                                 restrict the returned fields with the `fields` parameter, add a \
+                                 filter, or page through the results.",
+                    }
+                }));
+            }
+            Err(BodyError::Transport(e)) => return Err(e.into()),
+        };
+        let text = String::from_utf8_lossy(&bytes);
         let body: Value =
-            serde_json::from_str(&text).unwrap_or_else(|_| json!({ "content": text }));
+            serde_json::from_str(&text).unwrap_or_else(|_| json!({ "content": text.into_owned() }));
         if status.is_success() {
             Ok(body)
         } else {
@@ -246,6 +288,36 @@ impl GoogleApiTool {
             }))
         }
     }
+}
+
+/// Why a response body could not be read in full.
+enum BodyError {
+    /// The body exceeded the given byte limit.
+    TooLarge(usize),
+    /// The connection failed mid-body.
+    Transport(reqwest::Error),
+}
+
+/// Reads a response body, stopping as soon as it exceeds `limit` bytes.
+/// Honours `Content-Length` up front to avoid buffering at all.
+async fn read_body_limited(
+    resp: reqwest::Response,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, BodyError> {
+    use futures::StreamExt as _;
+    if resp.content_length().is_some_and(|len| len > limit as u64) {
+        return Err(BodyError::TooLarge(limit));
+    }
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(BodyError::Transport)?;
+        if buf.len() + chunk.len() > limit {
+            return Err(BodyError::TooLarge(limit));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
 }
 
 #[async_trait]
@@ -290,7 +362,7 @@ pub struct GoogleApiToolset {
     api_version: String,
     scopes: Vec<String>,
     scopes_by_tool: Vec<(String, Vec<String>)>,
-    tools: Vec<Arc<dyn Tool>>,
+    tools: Vec<Arc<GoogleApiTool>>,
 }
 
 impl GoogleApiToolset {
@@ -315,6 +387,12 @@ impl GoogleApiToolset {
     }
 
     /// Builds the toolset from an already-parsed Discovery document.
+    ///
+    /// Tool names are derived from method ids and capped at 60 characters,
+    /// which can make distinct methods collide (`displayvideo v4` has several
+    /// such groups). Collisions are resolved with `_1`, `_2`, ... suffixes
+    /// in document order; duplicate tool names would otherwise abort every
+    /// model turn.
     pub fn from_document(
         doc: &DiscoveryDocument,
         config: GoogleApiToolsetConfig,
@@ -322,19 +400,45 @@ impl GoogleApiToolset {
     ) -> Self {
         let api_scopes = doc.oauth_scopes();
         let shared = Arc::new(ToolShared {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(120))
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default(),
             credentials,
             additional_headers: config.additional_headers.clone(),
         });
         let prefix = config.tool_name_prefix.clone().unwrap_or_default();
-        let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+        let mut specs = build_method_specs(doc, &config.spec_options);
+        let mut names: Vec<String> = specs.iter().map(|s| s.tool_name.clone()).collect();
+        dedupe_tool_names(&mut names);
+        for (spec, name) in specs.iter_mut().zip(names) {
+            if spec.tool_name != name {
+                tracing::debug!(
+                    "Tool name collision for {}: exposing it as {name}",
+                    spec.method_id
+                );
+                spec.tool_name = name;
+            }
+            if let Some(base) = &config.base_url_override {
+                spec.base_url = base.trim_end_matches('/').to_string();
+            }
+        }
+        let mut tools: Vec<Arc<GoogleApiTool>> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
         let mut scopes: Vec<String> = Vec::new();
         let mut scopes_by_tool: Vec<(String, Vec<String>)> = Vec::new();
-        for spec in build_method_specs(doc, &config.spec_options) {
+        for spec in specs {
             let name = format!("{prefix}{}", spec.tool_name);
             if let Some(filter) = &config.tool_filter
                 && !filter.iter().any(|f| f == &name || f == &spec.tool_name)
             {
+                continue;
+            }
+            if !seen.insert(name.clone()) {
+                // Cannot happen after `dedupe_tool_names`; never expose a
+                // duplicate name regardless.
+                tracing::warn!("Skipping {} - duplicate tool name {name}", spec.method_id);
                 continue;
             }
             let description = if spec.description.trim().is_empty() {
@@ -412,6 +516,12 @@ impl GoogleApiToolset {
         self.tools.iter().map(|t| t.name().to_string()).collect()
     }
 
+    /// The exposed tools with their concrete type (specs, scopes), in
+    /// declaration order.
+    pub fn api_tools(&self) -> &[Arc<GoogleApiTool>] {
+        &self.tools
+    }
+
     /// Discovery API name.
     pub fn api_name(&self) -> &str {
         &self.api_name
@@ -430,7 +540,11 @@ impl Toolset for GoogleApiToolset {
     }
 
     async fn tools(&self, _ctx: Arc<dyn ReadonlyContext>) -> Result<Vec<Arc<dyn Tool>>> {
-        Ok(self.tools.clone())
+        Ok(self
+            .tools
+            .iter()
+            .map(|t| t.clone() as Arc<dyn Tool>)
+            .collect())
     }
 }
 
@@ -645,5 +759,69 @@ mod tests {
                 .iter()
                 .all(|n| n.starts_with("x_drive_"))
         );
+    }
+
+    /// Method ids that truncate to the same 60-character tool name (as in
+    /// the live `displayvideo v4` document) get distinct names instead of
+    /// aborting every model turn with a duplicate-declaration error.
+    #[test]
+    fn colliding_tool_names_are_deduplicated() {
+        let doc = DiscoveryDocument::parse(
+            r#"{"name":"displayvideo","version":"v4","rootUrl":"https://displayvideo.googleapis.com/","servicePath":"",
+            "resources":{"advertisers":{"resources":{"targetingTypes":{"resources":{"assignedTargetingOptions":{"methods":{
+              "create":{"id":"displayvideo.advertisers.targetingTypes.assignedTargetingOptions.create","path":"v4/a","httpMethod":"POST"},
+              "delete":{"id":"displayvideo.advertisers.targetingTypes.assignedTargetingOptions.delete","path":"v4/a","httpMethod":"DELETE"},
+              "get":{"id":"displayvideo.advertisers.targetingTypes.assignedTargetingOptions.get","path":"v4/a","httpMethod":"GET"},
+              "list":{"id":"displayvideo.advertisers.targetingTypes.assignedTargetingOptions.list","path":"v4/a","httpMethod":"GET"}
+            }}}}}}}}"#,
+        )
+        .unwrap();
+        let toolset = GoogleApiToolset::from_document(
+            &doc,
+            GoogleApiToolsetConfig::new("dv360", "displayvideo", "v4"),
+            credentials(),
+        );
+        let names = toolset.tool_names();
+        assert_eq!(
+            names,
+            vec![
+                "displayvideo_advertisers_targeting_types_assigned_targeting_",
+                "displayvideo_advertisers_targeting_types_assigned_targetin_1",
+                "displayvideo_advertisers_targeting_types_assigned_targetin_2",
+                "displayvideo_advertisers_targeting_types_assigned_targetin_3",
+            ]
+        );
+        assert!(names.iter().all(|n| n.len() <= 60));
+        // Filters can address the deduped names, and the spec's own name
+        // follows so filter matching on either form works.
+        let filtered = GoogleApiToolset::from_document(
+            &doc,
+            GoogleApiToolsetConfig::new("dv360", "displayvideo", "v4")
+                .with_tool_filter(["displayvideo_advertisers_targeting_types_assigned_targetin_2"]),
+            credentials(),
+        );
+        assert_eq!(
+            filtered.tool_names(),
+            vec!["displayvideo_advertisers_targeting_types_assigned_targetin_2"]
+        );
+        assert!(filtered.tools[0].is_read_only(), "the deduped `get`");
+    }
+
+    #[test]
+    fn base_url_override_redirects_every_request() {
+        let config = GoogleApiToolsetConfig::new("drive", "drive", "v3")
+            .with_base_url_override("http://127.0.0.1:1/");
+        let toolset = GoogleApiToolset::from_document(&doc(), config, credentials());
+        assert!(
+            toolset
+                .api_tools()
+                .iter()
+                .all(|t| t.spec().base_url == "http://127.0.0.1:1")
+        );
+        let req = toolset.api_tools()[1]
+            .spec()
+            .prepare_request(&json!({"file_id": "abc"}))
+            .unwrap();
+        assert_eq!(req.url, "http://127.0.0.1:1/files/abc");
     }
 }

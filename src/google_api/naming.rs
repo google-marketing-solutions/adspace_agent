@@ -122,6 +122,35 @@ pub fn dedupe_names(names: &mut [String]) {
     }
 }
 
+/// De-duplicates tool names in place. The first occurrence keeps its name;
+/// later ones get `_1`, `_2`, ... suffixes. The result always fits in
+/// [`MAX_TOOL_NAME_LEN`] characters (the base is shortened to make room),
+/// never ends in `_` before the suffix, and never collides with any other
+/// name in the slice.
+pub fn dedupe_tool_names(names: &mut [String]) {
+    // Every distinct name is reserved up front: a later plain name must not
+    // be taken by an earlier suffixed one.
+    let mut taken: std::collections::HashSet<String> = names.iter().cloned().collect();
+    let mut handled: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for name in names.iter_mut() {
+        if handled.insert(name.clone()) {
+            continue; // first occurrence keeps the plain name
+        }
+        let mut n = 1usize;
+        loop {
+            let suffix = format!("_{n}");
+            let room = MAX_TOOL_NAME_LEN.saturating_sub(suffix.len());
+            let base: String = name.chars().take(room).collect();
+            let candidate = format!("{}{suffix}", base.trim_end_matches('_'));
+            if taken.insert(candidate.clone()) {
+                *name = candidate;
+                break;
+            }
+            n += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +222,59 @@ mod tests {
         ];
         dedupe_names(&mut names);
         assert_eq!(names, vec!["name", "id", "name_0", "name_1"]);
+    }
+
+    #[test]
+    fn tool_name_dedupe_keeps_names_unique_short_and_valid() {
+        // Live collision from displayvideo v4: create/delete/get/list all
+        // truncate to the same 60 characters.
+        let ids = [
+            "displayvideo.advertisers.targetingTypes.assignedTargetingOptions.create",
+            "displayvideo.advertisers.targetingTypes.assignedTargetingOptions.delete",
+            "displayvideo.advertisers.targetingTypes.assignedTargetingOptions.get",
+            "displayvideo.advertisers.targetingTypes.assignedTargetingOptions.list",
+            "displayvideo.advertisers.list",
+        ];
+        let mut names: Vec<String> = ids.iter().map(|id| tool_name_for_method_id(id)).collect();
+        assert_eq!(names[0], names[1]);
+        assert_eq!(names[0], names[3]);
+        assert_eq!(names[0].len(), MAX_TOOL_NAME_LEN);
+        dedupe_tool_names(&mut names);
+        let distinct: std::collections::HashSet<&String> = names.iter().collect();
+        assert_eq!(distinct.len(), names.len(), "{names:?}");
+        assert_eq!(
+            names[0], "displayvideo_advertisers_targeting_types_assigned_targeting_",
+            "first occurrence keeps the plain (truncated) name"
+        );
+        assert_eq!(
+            names[1],
+            "displayvideo_advertisers_targeting_types_assigned_targetin_1"
+        );
+        assert_eq!(
+            names[2],
+            "displayvideo_advertisers_targeting_types_assigned_targetin_2"
+        );
+        assert_eq!(names[4], "displayvideo_advertisers_list");
+        for name in &names {
+            assert!(name.len() <= MAX_TOOL_NAME_LEN, "{name}");
+            assert!(!name.contains("__"), "{name}");
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_name_dedupe_never_steals_a_later_plain_name() {
+        let mut names = vec![
+            "a".to_string(),
+            "a".to_string(),
+            "a_1".to_string(),
+            "a".to_string(),
+        ];
+        dedupe_tool_names(&mut names);
+        assert_eq!(names, vec!["a", "a_2", "a_1", "a_3"]);
     }
 }

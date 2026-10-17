@@ -41,6 +41,7 @@ use super::diff::{
     AD_INSERT_OPERATION, AD_PATCH_OPERATION, CREATIVE_PATCH_OPERATION, EVENT_TAG_INSERT_OPERATION,
     EVENT_TAG_PATCH_OPERATION, Operation, PLACEMENT_PATCH_OPERATION, value_to_string,
 };
+use super::sheet::EntityOutcomes;
 
 /// Operation name for event tag updates (full replace).
 pub const EVENT_TAG_UPDATE_OPERATION: &str = "dfareporting.eventTags.update";
@@ -548,7 +549,8 @@ pub fn build_trafficking_summary_response(
     } else {
         format!(
             "Trafficking execution encountered {error_count} error(s) ({success_count} processed, \
-             {skipped_count} skipped). Please try again to reprocess missing entities."
+             {skipped_count} skipped). The failed rows keep their New/Update status in the \
+             trafficking sheet: run parse_sheet_tool again and re-approve to reprocess them."
         )
     };
 
@@ -571,20 +573,31 @@ pub fn build_trafficking_summary_response(
 }
 
 /// Names (trimmed) of the successful ad operations and of the successful
-/// placement operations — the inputs to
-/// [`apply_trafficked_status`](super::sheet::apply_trafficked_status).
+/// placement operations.
 pub fn successful_entity_names(results: &[OperationResult]) -> (HashSet<String>, HashSet<String>) {
-    let names_for = |prefix: &str| -> HashSet<String> {
+    let outcomes = entity_outcomes(results);
+    (outcomes.successful_ads, outcomes.successful_placements)
+}
+
+/// Per-entity success / failure sets (trimmed names) of the ad and placement
+/// operations — the input to
+/// [`apply_trafficked_status`](super::sheet::apply_trafficked_status).
+///
+/// `SKIPPED` results count as neither success nor failure.
+pub fn entity_outcomes(results: &[OperationResult]) -> EntityOutcomes {
+    let names_for = |prefix: &str, status: &str| -> HashSet<String> {
         results
             .iter()
-            .filter(|r| r.status == STATUS_SUCCESS && r.operation.starts_with(prefix))
+            .filter(|r| r.status == status && r.operation.starts_with(prefix))
             .map(|r| r.name.trim().to_string())
             .collect()
     };
-    (
-        names_for("dfareporting.ads."),
-        names_for("dfareporting.placements."),
-    )
+    EntityOutcomes {
+        successful_ads: names_for("dfareporting.ads.", STATUS_SUCCESS),
+        successful_placements: names_for("dfareporting.placements.", STATUS_SUCCESS),
+        failed_ads: names_for("dfareporting.ads.", STATUS_ERROR),
+        failed_placements: names_for("dfareporting.placements.", STATUS_ERROR),
+    }
 }
 
 #[cfg(test)]
@@ -1089,7 +1102,7 @@ mod tests {
         assert_eq!(partial["status"], "PARTIAL_SUCCESS");
         assert_eq!(
             partial["message"],
-            "Trafficking execution encountered 1 error(s) (1 processed, 0 skipped). Please try again to reprocess missing entities."
+            "Trafficking execution encountered 1 error(s) (1 processed, 0 skipped). The failed rows keep their New/Update status in the trafficking sheet: run parse_sheet_tool again and re-approve to reprocess them."
         );
         assert_eq!(partial["profile_id"], "1");
         assert!(partial.get("advertiser_id").is_none());
@@ -1188,6 +1201,34 @@ mod tests {
             placements,
             ["Placement One".to_string()].into_iter().collect()
         );
+
+        let mut results = results;
+        results.push(OperationResult {
+            id: None,
+            name: " Placement Two ".into(),
+            operation: PLACEMENT_PATCH_OPERATION.into(),
+            status: "ERROR".into(),
+            message: None,
+        });
+        results.push(OperationResult {
+            id: None,
+            name: "Skipped Ad".into(),
+            operation: AD_INSERT_OPERATION.into(),
+            status: "SKIPPED".into(),
+            message: None,
+        });
+        let outcomes = entity_outcomes(&results);
+        assert_eq!(outcomes.successful_ads, ads);
+        assert_eq!(outcomes.successful_placements, placements);
+        assert_eq!(
+            outcomes.failed_ads,
+            ["Ad Two".to_string()].into_iter().collect()
+        );
+        assert_eq!(
+            outcomes.failed_placements,
+            ["Placement Two".to_string()].into_iter().collect()
+        );
+        assert!(outcomes.has_successes());
     }
 
     #[test]

@@ -18,10 +18,12 @@
 //!
 //! - **User OAuth 2.0 credentials** (authorization-code flow with the
 //!   configured `CLIENT_ID` / `CLIENT_SECRET`) for Google Ads, Campaign
-//!   Manager 360, Display & Video 360, Drive, YouTube, etc. They are attached
-//!   to the chat session (stored in its state), never to the server.
-//! - **Application Default Credentials** (ADC) for Google Cloud services such
-//!   as Vertex AI and Cloud Storage.
+//!   Manager 360, Display & Video 360, Drive, YouTube, BigQuery, etc. They are
+//!   attached to the chat session (stored in its state), never to the server.
+//! - **Application Default Credentials** (ADC) for the agent's own
+//!   infrastructure only: the Vertex AI model backend, Cloud Storage
+//!   artifacts / skills staging and the Vertex code sandbox. No user-facing
+//!   data tool falls back to ADC.
 //!
 //! Both are exposed to tools through the [`AccessTokenProvider`] trait so the
 //! HTTP clients never need to know where a bearer token came from.
@@ -37,7 +39,7 @@ pub use adc::AdcTokenProvider;
 pub use oauth::{
     AuthRequired, AuthenticatedUser, CREDENTIALS_STATE_KEY, GoogleOAuthFlow, LOGIN_SENTINEL_APP,
     OAuthClientConfig, OAuthToken, OAuthUiEvent, SessionCredentialManager, SessionRef,
-    SessionTokenProvider, auth_required,
+    SessionTokenProvider, UserLogin, auth_required,
 };
 
 /// Something that can produce a valid OAuth 2.0 bearer access token.

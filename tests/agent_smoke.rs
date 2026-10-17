@@ -28,10 +28,17 @@ use adk_rust::artifact::{
 use adk_rust::memory::{InMemoryMemoryService, MemoryService, SearchRequest};
 use adk_rust::runner::Runner;
 use adk_rust::session::{CreateRequest, InMemorySessionService, SessionService};
-use adk_rust::{Content, Llm, LlmRequest, LlmResponse, LlmResponseStream, Part, SessionId, UserId};
+use adk_rust::{
+    Content, Llm, LlmRequest, LlmResponse, LlmResponseStream, Part, ReadonlyContext, SessionId,
+    Tool, Toolset, UserId,
+};
 use adspace_agent::agent::{self, build_credential_manager};
 use adspace_agent::config::{APP_NAME, CompactionSettings, Settings};
 use adspace_agent::services;
+use adspace_agent::tools::bigquery::BigQueryToolset;
+use adspace_agent::tools::cm360_trafficking::{Cm360Services, Cm360TraffickingToolset};
+use adspace_agent::tools::ui::ui_toolset;
+use adspace_agent::tools::utilities::utilities_toolset;
 use async_trait::async_trait;
 use futures::StreamExt;
 
@@ -281,6 +288,135 @@ async fn agent_runs_a_tool_turn_and_persists_artifacts_and_memory() {
         !found.memories.is_empty(),
         "memory populated after the turn"
     );
+}
+
+/// Minimal context used only to enumerate toolset contents.
+struct ListingContext {
+    content: Content,
+}
+
+impl ReadonlyContext for ListingContext {
+    fn invocation_id(&self) -> &str {
+        "smoke-list-tools"
+    }
+    fn agent_name(&self) -> &str {
+        APP_NAME
+    }
+    fn user_id(&self) -> &str {
+        "tester"
+    }
+    fn app_name(&self) -> &str {
+        APP_NAME
+    }
+    fn session_id(&self) -> &str {
+        "smoke-list-tools"
+    }
+    fn branch(&self) -> &str {
+        ""
+    }
+    fn user_content(&self) -> &Content {
+        &self.content
+    }
+}
+
+async fn tools_of(toolset: &dyn Toolset) -> Vec<Arc<dyn Tool>> {
+    let ctx: Arc<dyn ReadonlyContext> = Arc::new(ListingContext {
+        content: Content::new("user"),
+    });
+    toolset.tools(ctx).await.expect("toolset enumerates")
+}
+
+/// Cheap, offline checks on the locally built toolsets: tool counts, the
+/// CM360 trafficking tools, and that read-only/concurrency flags match what
+/// each tool actually does (adk runs non-read-only tools serially).
+#[tokio::test]
+async fn local_toolsets_expose_expected_tools_and_flags() {
+    let credentials = build_credential_manager(&settings());
+
+    // BigQuery: the four adk-compatible tools, acting with the user's OAuth
+    // token. In read-only mode (the default) every tool is read-only and
+    // concurrency-safe and the toolset asks for the read-only scope only.
+    let bigquery = BigQueryToolset::new(credentials.clone()).with_project(Some("proj".into()));
+    assert_eq!(bigquery.name(), "bigquery");
+    assert_eq!(
+        agent::list_tool_names(&bigquery).await.unwrap(),
+        vec![
+            "bigquery_list_datasets",
+            "bigquery_list_tables",
+            "bigquery_get_table_schema",
+            "bigquery_execute_sql",
+        ]
+    );
+    assert_eq!(
+        bigquery.scopes(),
+        vec!["https://www.googleapis.com/auth/bigquery.readonly"]
+    );
+    for tool in tools_of(&bigquery).await {
+        assert!(tool.is_read_only(), "{} is read-only", tool.name());
+        assert!(
+            tool.is_concurrency_safe(),
+            "{} is concurrency-safe",
+            tool.name()
+        );
+    }
+    let writable = BigQueryToolset::new(credentials.clone()).with_read_only(false);
+    assert_eq!(
+        writable.scopes(),
+        vec!["https://www.googleapis.com/auth/bigquery"]
+    );
+    let execute = tools_of(&writable)
+        .await
+        .into_iter()
+        .find(|t| t.name() == "bigquery_execute_sql")
+        .expect("bigquery_execute_sql present");
+    assert!(!execute.is_read_only(), "DML allowed ⇒ not read-only");
+
+    // CM360 trafficking: exactly the two workflow tools, both mutating
+    // (they stage artifacts and write to CM360), so neither is read-only.
+    let cm360 = Cm360TraffickingToolset::new(Cm360Services {
+        credentials,
+        api_override: None,
+    });
+    assert_eq!(cm360.name(), "cm360_trafficking");
+    assert_eq!(
+        agent::list_tool_names(&cm360).await.unwrap(),
+        vec!["parse_sheet_tool", "traffic_campaigns_in_cm360_tool"]
+    );
+    for tool in tools_of(&cm360).await {
+        assert!(
+            !tool.is_read_only(),
+            "{} mutates session/CM360 state and must not be read-only",
+            tool.name()
+        );
+    }
+    let (count, bytes) = agent::declaration_size(&cm360).await.unwrap();
+    assert_eq!(count, 2);
+    assert!(bytes > 0, "CM360 declarations serialise");
+
+    // Utilities: the artifact listing tool is read-only and concurrency-safe.
+    let utilities = utilities_toolset();
+    let utility_tools = tools_of(&utilities).await;
+    let list_files = utility_tools
+        .iter()
+        .find(|t| t.name() == "list_user_files")
+        .expect("list_user_files present");
+    assert!(list_files.is_read_only());
+    assert!(list_files.is_concurrency_safe());
+
+    // UI rendering: every `render_*` tool only emits UI and is read-only.
+    let ui = ui_toolset();
+    let ui_tools = tools_of(&ui).await;
+    assert!(!ui_tools.is_empty(), "UI toolset exposes render tools");
+    for tool in &ui_tools {
+        assert!(
+            tool.name().starts_with("render_"),
+            "unexpected UI tool {}",
+            tool.name()
+        );
+        assert!(tool.is_read_only(), "{} should be read-only", tool.name());
+    }
+    let (ui_count, _) = agent::declaration_size(&ui).await.unwrap();
+    assert_eq!(ui_count, ui_tools.len());
 }
 
 #[tokio::test]

@@ -25,18 +25,32 @@
 //! code calls `int()` on both sides and would raise `TypeError` if CM360 did
 //! not return a `weight`; here a missing weight on either side simply skips
 //! the weight comparison.
+//!
+//! Patch semantics worth knowing (see [`diff_ad`] / [`diff_placement`]):
+//!
+//! - `placementAssignments` are **merged** (existing assignments are kept and
+//!   missing ones appended, see [`reconcile_missing_ad_placements`]);
+//! - `creativeRotation` and `eventTagOverrides` are **replaced wholesale** by
+//!   the sheet's lists whenever they differ — a sheet row therefore has to
+//!   list every creative / event tag the ad should keep. An ad whose sheet
+//!   rows name no event tags at all is treated as "no change" for
+//!   `eventTagOverrides` (an empty list never clears existing overrides);
+//! - ad `startTime` / `endTime` cells without a time component are compared
+//!   by UTC calendar day only, so an ad that CM360 starts at `04:00Z` is not
+//!   re-patched to midnight every run.
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::bail;
+use anyhow::{Context, bail};
+use chrono::NaiveTime;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::client::Cm360Api;
 use super::grouping::EntityMap;
-use super::sheet::{format_date, normalize_iso_datetime};
+use super::sheet::{format_date, normalize_iso_datetime, parse_datetime};
 
 /// A single CM360 API operation produced by the reconciliation step.
 ///
@@ -171,11 +185,88 @@ fn diff_size(
     }
 }
 
+/// Re-aligns the CM360 `pricingPeriods` of a placement with a new flight
+/// (`new_start` / `new_end`, `YYYY-MM-DD` strings; `None` keeps the
+/// corresponding bound open) without ever producing overlapping or inverted
+/// periods:
+///
+/// - no periods → one period spanning the new flight;
+/// - one period → its dates become the new flight;
+/// - several periods → they are sorted by `startDate`, periods entirely
+///   outside the new flight are dropped, partially overlapping ones are
+///   clamped to it, and the first / last surviving period is stretched to
+///   the new start / end so the flight stays covered (falling back to a
+///   single new period when nothing survives).
+///
+/// Other period fields (`units`, `rateOrCostNanos`, ...) are preserved.
+fn realign_pricing_periods(
+    cm_periods: &[Value],
+    new_start: Option<&str>,
+    new_end: Option<&str>,
+) -> Vec<Value> {
+    let single = || vec![json!({"startDate": new_start, "endDate": new_end})];
+    if cm_periods.is_empty() {
+        return single();
+    }
+
+    let with_dates = |period: &Value, start: Option<&str>, end: Option<&str>| -> Value {
+        let mut p = period.as_object().cloned().unwrap_or_default();
+        if let Some(start) = start {
+            p.insert("startDate".into(), json!(start));
+        }
+        if let Some(end) = end {
+            p.insert("endDate".into(), json!(end));
+        }
+        Value::Object(p)
+    };
+    if cm_periods.len() == 1 {
+        return vec![with_dates(&cm_periods[0], new_start, new_end)];
+    }
+
+    // ISO dates compare correctly as strings.
+    let date_of =
+        |period: &Value, key: &str| format_date(value_to_opt_string(period.get(key)).as_deref());
+    let mut sorted: Vec<&Value> = cm_periods.iter().collect();
+    sorted.sort_by_key(|period| date_of(period, "startDate"));
+
+    let mut kept: Vec<Value> = Vec::new();
+    for period in sorted {
+        let start = date_of(period, "startDate");
+        let end = date_of(period, "endDate");
+        let before_flight = matches!((end.as_deref(), new_start), (Some(e), Some(s)) if e < s);
+        let after_flight = matches!((start.as_deref(), new_end), (Some(st), Some(en)) if st > en);
+        if before_flight || after_flight {
+            warn!(
+                "Dropping pricing period {start:?}–{end:?} that lies outside the new flight \
+                 {new_start:?}–{new_end:?}."
+            );
+            continue;
+        }
+        let clamped_start = match (start.as_deref(), new_start) {
+            (Some(st), Some(s)) if st < s => Some(s),
+            _ => None,
+        };
+        let clamped_end = match (end.as_deref(), new_end) {
+            (Some(e), Some(en)) if e > en => Some(en),
+            _ => None,
+        };
+        kept.push(with_dates(period, clamped_start, clamped_end));
+    }
+    if kept.is_empty() {
+        return single();
+    }
+    let last = kept.len() - 1;
+    kept[0] = with_dates(&kept[0], new_start, None);
+    kept[last] = with_dates(&kept[last], None, new_end);
+    kept
+}
+
 /// Diffs sheet placement fields against an existing CM360 placement.
 ///
 /// Compares only `pricingSchedule.startDate` / `endDate` (re-aligning the
-/// `pricingPeriods` when a date changes), `activeStatus` and `size`. The
-/// `name` is never diffed (it is the matching key).
+/// `pricingPeriods` when a date changes, see [`realign_pricing_periods`]),
+/// `activeStatus` and `size`. The `name` is never diffed (it is the matching
+/// key).
 pub fn diff_placement(sheet_placement: &Value, cm_placement: &Value) -> (Value, Vec<String>) {
     let mut patch_payload = Map::new();
     let mut diff_fields: Vec<String> = Vec::new();
@@ -217,20 +308,14 @@ pub fn diff_placement(sheet_placement: &Value, cm_placement: &Value) -> (Value, 
             .get("pricingPeriods")
             .and_then(Value::as_array)
             .map_or(&[][..], Vec::as_slice);
-        let updated_periods: Vec<Value> = if cm_periods.is_empty() {
-            vec![json!({"startDate": new_start, "endDate": new_end})]
-        } else {
-            cm_periods
-                .iter()
-                .map(|period| {
-                    let mut p = period.as_object().cloned().unwrap_or_default();
-                    p.insert("startDate".into(), json!(new_start));
-                    p.insert("endDate".into(), json!(new_end));
-                    Value::Object(p)
-                })
-                .collect()
-        };
-        pricing_patch.insert("pricingPeriods".into(), Value::Array(updated_periods));
+        pricing_patch.insert(
+            "pricingPeriods".into(),
+            Value::Array(realign_pricing_periods(
+                cm_periods,
+                new_start.as_deref(),
+                new_end.as_deref(),
+            )),
+        );
     }
 
     if !pricing_patch.is_empty() {
@@ -310,14 +395,38 @@ fn event_tag_override_map(ad: &Value) -> HashMap<String, Value> {
         .collect()
 }
 
+/// True when a sheet ad time differs from the CM360 one at the granularity
+/// the sheet expressed.
+///
+/// Both inputs are [`normalize_iso_datetime`] outputs. A sheet value at
+/// exactly midnight UTC came from a date-only cell (`"6/15/2026"`), so it is
+/// compared by UTC calendar day: CM360 ads that start at `2026-06-15T04:00Z`
+/// or end at `2026-06-15T23:59:59Z` do not get re-patched to midnight on
+/// every run. Any other sheet value is compared as an instant. Unparsable
+/// values fall back to a plain string comparison; a missing CM360 value
+/// always differs.
+fn ad_time_differs(sheet: &str, cm: Option<&str>) -> bool {
+    let Some(cm) = cm else {
+        return true;
+    };
+    match (parse_datetime(sheet), parse_datetime(cm)) {
+        (Some(s), Some(c)) if s.time() == NaiveTime::MIN => s.date() != c.date(),
+        (Some(s), Some(c)) => s != c,
+        _ => sheet != cm,
+    }
+}
+
 /// Diffs sheet ad fields against an existing CM360 ad.
 ///
-/// Compares `startTime`, `endTime`, `deliverySchedule`, `dynamicClickTracker`,
-/// the ad-level `clickThroughUrl` (`ad_level_clickThroughUrl`),
-/// `placementAssignments`, `creativeRotation` (weights are only compared when
-/// CM360 has more than one creative in the rotation; creative-level URL
-/// changes are reported as `creative_level_clickThroughUrl`) and
-/// `eventTagOverrides`. `name` and `type` are never diffed.
+/// Compares `startTime` / `endTime` (see [`ad_time_differs`] for the
+/// date-only rule), `deliverySchedule`, `dynamicClickTracker`, the ad-level
+/// `clickThroughUrl` (`ad_level_clickThroughUrl`), `placementAssignments`,
+/// `creativeRotation` (weights are only compared when CM360 has more than one
+/// creative in the rotation; creative-level URL changes are reported as
+/// `creative_level_clickThroughUrl`) and `eventTagOverrides` (an empty sheet
+/// list means "no change"). `creativeRotation` and `eventTagOverrides`
+/// patches carry the complete sheet lists and replace the CM360 lists
+/// wholesale. `name` and `type` are never diffed.
 pub fn diff_ad(sheet_ad: &Value, cm_ad: &Value) -> (Value, Vec<String>) {
     let mut patch_payload = Map::new();
     let mut diff_fields: Vec<String> = Vec::new();
@@ -328,7 +437,7 @@ pub fn diff_ad(sheet_ad: &Value, cm_ad: &Value) -> (Value, Vec<String>) {
     let sheet_start = iso(sheet_ad, "startTime");
     let cm_start = iso(cm_ad, "startTime");
     if let Some(start) = sheet_start.as_deref().filter(|s| !s.is_empty())
-        && sheet_start != cm_start
+        && ad_time_differs(start, cm_start.as_deref())
     {
         patch_payload.insert("startTime".into(), json!(start));
         diff_fields.push("startTime".into());
@@ -336,7 +445,7 @@ pub fn diff_ad(sheet_ad: &Value, cm_ad: &Value) -> (Value, Vec<String>) {
     let sheet_end = iso(sheet_ad, "endTime");
     let cm_end = iso(cm_ad, "endTime");
     if let Some(end) = sheet_end.as_deref().filter(|s| !s.is_empty())
-        && sheet_end != cm_end
+        && ad_time_differs(end, cm_end.as_deref())
     {
         patch_payload.insert("endTime".into(), json!(end));
         diff_fields.push("endTime".into());
@@ -439,27 +548,30 @@ pub fn diff_ad(sheet_ad: &Value, cm_ad: &Value) -> (Value, Vec<String>) {
                 if rotation_changed {
                     diff_fields.push("creativeRotation".into());
                 }
-                if creative_rotation_url_changed
-                    && !diff_fields.iter().any(|f| f == "clickThroughUrl")
-                {
+                if creative_rotation_url_changed {
                     diff_fields.push("creative_level_clickThroughUrl".into());
                 }
             }
         }
     }
 
-    // 7. Diff eventTagOverrides.
+    // 7. Diff eventTagOverrides. An empty sheet list cannot express "remove
+    //    every override" (it is what `group_ads` emits for rows without event
+    //    tags), so it is treated as "no change"; a non-empty list replaces the
+    //    CM360 overrides wholesale when it differs.
     let s_overrides = event_tag_override_map(sheet_ad);
-    let c_overrides = event_tag_override_map(cm_ad);
-    if s_overrides != c_overrides {
-        patch_payload.insert(
-            "eventTagOverrides".into(),
-            sheet_ad
-                .get("eventTagOverrides")
-                .cloned()
-                .unwrap_or(Value::Null),
-        );
-        diff_fields.push("eventTagOverrides".into());
+    if !s_overrides.is_empty() {
+        let c_overrides = event_tag_override_map(cm_ad);
+        if s_overrides != c_overrides {
+            patch_payload.insert(
+                "eventTagOverrides".into(),
+                sheet_ad
+                    .get("eventTagOverrides")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            );
+            diff_fields.push("eventTagOverrides".into());
+        }
     }
 
     (Value::Object(patch_payload), diff_fields)
@@ -551,15 +663,22 @@ pub fn reconcile_missing_ad_placements(
 }
 
 /// Indexes CM360 resources by their trimmed `name` (only resources with a
-/// truthy `name` and `id`; later duplicates overwrite earlier ones).
+/// truthy `name` and `id`). Names are the sheet's matching keys, so a
+/// duplicate name is ambiguous: the later resource wins (Python dict
+/// semantics) and a warning naming both IDs is logged.
 fn index_by_name(existing: &[Value]) -> ResourceMap {
     let mut by_name = ResourceMap::new();
     for resource in existing {
         if truthy(resource.get("name")) && truthy(resource.get("id")) {
-            by_name.insert(
-                value_to_string(resource.get("name")).trim().to_string(),
-                resource.clone(),
-            );
+            let name = value_to_string(resource.get("name")).trim().to_string();
+            if let Some(previous) = by_name.insert(name.clone(), resource.clone()) {
+                warn!(
+                    "CM360 returned more than one resource named {name:?} (IDs {} and {}); \
+                     using the last one.",
+                    value_to_string(previous.get("id")),
+                    value_to_string(resource.get("id"))
+                );
+            }
         }
     }
     by_name
@@ -632,7 +751,9 @@ pub fn map_creative_ids(ads: &mut EntityMap, existing: &[Value]) -> anyhow::Resu
 ///
 /// # Errors
 ///
-/// `"Failed to fetch placements from Campaign Manager 360: {e}"` or a
+/// `"Failed to fetch placements from Campaign Manager 360"` (wrapping the
+/// API error, so an [`AuthRequired`](crate::auth::AuthRequired) in the chain
+/// stays detectable by [`auth_required`](crate::auth::auth_required)) or a
 /// [`map_placement_ids`] error.
 pub async fn resolve_placement_ids(
     api: &dyn Cm360Api,
@@ -651,17 +772,14 @@ pub async fn resolve_placement_ids(
     let campaign_ids = campaign_id
         .filter(|c| !c.is_empty())
         .map(|c| vec![c.to_string()]);
-    let existing = match api
+    let existing = api
         .list_placements(
             profile_id,
             advertiser_ids.as_deref(),
             campaign_ids.as_deref(),
         )
         .await
-    {
-        Ok(existing) => existing,
-        Err(e) => bail!("Failed to fetch placements from Campaign Manager 360: {e}"),
-    };
+        .context("Failed to fetch placements from Campaign Manager 360")?;
     map_placement_ids(ads, &existing)
 }
 
@@ -670,8 +788,8 @@ pub async fn resolve_placement_ids(
 ///
 /// # Errors
 ///
-/// `"Failed to fetch creatives from Campaign Manager 360: {e}"` or a
-/// [`map_creative_ids`] error.
+/// `"Failed to fetch creatives from Campaign Manager 360"` (wrapping the API
+/// error, chain preserved) or a [`map_creative_ids`] error.
 pub async fn resolve_creative_ids(
     api: &dyn Cm360Api,
     ads: &mut EntityMap,
@@ -683,13 +801,10 @@ pub async fn resolve_creative_ids(
         "Fetching existing creatives from CM360 for Advertiser ID: {advertiser_id:?}, \
          Campaign ID: {campaign_id:?}"
     );
-    let existing = match api
+    let existing = api
         .list_creatives(profile_id, advertiser_id, campaign_id)
         .await
-    {
-        Ok(existing) => existing,
-        Err(e) => bail!("Failed to fetch creatives from Campaign Manager 360: {e}"),
-    };
+        .context("Failed to fetch creatives from Campaign Manager 360")?;
     map_creative_ids(ads, &existing)
 }
 
@@ -888,9 +1003,14 @@ pub fn build_operations(
     operations
 }
 
-/// Fetches the existing event tags and ads (ads filtered by the placement IDs
-/// assigned in `ads`) and reconciles them into operations via
-/// [`build_operations`] (Python `_resolve_and_build_operations`).
+/// Fetches the existing event tags and ads and reconciles them into
+/// operations via [`build_operations`] (Python
+/// `_resolve_and_build_operations`).
+///
+/// Ads are listed by advertiser / campaign only — deliberately **not**
+/// filtered by the placement IDs assigned in the sheet — so an existing ad
+/// that the sheet re-targets to a completely new set of placements is still
+/// found and patched instead of being inserted a second time.
 #[allow(clippy::too_many_arguments)]
 pub async fn resolve_and_build_operations(
     api: &dyn Cm360Api,
@@ -905,21 +1025,17 @@ pub async fn resolve_and_build_operations(
     existing_creatives: Option<&ResourceMap>,
 ) -> anyhow::Result<Vec<Operation>> {
     info!("Fetching existing event tags and ads from CM360 for reconciliation...");
-    let assigned_placement_ids = extract_assigned_placement_ids(ads);
     let existing_tags_list = api
         .list_event_tags(profile_id, advertiser_id, campaign_id)
-        .await?;
+        .await
+        .context("Failed to fetch event tags from Campaign Manager 360")?;
     let campaign_ids = campaign_id
         .filter(|c| !c.is_empty())
         .map(|c| vec![c.to_string()]);
     let existing_ads_list = api
-        .list_ads(
-            profile_id,
-            advertiser_id,
-            campaign_ids.as_deref(),
-            (!assigned_placement_ids.is_empty()).then_some(assigned_placement_ids.as_slice()),
-        )
-        .await?;
+        .list_ads(profile_id, advertiser_id, campaign_ids.as_deref(), None)
+        .await
+        .context("Failed to fetch ads from Campaign Manager 360")?;
 
     Ok(build_operations(
         ads,
@@ -1052,16 +1168,60 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            err.to_string(),
+            format!("{err:#}"),
             "Failed to fetch placements from Campaign Manager 360: boom"
         );
         let err = resolve_creative_ids(&failing, &mut ads, "1", None, None)
             .await
             .unwrap_err();
         assert_eq!(
-            err.to_string(),
+            format!("{err:#}"),
             "Failed to fetch creatives from Campaign Manager 360: boom"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_errors_keep_auth_required_in_the_chain() {
+        use crate::auth::{AuthRequired, auth_required};
+
+        let required = AuthRequired {
+            auth_url: "https://accounts.example/auth".into(),
+            scopes: vec!["scope".into()],
+            message: "Please authorize".into(),
+        };
+        let api = MockApi::new().with_list_failure(move || anyhow::Error::new(required.clone()));
+        let mut ads = EntityMap::new();
+
+        let err = resolve_placement_ids(&api, &mut ads, "1", None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            auth_required(&err).map(|r| r.auth_url.as_str()),
+            Some("https://accounts.example/auth")
+        );
+        assert!(
+            err.to_string()
+                .starts_with("Failed to fetch placements from Campaign Manager 360")
+        );
+        let err = resolve_creative_ids(&api, &mut ads, "1", None, None)
+            .await
+            .unwrap_err();
+        assert!(auth_required(&err).is_some());
+        let err = resolve_and_build_operations(
+            &api,
+            &mut ads,
+            &EntityMap::new(),
+            "1",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(auth_required(&err).is_some());
     }
 
     #[test]
@@ -1215,20 +1375,64 @@ mod tests {
         assert_eq!(ads["Existing Ad"]["eventTagOverrides"][0]["id"], "tag_999");
         assert!(ads["Existing Ad"].get("id").is_none());
 
-        // The ads list call was filtered by the assigned placement IDs.
+        // The ads list call is scoped by campaign only (never by the sheet's
+        // placement IDs, see `resolve_and_build_operations`).
         let calls = api.list_calls();
         assert_eq!(calls[0].method, "list_event_tags");
         assert_eq!(calls[0].advertiser, vec!["13641571".to_string()]);
         assert_eq!(calls[0].campaigns, vec!["30535365".to_string()]);
         assert_eq!(calls[1].method, "list_ads");
+        assert_eq!(calls[1].advertiser, vec!["13641571".to_string()]);
         assert_eq!(calls[1].campaigns, vec!["30535365".to_string()]);
-        assert_eq!(
-            calls[1].placements,
-            vec![
-                "mock_placement_2".to_string(),
-                "mock_placement_1".to_string()
-            ]
-        );
+        assert!(calls[1].placements.is_empty());
+    }
+
+    #[tokio::test]
+    async fn existing_ad_retargeted_to_new_placements_is_patched_not_inserted() {
+        // The sheet moves "Existing Ad" to placements CM360 has never seen on
+        // it; the ad must still be found (listed by campaign) and patched.
+        let mut ads = entity_map(vec![(
+            "Existing Ad",
+            json!({
+                "name": "Existing Ad",
+                "type": "AD_SERVING_STANDARD_AD",
+                "placementAssignments": [{"placementId": "p_new_1"}, {"placementId": "p_new_2"}],
+                "eventTagOverrides": [],
+            }),
+        )]);
+        let api = MockApi::new().with_ads(vec![json!({
+            "name": "Existing Ad",
+            "id": "ad_1",
+            "placementAssignments": [{"placementId": "p_old"}],
+        })]);
+        let ops = resolve_and_build_operations(
+            &api,
+            &mut ads,
+            &EntityMap::new(),
+            "1",
+            Some("adv"),
+            Some("camp"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].operation, AD_PATCH_OPERATION);
+        assert_eq!(ops[0].id.as_deref(), Some("ad_1"));
+        let placement_ids: Vec<&str> = ops[0].payload["placementAssignments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["placementId"].as_str().unwrap())
+            .collect();
+        assert_eq!(placement_ids, vec!["p_old", "p_new_1", "p_new_2"]);
+        let calls = api.list_calls();
+        assert_eq!(calls[1].method, "list_ads");
+        assert_eq!(calls[1].campaigns, vec!["camp".to_string()]);
+        assert!(calls[1].placements.is_empty());
     }
 
     #[test]
@@ -1358,6 +1562,80 @@ mod tests {
     }
 
     #[test]
+    fn realign_pricing_periods_never_overlaps_multi_period_schedules() {
+        let periods = vec![
+            json!({"startDate": "2026-07-01", "endDate": "2026-07-31", "units": "2"}),
+            json!({"startDate": "2026-06-01", "endDate": "2026-06-30", "units": "1"}),
+            json!({"startDate": "2026-08-01", "endDate": "2026-08-31", "units": "3"}),
+        ];
+        // Flight shrinks inside the schedule: outer periods are clamped, the
+        // middle one is untouched, nothing overlaps.
+        let realigned = realign_pricing_periods(&periods, Some("2026-06-15"), Some("2026-08-15"));
+        assert_eq!(
+            realigned,
+            vec![
+                json!({"startDate": "2026-06-15", "endDate": "2026-06-30", "units": "1"}),
+                json!({"startDate": "2026-07-01", "endDate": "2026-07-31", "units": "2"}),
+                json!({"startDate": "2026-08-01", "endDate": "2026-08-15", "units": "3"}),
+            ]
+        );
+        // Flight grows: first start / last end are stretched to cover it.
+        let realigned = realign_pricing_periods(&periods, Some("2026-05-01"), Some("2026-09-30"));
+        assert_eq!(realigned[0]["startDate"], "2026-05-01");
+        assert_eq!(realigned[0]["endDate"], "2026-06-30");
+        assert_eq!(realigned[2]["startDate"], "2026-08-01");
+        assert_eq!(realigned[2]["endDate"], "2026-09-30");
+        // Flight moves past the first period: that period is dropped.
+        let realigned = realign_pricing_periods(&periods, Some("2026-07-15"), Some("2026-08-31"));
+        assert_eq!(
+            realigned,
+            vec![
+                json!({"startDate": "2026-07-15", "endDate": "2026-07-31", "units": "2"}),
+                json!({"startDate": "2026-08-01", "endDate": "2026-08-31", "units": "3"}),
+            ]
+        );
+        // Flight disjoint from every period: a single fresh period.
+        let realigned = realign_pricing_periods(&periods, Some("2027-01-01"), Some("2027-01-31"));
+        assert_eq!(
+            realigned,
+            vec![json!({"startDate": "2027-01-01", "endDate": "2027-01-31"})]
+        );
+        // Only one bound changes: the other bound is left alone.
+        let realigned = realign_pricing_periods(&periods, None, Some("2026-08-15"));
+        assert_eq!(realigned[0]["startDate"], "2026-06-01");
+        assert_eq!(realigned[2]["endDate"], "2026-08-15");
+        // Single period: both dates simply follow the flight.
+        let realigned = realign_pricing_periods(&periods[..1], Some("2026-01-01"), None);
+        assert_eq!(
+            realigned,
+            vec![json!({"startDate": "2026-01-01", "endDate": "2026-07-31", "units": "2"})]
+        );
+
+        // Through `diff_placement`: a multi-period CM360 schedule never gets
+        // identical dates stamped onto every period.
+        let cm_placement = json!({
+            "pricingSchedule": {
+                "startDate": "2026-06-01",
+                "endDate": "2026-08-31",
+                "pricingPeriods": periods,
+            },
+        });
+        let sheet_placement = json!({
+            "pricingSchedule": {"startDate": "2026-06-01", "endDate": "2026-09-30"},
+        });
+        let (patch_payload, diff_fields) = diff_placement(&sheet_placement, &cm_placement);
+        assert_eq!(diff_fields, vec!["pricingSchedule.endDate"]);
+        let patched = patch_payload["pricingSchedule"]["pricingPeriods"]
+            .as_array()
+            .unwrap();
+        assert_eq!(patched.len(), 3);
+        for pair in patched.windows(2) {
+            assert!(pair[0]["endDate"].as_str() < pair[1]["startDate"].as_str());
+        }
+        assert_eq!(patched[2]["endDate"], "2026-09-30");
+    }
+
+    #[test]
     fn test_diff_creative_never_diffs_name() {
         let (patch_payload, diff_fields) = diff_creative(
             &json!({"name": "Creative Renamed in Sheet", "size": {"width": 300, "height": 250}}),
@@ -1444,6 +1722,49 @@ mod tests {
         });
         let (_, diff_fields) = diff_ad(&sheet_ad, &json!({}));
         assert!(diff_fields.is_empty());
+    }
+
+    #[test]
+    fn diff_ad_compares_date_only_cells_by_calendar_day() {
+        // Date-only sheet cells (midnight UTC after normalisation) match any
+        // CM360 time on the same UTC day, so nothing is re-patched.
+        let sheet_ad = json!({"startTime": "6/15/2026", "endTime": "2026-06-30"});
+        let cm_ad = json!({
+            "startTime": "2026-06-15T04:00:00.000Z",
+            "endTime": "2026-06-30T23:59:59Z",
+        });
+        let (patch_payload, diff_fields) = diff_ad(&sheet_ad, &cm_ad);
+        assert!(diff_fields.is_empty(), "{diff_fields:?}");
+        assert_eq!(patch_payload, json!({}));
+
+        // A different day still patches (to midnight UTC).
+        let sheet_ad = json!({"startTime": "6/16/2026", "endTime": "2026-06-30"});
+        let (patch_payload, diff_fields) = diff_ad(&sheet_ad, &cm_ad);
+        assert_eq!(diff_fields, vec!["startTime"]);
+        assert_eq!(patch_payload["startTime"], "2026-06-16T00:00:00Z");
+
+        // Explicit times are compared as instants, across offsets.
+        let sheet_ad = json!({"startTime": "2026-06-15T00:00:00-04:00"});
+        let cm_ad = json!({"startTime": "2026-06-15T04:00:00Z"});
+        let (_, diff_fields) = diff_ad(&sheet_ad, &cm_ad);
+        assert!(diff_fields.is_empty());
+        let sheet_ad = json!({"startTime": "2026-06-15T01:00:00-04:00"});
+        let (patch_payload, diff_fields) = diff_ad(&sheet_ad, &cm_ad);
+        assert_eq!(diff_fields, vec!["startTime"]);
+        assert_eq!(patch_payload["startTime"], "2026-06-15T05:00:00Z");
+
+        // Missing / unparsable CM360 values differ.
+        assert!(ad_time_differs("2026-06-15T00:00:00Z", None));
+        assert!(ad_time_differs("2026-06-15T00:00:00Z", Some("garbage")));
+        assert!(!ad_time_differs("garbage", Some("garbage")));
+        assert!(!ad_time_differs(
+            "2026-06-15T00:00:00Z",
+            Some("2026-06-15T23:00:00Z")
+        ));
+        assert!(ad_time_differs(
+            "2026-06-15T12:00:00Z",
+            Some("2026-06-15T12:00:01Z")
+        ));
     }
 
     #[test]
@@ -1574,11 +1895,23 @@ mod tests {
         let (_, diff_fields) = diff_ad(&sheet_ad, &cm_ad);
         assert!(diff_fields.is_empty());
 
-        // Empty sheet placements never diff, but an empty sheet override list
-        // against existing CM360 overrides does (the map comparison is strict).
+        // Empty sheet placements never diff, and an empty sheet override list
+        // is "no change" — it must never clear existing CM360 overrides.
         let (patch_payload, diff_fields) = diff_ad(&json!({}), &cm_ad);
+        assert!(diff_fields.is_empty(), "{diff_fields:?}");
+        assert_eq!(patch_payload, json!({}));
+        let (_, diff_fields) = diff_ad(&json!({"eventTagOverrides": []}), &cm_ad);
+        assert!(diff_fields.is_empty());
+        // A non-empty sheet list that differs replaces the CM360 list.
+        let (patch_payload, diff_fields) = diff_ad(
+            &json!({"eventTagOverrides": [{"id": "9", "enabled": true}]}),
+            &cm_ad,
+        );
         assert_eq!(diff_fields, vec!["eventTagOverrides"]);
-        assert_eq!(patch_payload["eventTagOverrides"], Value::Null);
+        assert_eq!(
+            patch_payload["eventTagOverrides"],
+            json!([{"id": "9", "enabled": true}])
+        );
         // Missing overrides on both sides are equal.
         let (_, diff_fields) = diff_ad(
             &json!({}),
@@ -1723,7 +2056,22 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(err.to_string(), "down");
+        assert_eq!(
+            format!("{err:#}"),
+            "Failed to fetch event tags from Campaign Manager 360: down"
+        );
+        assert_eq!(err.root_cause().to_string(), "down");
+    }
+
+    #[test]
+    fn index_by_name_last_duplicate_wins() {
+        let indexed = index_by_name(&[
+            json!({"name": "Dup", "id": "1"}),
+            json!({"name": " Dup ", "id": "2"}),
+            json!({"name": "Other", "id": "3"}),
+        ]);
+        assert_eq!(indexed.len(), 2);
+        assert_eq!(indexed["Dup"]["id"], "2");
     }
 
     #[test]
@@ -1936,9 +2284,9 @@ mod tests {
         let op_types: Vec<&str> = ops.iter().map(|op| op.operation.as_str()).collect();
         assert!(!op_types.contains(&"dfareporting.creatives.insert"));
         assert!(op_types.contains(&"dfareporting.ads.insert"));
-        // The mocked CM360 placement / creative carry no size, so the 300x250
-        // sheet entities produce size patches ahead of the ad insert (exactly
-        // what the Python pipeline yields with the same mocks).
+        // The mocked CM360 placement / creative carry no pricing schedule or
+        // size, so the sheet's flight dates and 300x250 size produce patches
+        // ahead of the ad insert.
         assert_eq!(
             op_types,
             vec![
@@ -1952,13 +2300,34 @@ mod tests {
             ops[0].id.as_deref(),
             Some("mock_placement_id_Test~Placement~1 Test")
         );
+        // The flight dates come from the canonical `Pricing Schedule Start /
+        // End Date` columns of the sheet.
+        assert_eq!(
+            placements["Test~Placement~1 Test"]["pricingSchedule"],
+            json!({"startDate": "3000-08-29", "endDate": "3000-09-25", "pricingType": ""})
+        );
         assert_eq!(
             ops[0].payload,
-            json!({"activeStatus": "PLACEMENT_STATUS_ACTIVE", "size": {"width": 300, "height": 250}})
+            json!({
+                "pricingSchedule": {
+                    "startDate": "3000-08-29",
+                    "endDate": "3000-09-25",
+                    "pricingPeriods": [{"startDate": "3000-08-29", "endDate": "3000-09-25"}],
+                },
+                "activeStatus": "PLACEMENT_STATUS_ACTIVE",
+                "size": {"width": 300, "height": 250},
+            })
         );
         assert_eq!(
             ops[0].diff_fields.as_deref(),
-            Some(&["activeStatus".to_string(), "size".to_string()][..])
+            Some(
+                &[
+                    "pricingSchedule.startDate".to_string(),
+                    "pricingSchedule.endDate".to_string(),
+                    "activeStatus".to_string(),
+                    "size".to_string()
+                ][..]
+            )
         );
         assert_eq!(ops[1].name, "TEST_ACG~300x250");
         assert_eq!(ops[1].id.as_deref(), Some("999123"));
@@ -2008,6 +2377,11 @@ mod tests {
                 "id": "p1",
                 "activeStatus": "PLACEMENT_STATUS_ACTIVE",
                 "size": {"width": 300, "height": 250},
+                "pricingSchedule": {
+                    "startDate": "3000-08-29",
+                    "endDate": "3000-09-25",
+                    "pricingPeriods": [{"startDate": "3000-08-29", "endDate": "3000-09-25"}],
+                },
             })])
             .with_creatives(vec![json!({"name": "TEST_ACG~300x250", "id": "999123"})])
             .with_ads(vec![json!({

@@ -28,8 +28,17 @@ use adk_rust::{LlmRequest, ReadonlyContext, Result, State, Tool, ToolContext, To
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-/// Session-state key holding the list of enabled lazy toolset names.
+/// Legacy session-state key holding the list of enabled lazy toolset names.
+///
+/// Still honoured when reading (sessions created before the per-toolset keys
+/// keep working) but no longer written: a single array is last-writer-wins
+/// when the model enables two collections in parallel calls of one turn.
 pub const ENABLED_TOOLSETS_STATE_KEY: &str = "enabled_lazy_toolsets";
+
+/// Prefix of the per-toolset session-state keys (`<prefix><toolset name>`
+/// holds `true` once the toolset is enabled). One key per toolset lets
+/// concurrent `enable_toolsets` calls merge instead of overwrite each other.
+pub const ENABLED_TOOLSET_STATE_KEY_PREFIX: &str = "enabled_lazy_toolset:";
 
 /// Name of the activation tool.
 pub const ENABLE_TOOLSETS_TOOL_NAME: &str = "enable_toolsets";
@@ -45,18 +54,30 @@ pub struct LazyToolsetEntry {
     pub tool_count: usize,
 }
 
-fn enabled_names(state: Option<&dyn State>) -> Vec<String> {
+/// Session-state key marking `name` as enabled.
+pub fn toolset_state_key(name: &str) -> String {
+    format!("{ENABLED_TOOLSET_STATE_KEY_PREFIX}{name}")
+}
+
+/// Whether `name` is enabled in `state` (per-toolset key or legacy array).
+fn is_enabled_in(state: Option<&dyn State>, name: &str) -> bool {
+    let Some(state) = state else {
+        return false;
+    };
+    if state
+        .get(&toolset_state_key(name))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
     state
-        .and_then(|s| s.get(ENABLED_TOOLSETS_STATE_KEY))
+        .get(ENABLED_TOOLSETS_STATE_KEY)
         .and_then(|v| {
-            v.as_array().map(|a| {
-                a.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
+            v.as_array()
+                .map(|a| a.iter().filter_map(Value::as_str).any(|n| n == name))
         })
-        .unwrap_or_default()
+        .unwrap_or(false)
 }
 
 /// A toolset whose tools are only exposed once enabled for the session.
@@ -73,7 +94,7 @@ impl LazyToolset {
     }
 
     fn is_enabled(&self, ctx: &dyn ReadonlyContext) -> bool {
-        enabled_names(ctx.state()).iter().any(|n| n == &self.name)
+        is_enabled_in(ctx.state(), &self.name)
     }
 }
 
@@ -179,19 +200,43 @@ impl Tool for EnableToolsetsTool {
         let (valid, unknown): (Vec<String>, Vec<String>) =
             requested.into_iter().partition(|n| known(n));
 
-        let mut enabled = enabled_names(ctx.session().map(|s| s.state()));
-        let mut newly_enabled = Vec::new();
+        // Already enabled: committed session state, plus anything an earlier
+        // call in this same turn has staged in the pending state delta.
+        let mut actions = ctx.actions();
+        let session_state = ctx.session().map(|s| s.state());
+        let was_enabled: Vec<String> = self
+            .entries
+            .iter()
+            .map(|e| e.name.clone())
+            .filter(|name| {
+                is_enabled_in(session_state, name)
+                    || actions
+                        .state_delta
+                        .get(&toolset_state_key(name))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+            })
+            .collect();
+        let mut newly_enabled: Vec<String> = Vec::new();
         for name in valid {
-            if !enabled.contains(&name) {
-                enabled.push(name.clone());
+            if !was_enabled.contains(&name) && !newly_enabled.contains(&name) {
                 newly_enabled.push(name);
             }
         }
-        let mut actions = ctx.actions();
-        actions
-            .state_delta
-            .insert(ENABLED_TOOLSETS_STATE_KEY.to_string(), json!(enabled));
+        // One key per toolset: parallel calls each add their own keys and the
+        // runner merges the deltas, so no call can erase another's choice.
+        for name in &newly_enabled {
+            actions
+                .state_delta
+                .insert(toolset_state_key(name), Value::Bool(true));
+        }
         ctx.set_actions(actions);
+        let enabled: Vec<String> = self
+            .entries
+            .iter()
+            .map(|e| e.name.clone())
+            .filter(|name| was_enabled.contains(name) || newly_enabled.contains(name))
+            .collect();
 
         let tool_count: usize = self
             .entries
@@ -221,8 +266,8 @@ impl Tool for EnableToolsetsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adk_rust::Content;
     use adk_rust::tool::{BasicToolset, SimpleToolContext};
+    use adk_rust::{CallbackContext, Content, EventActions, MemoryEntry, Session};
     use std::collections::HashMap;
 
     struct Dummy(&'static str);
@@ -287,13 +332,125 @@ mod tests {
 
     fn ctx(enabled: &[&str]) -> Arc<dyn ReadonlyContext> {
         let mut state = HashMap::new();
-        if !enabled.is_empty() {
-            state.insert(ENABLED_TOOLSETS_STATE_KEY.to_string(), json!(enabled));
+        for name in enabled {
+            state.insert(toolset_state_key(name), Value::Bool(true));
         }
         Arc::new(StateCtx {
             state,
             content: Content::new("user"),
         })
+    }
+
+    /// Tool context shaped like the runner's: committed session state is
+    /// reachable through `session()`, `ReadonlyContext::state()` is `None`,
+    /// and the actions are per call.
+    struct SessionCtx {
+        state: HashMap<String, Value>,
+        actions: std::sync::Mutex<EventActions>,
+        content: Content,
+    }
+
+    impl State for SessionCtx {
+        fn get(&self, key: &str) -> Option<Value> {
+            self.state.get(key).cloned()
+        }
+        fn set(&mut self, key: String, value: Value) {
+            self.state.insert(key, value);
+        }
+        fn all(&self) -> HashMap<String, Value> {
+            self.state.clone()
+        }
+    }
+
+    impl ReadonlyContext for SessionCtx {
+        fn invocation_id(&self) -> &str {
+            "inv"
+        }
+        fn agent_name(&self) -> &str {
+            "agent"
+        }
+        fn user_id(&self) -> &str {
+            "user"
+        }
+        fn app_name(&self) -> &str {
+            "app"
+        }
+        fn session_id(&self) -> &str {
+            "session"
+        }
+        fn branch(&self) -> &str {
+            ""
+        }
+        fn user_content(&self) -> &Content {
+            &self.content
+        }
+    }
+
+    impl Session for SessionCtx {
+        fn id(&self) -> &str {
+            "session"
+        }
+        fn app_name(&self) -> &str {
+            "app"
+        }
+        fn user_id(&self) -> &str {
+            "user"
+        }
+        fn state(&self) -> &dyn State {
+            self
+        }
+        fn conversation_history(&self) -> Vec<Content> {
+            Vec::new()
+        }
+    }
+
+    #[async_trait]
+    impl CallbackContext for SessionCtx {
+        fn artifacts(&self) -> Option<Arc<dyn adk_rust::Artifacts>> {
+            None
+        }
+    }
+
+    #[async_trait]
+    impl ToolContext for SessionCtx {
+        fn function_call_id(&self) -> &str {
+            "call"
+        }
+        fn actions(&self) -> EventActions {
+            self.actions.lock().unwrap().clone()
+        }
+        fn set_actions(&self, actions: EventActions) {
+            *self.actions.lock().unwrap() = actions;
+        }
+        async fn search_memory(&self, _query: &str) -> Result<Vec<MemoryEntry>> {
+            Ok(vec![])
+        }
+        fn session(&self) -> Option<&dyn Session> {
+            Some(self)
+        }
+    }
+
+    fn session_ctx(state: HashMap<String, Value>) -> Arc<SessionCtx> {
+        Arc::new(SessionCtx {
+            state,
+            actions: std::sync::Mutex::new(EventActions::default()),
+            content: Content::new("user"),
+        })
+    }
+
+    fn tool() -> EnableToolsetsTool {
+        EnableToolsetsTool::new(vec![
+            LazyToolsetEntry {
+                name: "cm360".into(),
+                summary: "Campaign Manager 360".into(),
+                tool_count: 218,
+            },
+            LazyToolsetEntry {
+                name: "dv360".into(),
+                summary: "Display & Video 360".into(),
+                tool_count: 113,
+            },
+        ])
     }
 
     #[tokio::test]
@@ -306,22 +463,18 @@ mod tests {
         assert!(lazy.tools(ctx(&[])).await.unwrap().is_empty());
         assert!(lazy.tools(ctx(&["other"])).await.unwrap().is_empty());
         assert_eq!(lazy.tools(ctx(&["cm360"])).await.unwrap().len(), 2);
+
+        // Sessions written before the per-toolset keys still work.
+        let legacy = Arc::new(StateCtx {
+            state: HashMap::from([(ENABLED_TOOLSETS_STATE_KEY.to_string(), json!(["cm360"]))]),
+            content: Content::new("user"),
+        });
+        assert_eq!(lazy.tools(legacy).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
     async fn enable_tool_records_state_delta_and_reports_unknown_names() {
-        let tool = EnableToolsetsTool::new(vec![
-            LazyToolsetEntry {
-                name: "cm360".into(),
-                summary: "Campaign Manager 360".into(),
-                tool_count: 218,
-            },
-            LazyToolsetEntry {
-                name: "dv360".into(),
-                summary: "Display & Video 360".into(),
-                tool_count: 113,
-            },
-        ]);
+        let tool = tool();
         assert!(tool.description().contains("`cm360` (218 tools)"));
         let schema = tool.parameters_schema().unwrap();
         assert_eq!(
@@ -335,10 +488,92 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["newly_enabled"], json!(["cm360"]));
+        assert_eq!(out["enabled"], json!(["cm360"]));
         assert_eq!(out["unknown"], json!(["nope"]));
-        assert_eq!(
-            ctx.actions().state_delta[ENABLED_TOOLSETS_STATE_KEY],
-            json!(["cm360"])
+        let delta = ctx.actions().state_delta;
+        assert_eq!(delta[&toolset_state_key("cm360")], json!(true));
+        assert!(
+            !delta.contains_key(ENABLED_TOOLSETS_STATE_KEY),
+            "the legacy array is no longer written"
         );
+    }
+
+    /// Two calls in one turn (Gemini emits parallel calls) must both survive:
+    /// the second call sees the first through the pending delta and only adds
+    /// its own key, so the merged delta enables both collections.
+    #[tokio::test]
+    async fn sequential_calls_in_one_turn_merge_instead_of_overwriting() {
+        let tool = tool();
+        let ctx = session_ctx(HashMap::new());
+        let first = tool
+            .execute(ctx.clone(), json!({"toolset_names": ["cm360"]}))
+            .await
+            .unwrap();
+        assert_eq!(first["newly_enabled"], json!(["cm360"]));
+        let second = tool
+            .execute(ctx.clone(), json!({"toolset_names": ["dv360"]}))
+            .await
+            .unwrap();
+        assert_eq!(second["newly_enabled"], json!(["dv360"]));
+        assert_eq!(second["enabled"], json!(["cm360", "dv360"]));
+        let delta = ctx.actions().state_delta;
+        assert_eq!(delta[&toolset_state_key("cm360")], json!(true));
+        assert_eq!(delta[&toolset_state_key("dv360")], json!(true));
+
+        // Separate contexts (true parallel calls) each write disjoint keys.
+        let a = session_ctx(HashMap::new());
+        let b = session_ctx(HashMap::new());
+        tool.execute(a.clone(), json!({"toolset_names": ["cm360"]}))
+            .await
+            .unwrap();
+        tool.execute(b.clone(), json!({"toolset_names": ["dv360"]}))
+            .await
+            .unwrap();
+        let mut merged = a.actions().state_delta;
+        merged.extend(b.actions().state_delta);
+        assert!(is_enabled_in(
+            Some(&StateCtx {
+                state: merged.clone(),
+                content: Content::new("user")
+            }),
+            "cm360"
+        ));
+        assert!(is_enabled_in(
+            Some(&StateCtx {
+                state: merged,
+                content: Content::new("user")
+            }),
+            "dv360"
+        ));
+    }
+
+    #[tokio::test]
+    async fn committed_session_state_counts_as_enabled() {
+        let tool = tool();
+        let ctx = session_ctx(HashMap::from([(toolset_state_key("cm360"), json!(true))]));
+        let out = tool
+            .execute(ctx.clone(), json!({"toolset_names": ["cm360", "dv360"]}))
+            .await
+            .unwrap();
+        assert_eq!(out["newly_enabled"], json!(["dv360"]));
+        assert_eq!(out["enabled"], json!(["cm360", "dv360"]));
+        assert_eq!(
+            out["message"],
+            json!("113 additional tools are now available and can be called directly.")
+        );
+        let delta = ctx.actions().state_delta;
+        assert_eq!(delta.len(), 1, "only the new toolset is written: {delta:?}");
+
+        // Legacy array in committed state is honoured too.
+        let ctx = session_ctx(HashMap::from([(
+            ENABLED_TOOLSETS_STATE_KEY.to_string(),
+            json!(["dv360"]),
+        )]));
+        let out = tool
+            .execute(ctx.clone(), json!({"toolset_names": ["dv360"]}))
+            .await
+            .unwrap();
+        assert_eq!(out["newly_enabled"], json!([]));
+        assert!(ctx.actions().state_delta.is_empty());
     }
 }

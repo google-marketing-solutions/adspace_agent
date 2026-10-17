@@ -22,11 +22,24 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::config::{ModelController, SimpleModelController};
-use crate::genai::{GenAiClient, GeneratedMedia};
+use crate::genai::{GenAiClient, GeneratedMedia, normalize_youtube_video_id};
 
 /// Builds a Python-compatible error payload.
 fn error_response(details: impl std::fmt::Display) -> Value {
     json!({ "status": "ERROR", "error_details": details.to_string() })
+}
+
+/// Reads a non-empty `prompt` argument, or explains what is missing.
+fn required_prompt(args: &Value) -> std::result::Result<String, Value> {
+    let prompt = args
+        .get("prompt")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if prompt.is_empty() {
+        return Err(error_response("prompt is required and must not be empty."));
+    }
+    Ok(prompt.to_string())
 }
 
 /// Saves generated media as a session artifact.
@@ -104,14 +117,22 @@ impl Tool for GetInfoAboutYoutubeVideoTool {
             .unwrap_or_default()
             .trim()
             .to_string();
-        let prompt = args
-            .get("prompt")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
         if video_id.is_empty() {
             return Err(AdkError::tool("youtube_video_id is required"));
         }
+        // Strict validation (eleven URL-safe characters, or a YouTube URL
+        // reduced to its id): the id is spliced into the `file_uri` sent to
+        // Gemini, so nothing else may pass through.
+        let Some(video_id) = normalize_youtube_video_id(&video_id) else {
+            return Ok(error_response(format!(
+                "'{video_id}' is not a valid YouTube video id. Pass the 11-character id from the \
+                 URL's `v` parameter (for example `dQw4w9WgXcQ`)."
+            )));
+        };
+        let prompt = match required_prompt(&args) {
+            Ok(prompt) => prompt,
+            Err(error) => return Ok(error),
+        };
         let model = self.models.active_models().model;
         Ok(
             match self
@@ -153,16 +174,19 @@ impl Tool for GenerateVideoTool {
         }))
     }
 
+    /// Each call writes a distinct artifact and touches only its own action
+    /// set, so concurrent calls cannot interfere. The tool is deliberately
+    /// *not* flagged `is_read_only`: it creates artifacts and incurs billing,
+    /// and adk-core defines `is_read_only` as "performs no side effects".
     fn is_concurrency_safe(&self) -> bool {
         true
     }
 
     async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
-        let prompt = args
-            .get("prompt")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+        let prompt = match required_prompt(&args) {
+            Ok(prompt) => prompt,
+            Err(error) => return Ok(error),
+        };
         let video_model = self.models.active_models().video_model;
         let media = match self.client.generate_video(&video_model, &prompt).await {
             Ok(media) => media,
@@ -205,16 +229,17 @@ impl Tool for GenerateImageTool {
         }))
     }
 
+    /// See [`GenerateVideoTool::is_concurrency_safe`] for why this tool is
+    /// concurrency-safe but not read-only.
     fn is_concurrency_safe(&self) -> bool {
         true
     }
 
     async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
-        let prompt = args
-            .get("prompt")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+        let prompt = match required_prompt(&args) {
+            Ok(prompt) => prompt,
+            Err(error) => return Ok(error),
+        };
         let image_model = self.models.active_models().image_model;
         let media = match self.client.generate_image(&image_model, &prompt).await {
             Ok(media) => media,
@@ -274,4 +299,79 @@ pub fn google_genai_toolset_with_controller(
             Arc::new(GenerateImageTool { client, models }),
         ],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adk_rust::Toolset;
+    use adk_rust::tool::SimpleToolContext;
+
+    async fn tool(name: &str) -> Arc<dyn Tool> {
+        let toolset = google_genai_toolset(
+            GenAiClient::studio("key"),
+            "gemini-test",
+            "veo-test",
+            "imagen-test",
+        );
+        toolset
+            .tools(Arc::new(SimpleToolContext::new("t")))
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name() == name)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn youtube_tool_rejects_invalid_ids_and_empty_prompts_before_calling_out() {
+        let ctx = Arc::new(SimpleToolContext::new("t")) as Arc<dyn ToolContext>;
+        let yt = tool("get_info_about_youtube_video").await;
+        assert!(yt.is_read_only() && yt.is_concurrency_safe());
+        let out = yt
+            .execute(
+                ctx.clone(),
+                json!({"youtube_video_id": "x\"></script>", "prompt": "Summarise"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["status"], "ERROR");
+        assert!(
+            out["error_details"]
+                .as_str()
+                .unwrap()
+                .contains("not a valid YouTube video id")
+        );
+        let out = yt
+            .execute(
+                ctx.clone(),
+                json!({"youtube_video_id": "dQw4w9WgXcQ", "prompt": "   "}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["status"], "ERROR");
+        assert!(out["error_details"].as_str().unwrap().contains("prompt"));
+        assert!(
+            yt.execute(ctx, json!({"prompt": "p"})).await.is_err(),
+            "missing id is a hard tool error (unchanged)"
+        );
+    }
+
+    #[tokio::test]
+    async fn media_tools_reject_empty_prompts_and_are_not_read_only() {
+        let ctx = Arc::new(SimpleToolContext::new("t")) as Arc<dyn ToolContext>;
+        for name in ["generate_image", "generate_video"] {
+            let t = tool(name).await;
+            assert!(t.is_concurrency_safe(), "{name}");
+            assert!(
+                !t.is_read_only(),
+                "{name} has side effects (artifacts, billing)"
+            );
+            for args in [json!({}), json!({"prompt": ""}), json!({"prompt": "  \n"})] {
+                let out = t.execute(ctx.clone(), args.clone()).await.unwrap();
+                assert_eq!(out["status"], "ERROR", "{name} {args}");
+                assert!(out["error_details"].as_str().unwrap().contains("prompt"));
+            }
+        }
+    }
 }

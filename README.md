@@ -20,7 +20,9 @@ built on [adk-rust](https://github.com/zavora-ai/adk-rust) 2.3.0.
 ### Prerequisites
 
 - Rust 1.99+ (`rustup`)
-- `gcloud auth application-default login` (Vertex AI, Cloud Storage, BigQuery)
+- `gcloud auth application-default login` (Vertex AI models, Cloud Storage
+  artifacts/skills — not for user data: every data toolset, BigQuery included,
+  runs with the signed-in user's own OAuth credentials)
 
 ### Environment Variables
 
@@ -37,6 +39,7 @@ GOOGLE_GENAI_USE_VERTEXAI=TRUE
 CLIENT_ID=
 CLIENT_SECRET=
 PUBLIC_BASE_URL=http://localhost:8000
+# ADMIN_EMAILS=admin@example.com   # who may switch the server-wide models
 
 # Google Ads
 GOOGLE_ADS_DEVELOPER_TOKEN=
@@ -58,7 +61,9 @@ GOOGLE_ADS_LOGIN_CUSTOMER_ID=
 
 ### Development
 
-Build and run the web server (ADK web UI at `http://localhost:8000/ui/`):
+Build and run the web server (studio at `http://localhost:8000/app/`; the
+stock ADK dev UI at `http://localhost:8000/ui/` is only served while
+`CLIENT_ID` / `CLIENT_SECRET` are unset):
 
 ```shell
 cargo run -- serve
@@ -112,6 +117,27 @@ tool. A new session starts without credentials; tokens are persisted with the
 session (so they survive restarts with `SESSION_SERVICE_URI=sqlite://...` or
 `firestore://...`) and disappear with it. There is no server-side token store.
 
+### Who can call what
+
+The same OAuth client also signs users into the studio (`/auth/login`, Google
+Sign-In with a verified email). The signed-in user is carried in the
+`adspace_user` cookie (HMAC-signed, `HttpOnly`, `SameSite=Lax`, `Secure` when
+`PUBLIC_BASE_URL` is `https://`), and the sign-in itself is bound to the
+browser that started it with a nonce cookie, so a callback URL cannot be
+replayed into someone else's browser.
+
+| `CLIENT_ID` / `CLIENT_SECRET` | Who is the caller | `/ui/` dev UI | `POST /auth/models` |
+|---|---|---|---|
+| unset (local development) | everyone is the anonymous user `user`; the port must not be reachable by anyone else | available | anyone (or `ADMIN_EMAILS` when set) |
+| set | the signed-in Google user — **every** `/api/…` route (sessions, `/api/run*`, artifacts, debug) answers `401` without the cookie and `403` for another user's session, whether the user id comes from the path or from the JSON body | disabled (redirects to `/app/`) | administrators listed in `ADMIN_EMAILS` only |
+
+Identity is enforced by adk-server's own auth layer through a
+`RequestContextExtractor` backed by the cookie, plus a response guard that
+strips the session's OAuth tokens (`CREDENTIALS_CACHE_KEY`) from every JSON and
+SSE response so they never reach the browser. `/oauth2/events` (the SSE stream
+that opens the consent popup) is likewise limited to the signed-in user's own
+sessions and never carries the signed OAuth `state`.
+
 ## Exploring Available Tools
 
 ```shell
@@ -131,7 +157,7 @@ characters), so the existing `*_TOOL_FILTER` lists work unchanged.
 |---|---|
 | `google_ads`, `display_video_360`, `drive`, `youtube`, `storage`, `search_ads_360`, `bid_manager`, `merchant_center_*`, `campaign_manager_360` | Discovery-document driven `GoogleApiToolset` (`src/google_api`) with the user's OAuth credentials |
 | `campaign_manager_360` (additionally) | `parse_sheet_tool` / `traffic_campaigns_in_cm360_tool` (`src/tools/cm360_trafficking`). The trafficking workflow instructions ship with the toolset itself — no separate skill is needed. |
-| `bigquery` | adk-rust `BigQueryToolset` (Application Default Credentials, read-only by default; `BIGQUERY_READ_ONLY=false` to allow DML) |
+| `bigquery` | Native `BigQueryToolset` (`src/tools/bigquery.rs`): `bigquery_list_datasets`, `bigquery_list_tables`, `bigquery_get_table_schema`, `bigquery_execute_sql` over the BigQuery REST API v2 with the **user's** OAuth token (`bigquery.readonly` scope; read-only by default — a single `SELECT`/`WITH` statement, verified by a dry run. `BIGQUERY_READ_ONLY=false` allows DML and asks for the `bigquery` scope instead). Default project `GOOGLE_CLOUD_PROJECT`, overridable per call with `project_id`. The service account needs no BigQuery permissions. |
 | `google_genai` | `get_info_about_youtube_video` and `generate_image` through adk-rust's Gemini client (Imagen via `:predict`), `generate_video` (Veo long-running operation) — results are saved as session artifacts |
 | always on | Python execution (see below), `list_user_files`, adk-rust's built-in `load_artifacts` and `preload_memory`, adk-rust's progressive skills (`list_skills`, `load_skill`, `load_skill_resource`) plus `reload_skills`, and `adk-ui` generative UI tools (`render_chart`, `render_table`, `render_layout`, `render_card`, `render_form`, `render_confirm`, `render_modal`, `render_alert`, `render_progress`, `render_toast`) rendered live inside `/ui/` |
 | Gemini built-ins (`GEMINI_BUILTIN_TOOLS`) | `google_search`, `url_context`, `google_maps` by default (`none` disables). These run server-side inside Gemini, as does the default `gemini_code_execution`. |
@@ -207,6 +233,7 @@ gcloud run deploy adspace-agent-rs \
   --memory 32Gi \
   --cpu 8 \
   --port 8000 \
+  --session-affinity \
   --set-secrets "\
 CLIENT_ID=adspace-agent-rs-client-id:latest,\
 CLIENT_SECRET=adspace-agent-rs-client-secret:latest,\
@@ -218,10 +245,33 @@ GOOGLE_CLOUD_PROJECT={YOUR_GOOGLE_CLOUD_PROJECT},\
 GOOGLE_GENAI_USE_VERTEXAI=TRUE,\
 GOOGLE_ADS_LOGIN_CUSTOMER_ID={YOUR_GOOGLE_ADS_LOGIN_CUSTOMER_ID},\
 PUBLIC_BASE_URL=https://{YOUR_CLOUD_RUN_URL},\
+ADMIN_EMAILS={YOUR_ADMIN_EMAILS},\
 SKILLS_BUCKET_NAME={YOUR_SKILLS_BUCKET_NAME},\
 SESSION_SERVICE_URI=firestore://,\
 ARTIFACT_SERVICE_URI=gs://{YOUR_ARTIFACT_BUCKET}"
 ```
+
+> [!IMPORTANT]
+> **Access.** Always deploy with `CLIENT_ID` / `CLIENT_SECRET` set: without them
+> the service has no sign-in and anyone who can reach the URL can chat as the
+> anonymous user and spend LLM quota (every Google data toolset, BigQuery
+> included, still needs that user's own OAuth grant — the service account's
+> credentials are only used for the model backend, artifacts and skills).
+> Google Sign-In protects the agent's own routes
+> (see [Who can call what](#who-can-call-what)); to additionally keep the URL
+> itself private, deploy with `--no-allow-unauthenticated` behind
+> [IAP](https://cloud.google.com/iap/docs/enabling-cloud-run) or an
+> authenticating load balancer.
+>
+> **Instances.** The in-flight OAuth wait, the popup acknowledgments and the
+> `/oauth2/events` stream live in process memory. With several instances the
+> consent callback may land on an instance other than the one running the
+> tool call: the waiting tool still completes because it polls the shared
+> session service (Firestore) for the persisted token, but the popup only opens
+> automatically when the browser's event stream and the tool call share an
+> instance. Keep `--session-affinity` (as above) so a browser sticks to one
+> instance, or pin `--max-instances 1`. In-flight requests get
+> `SHUTDOWN_GRACE_SECS` (default 8 s) to finish after SIGTERM.
 
 The [Dockerfile](Dockerfile) uses `cargo-chef` to cache compiled Rust
 dependencies and ships the release binary on a `debian:trixie-slim` image — no
@@ -241,8 +291,9 @@ gcloud run deploy adspace-agent-rs \
 
 - Context caching and events compaction are configured through environment
   variables (`CONTEXT_CACHE_*`, `COMPACTION_*`) instead of `App(...)`.
-- `bigquery` authenticates with Application Default Credentials rather than the
-  end user's OAuth token.
+- `bigquery` is read-only by default (`BIGQUERY_READ_ONLY=false` to allow DML)
+  and, like every other data toolset, runs with the end user's OAuth token —
+  the service account never needs BigQuery access.
 - The operations staged by `parse_sheet_tool` are stored as a versioned session
   artifact (`cm360_payloads.json`) through the configured artifact service
   instead of a hard-coded GCS path.

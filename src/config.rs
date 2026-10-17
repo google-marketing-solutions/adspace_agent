@@ -462,9 +462,37 @@ pub fn env_u64_or(name: &str, default: u64) -> u64 {
     }
 }
 
-/// Whether `GOOGLE_GENAI_USE_VERTEXAI` is truthy (defaults to `true`).
+/// Parses a boolean-ish configuration value.
+///
+/// Accepts the usual spellings case-insensitively: `1`/`true`/`yes`/`on`/`y`/`t`
+/// are `Some(true)`, `0`/`false`/`no`/`off`/`n`/`f` are `Some(false)`; anything
+/// else is `None` so callers can fall back to a default with a warning instead
+/// of silently flipping a flag.
+pub fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" | "y" | "t" => Some(true),
+        "0" | "false" | "no" | "off" | "n" | "f" => Some(false),
+        _ => None,
+    }
+}
+
+/// Reads a boolean environment variable with a default (see [`parse_bool`]).
+///
+/// Unrecognised values fall back to the default with a warning.
+pub fn env_bool_or(name: &str, default: bool) -> bool {
+    match env_opt(name) {
+        Some(raw) => parse_bool(&raw).unwrap_or_else(|| {
+            tracing::warn!("Ignoring invalid {name}={raw:?}; using default {default}");
+            default
+        }),
+        None => default,
+    }
+}
+
+/// Whether `GOOGLE_GENAI_USE_VERTEXAI` is truthy (defaults to `true`; accepts
+/// `1`/`true`/`yes`/`on` like the Python SDK).
 pub fn use_vertex_ai() -> bool {
-    env_or("GOOGLE_GENAI_USE_VERTEXAI", "True").to_uppercase() == "TRUE"
+    env_bool_or("GOOGLE_GENAI_USE_VERTEXAI", true)
 }
 
 /// Events-compaction settings (mirrors ADK Python's `EventsCompactionConfig`).
@@ -808,6 +836,28 @@ pub fn model_pricing(model: &str) -> ModelPricing {
     }
 }
 
+/// Pricing table keyed by model name for every preset LLM model plus any
+/// `extra` names (typically the currently active model), ready to be embedded
+/// in the `/auth/models` payload so the Studio UI never carries its own copy
+/// of the rates.
+///
+/// Keys are lower-cased and trimmed to match how the UI looks models up.
+pub fn model_pricing_table<'a>(
+    extra: impl IntoIterator<Item = &'a str>,
+) -> std::collections::BTreeMap<String, ModelPricing> {
+    PRESET_MODELS
+        .iter()
+        .copied()
+        .chain(extra)
+        .map(|name| name.trim().to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            let pricing = model_pricing(&name);
+            (name, pricing)
+        })
+        .collect()
+}
+
 /// Estimates the USD cost of a single LLM call from its [`adk_rust::UsageMetadata`].
 pub fn estimate_usage_cost_usd(model: &str, usage: &adk_rust::UsageMetadata) -> f64 {
     let p = model_pricing(model);
@@ -924,6 +974,37 @@ mod tests {
             parse_lazy_toolsets(Some("google_ads, nope"), &enabled),
             strs(&["google_ads"])
         );
+    }
+
+    #[test]
+    fn parses_boolean_flags_leniently() {
+        for truthy in ["1", "true", "TRUE", " Yes ", "on", "y", "t"] {
+            assert_eq!(parse_bool(truthy), Some(true), "{truthy:?}");
+        }
+        for falsy in ["0", "false", "False", "no", "OFF", "n", "f"] {
+            assert_eq!(parse_bool(falsy), Some(false), "{falsy:?}");
+        }
+        for invalid in ["", "maybe", "2", "enabled"] {
+            assert_eq!(parse_bool(invalid), None, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn pricing_table_covers_presets_and_extra_models() {
+        let table = model_pricing_table(["Custom-Model-X ", ""]);
+        for preset in PRESET_MODELS {
+            assert_eq!(
+                table.get(*preset).copied(),
+                Some(model_pricing(preset)),
+                "preset {preset} present with the server rates"
+            );
+        }
+        assert_eq!(
+            table.get("custom-model-x").copied(),
+            Some(model_pricing("custom-model-x")),
+            "extra names are normalised and priced"
+        );
+        assert!(!table.contains_key(""), "blank names are skipped");
     }
 
     #[test]

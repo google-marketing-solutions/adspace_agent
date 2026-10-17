@@ -123,8 +123,11 @@
               </label>
             </div>
 
-            <div class="popover-section hidden" data-session-only>
+            <div class="popover-section hidden" data-session-only data-admin-only>
               <div class="popover-label">ADK &amp; Generative Media Models</div>
+              <p id="setting-models-admin-hint" class="popover-hint hidden">
+                Only administrators can change the active models. Showing the server&rsquo;s current selection.
+              </p>
               <div class="settings-inputs">
                 <label>
                   <span>Agent Model (ADK LLM)</span>

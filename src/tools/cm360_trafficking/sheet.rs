@@ -241,13 +241,21 @@ const NAIVE_DATE_FORMATS: [&str; 16] = [
 
 /// Flexible date/time parsing standing in for `pd.to_datetime(str(val))`.
 ///
-/// Accepts RFC 3339 (`"2026-09-07T00:00:00Z"`, with fractional seconds and
-/// offsets — the offset is ignored and the wall-clock part is returned),
-/// `"%Y-%m-%d"`, `"%Y-%m-%d %H:%M:%S"`, `"%Y-%m-%dT%H:%M:%S"`, `"%Y/%m/%d"`,
-/// `"%m/%d/%Y"`, `"%m/%d/%y"`, `"%m/%d/%Y %H:%M"`, `"%m/%d/%Y %H:%M:%S"`,
-/// `"%d-%b-%Y"`, `"%b %d, %Y"`, `"%B %d, %Y"`, `"%d %B %Y"`, `"%Y%m%d"` and a
-/// few close variants. Returns `None` for anything else (including empty or
-/// whitespace-only input).
+/// Returns the parsed value as a **UTC** wall clock:
+///
+/// - RFC 3339 / offset inputs (`"2026-09-07T00:00:00Z"`,
+///   `"2026-06-15T12:30:00+05:00"`, `"2026-06-15T12:30:00+0500"`, with or
+///   without fractional seconds) are converted to the UTC instant they
+///   denote (`+05:00` → `07:30:00`), so values that name the same instant
+///   compare equal regardless of the offset they were written in;
+/// - naive inputs (`"%Y-%m-%d"`, `"%Y-%m-%d %H:%M:%S"`,
+///   `"%Y-%m-%dT%H:%M:%S"`, `"%Y/%m/%d"`, `"%m/%d/%Y"`, `"%m/%d/%y"`,
+///   `"%m/%d/%Y %H:%M"`, `"%m/%d/%Y %H:%M:%S"`, `"%d-%b-%Y"`, `"%b %d, %Y"`,
+///   `"%B %d, %Y"`, `"%d %B %Y"`, `"%Y%m%d"` and a few close variants) are
+///   taken to already be UTC; date-only inputs become midnight UTC.
+///
+/// Returns `None` for anything else (including empty or whitespace-only
+/// input).
 pub fn parse_datetime(val: &str) -> Option<NaiveDateTime> {
     let s = val.trim();
     if s.is_empty() {
@@ -255,11 +263,11 @@ pub fn parse_datetime(val: &str) -> Option<NaiveDateTime> {
     }
 
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-        return Some(dt.naive_local());
+        return Some(dt.naive_utc());
     }
     for format in OFFSET_DATETIME_FORMATS {
         if let Ok(dt) = DateTime::parse_from_str(s, format) {
-            return Some(dt.naive_local());
+            return Some(dt.naive_utc());
         }
     }
 
@@ -292,7 +300,9 @@ pub fn format_date(val: Option<&str>) -> Option<String> {
     raw.split_whitespace().next().map(str::to_string)
 }
 
-/// Formats datetime values into an ISO-8601 `YYYY-MM-DDTHH:MM:SSZ` string.
+/// Formats datetime values into an ISO-8601 `YYYY-MM-DDTHH:MM:SSZ` string
+/// denoting the UTC instant of the input (offsets are converted, naive
+/// values are taken as UTC — see [`parse_datetime`]).
 ///
 /// Falls back to the raw string when it cannot be parsed; `None` when missing.
 pub fn format_date_time(val: Option<&str>) -> Option<String> {
@@ -303,7 +313,8 @@ pub fn format_date_time(val: Option<&str>) -> Option<String> {
     }
 }
 
-/// Normalizes datetime values into a standard UTC ISO-8601 string.
+/// Normalizes datetime values into a standard UTC ISO-8601 string
+/// (`YYYY-MM-DDTHH:MM:SSZ`, offsets converted — see [`parse_datetime`]).
 ///
 /// Returns `None` for missing values and for `""` / `"none"` / `"nan"` /
 /// `"null"` (case-insensitive, after trimming); falls back to the trimmed raw
@@ -328,18 +339,27 @@ pub fn normalize_placement_status(val: Option<&str>) -> String {
     val.map(str::trim).unwrap_or_default().to_string()
 }
 
-/// Parses creative rotation weights (multiplies decimals by 100).
+/// Parses creative rotation weights into an integer percentage.
 ///
-/// A `%` sign is stripped; values `<= 1.0` are treated as fractions and
-/// multiplied by 100; anything unparsable (or missing) yields `100`.
+/// Semantics:
+///
+/// - a value carrying a `%` sign is a literal percentage (`"50%"` → `50`,
+///   `"1%"` → `1`, `"0.5%"` → `0`);
+/// - a bare value `<= 1.0` is a fraction and is multiplied by 100 (`"0.5"`
+///   → `50`, `"1"` / `"1.0"` → `100`) — so a bare `1` means 100 %, write
+///   `"1%"` for one percent;
+/// - any other bare value is taken as a percentage (`"75.9"` → `75`);
+/// - anything unparsable (or missing) yields `100`.
 pub fn parse_weight(val: Option<&str>) -> i64 {
     let Some(val) = val else {
         return 100;
     };
-    let cleaned = val.trim().replace('%', "");
-    match cleaned.parse::<f64>() {
+    let trimmed = val.trim();
+    let explicit_percent = trimmed.contains('%');
+    let cleaned = trimmed.replace('%', "");
+    match cleaned.trim().parse::<f64>() {
         Ok(f_val) if f_val.is_finite() => {
-            if f_val <= 1.0 {
+            if !explicit_percent && f_val <= 1.0 {
                 (f_val * 100.0) as i64
             } else {
                 f_val as i64
@@ -534,23 +554,48 @@ pub fn prepare_data(raw: &RawSheet) -> anyhow::Result<(Vec<Row>, SheetMetadata)>
     ))
 }
 
+/// Per-entity outcome of a trafficking run, keyed by trimmed entity name —
+/// the input to [`apply_trafficked_status`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EntityOutcomes {
+    /// Ads whose operation succeeded.
+    pub successful_ads: HashSet<String>,
+    /// Placements whose operation succeeded.
+    pub successful_placements: HashSet<String>,
+    /// Ads whose operation failed (or was aborted).
+    pub failed_ads: HashSet<String>,
+    /// Placements whose operation failed.
+    pub failed_placements: HashSet<String>,
+}
+
+impl EntityOutcomes {
+    /// True when no ad or placement operation succeeded (nothing to mark).
+    pub fn has_successes(&self) -> bool {
+        !self.successful_ads.is_empty() || !self.successful_placements.is_empty()
+    }
+}
+
 /// Pure part of `_update_trafficking_sheet_status`.
 ///
 /// Locates the header (same search as [`find_header_row`]), finds the
 /// `"trafficking status"`, `"ad name"` and `"placement name"` columns
-/// (case-insensitive trimmed compare) and, for each data row whose ad name is
-/// in `successful_ads` or whose placement name is in `successful_placements`,
-/// sets the status cell to `"Trafficked"` (padding the row with empty cells
-/// when it is shorter than the status column index).
+/// (case-insensitive trimmed compare) and, for each data row, sets the status
+/// cell to `"Trafficked"` (padding the row with empty cells when it is
+/// shorter than the status column index) when **every** entity the row names
+/// was trafficked: at least one of its ad / placement succeeded and neither
+/// of them failed. A row whose placement patch succeeded but whose ad insert
+/// failed therefore keeps its `New` / `Update` status, so
+/// [`clean_sheet`] picks it up again on the next parse → traffic cycle (the
+/// placement, now matching CM360, yields no operation; the ad is retried).
 ///
 /// Returns `None` (after logging a warning) when the header or any of the
 /// three columns is missing, otherwise the updated sheet and the number of
-/// updated rows. Callers should skip the call entirely when both name sets
-/// are empty (the Python code returns early before loading the artifact).
+/// updated rows. Callers should skip the call entirely when
+/// [`EntityOutcomes::has_successes`] is false (the Python code returns early
+/// before loading the artifact).
 pub fn apply_trafficked_status(
     raw: &RawSheet,
-    successful_ads: &HashSet<String>,
-    successful_placements: &HashSet<String>,
+    outcomes: &EntityOutcomes,
 ) -> Option<(RawSheet, usize)> {
     let Some(header_idx) = find_header_row(raw) else {
         warn!(
@@ -597,7 +642,11 @@ pub fn apply_trafficked_status(
         if ad_name.is_empty() || placement_name.is_empty() {
             continue;
         }
-        if successful_ads.contains(&ad_name) || successful_placements.contains(&placement_name) {
+        let any_succeeded = outcomes.successful_ads.contains(&ad_name)
+            || outcomes.successful_placements.contains(&placement_name);
+        let any_failed = outcomes.failed_ads.contains(&ad_name)
+            || outcomes.failed_placements.contains(&placement_name);
+        if any_succeeded && !any_failed {
             if row.len() <= status_col {
                 row.resize(status_col + 1, String::new());
             }
@@ -893,9 +942,6 @@ mod tests {
         for input in [
             "2026-06-15T12:30:00Z",
             "2026-06-15T12:30:00.000Z",
-            "2026-06-15T12:30:00+05:00",
-            "2026-06-15T12:30:00.123456-07:00",
-            "2026-06-15T12:30:00+0500",
             "2026-06-15 12:30:00Z",
             "2026-06-15T12:30",
             "2026-06-15 12:30",
@@ -907,6 +953,25 @@ mod tests {
             assert_eq!(
                 parsed.format("%Y-%m-%dT%H:%M:%S").to_string(),
                 half_past.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "input {input:?}"
+            );
+        }
+        // Offsets are converted to the UTC instant they denote.
+        for (input, expected) in [
+            ("2026-06-15T12:30:00+05:00", dt(2026, 6, 15, 7, 30, 0)),
+            (
+                "2026-06-15T12:30:00.123456-07:00",
+                dt(2026, 6, 15, 19, 30, 0),
+            ),
+            ("2026-06-15T12:30:00+0500", dt(2026, 6, 15, 7, 30, 0)),
+            ("2026-06-15 12:30+05:00", dt(2026, 6, 15, 7, 30, 0)),
+            // Crossing midnight shifts the date too.
+            ("2026-06-15T22:00:00-05:00", dt(2026, 6, 16, 3, 0, 0)),
+        ] {
+            let parsed = parse_datetime(input).unwrap_or_else(|| panic!("input {input:?}"));
+            assert_eq!(
+                parsed.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                expected.format("%Y-%m-%dT%H:%M:%S").to_string(),
                 "input {input:?}"
             );
         }
@@ -959,9 +1024,14 @@ mod tests {
             format_date_time(Some("8/29/3000")).as_deref(),
             Some("3000-08-29T00:00:00Z")
         );
+        // Offsets are converted, not dropped: 12:30 at +05:00 is 07:30 UTC.
         assert_eq!(
             format_date_time(Some("2026-06-15T12:30:00+05:00")).as_deref(),
-            Some("2026-06-15T12:30:00Z")
+            Some("2026-06-15T07:30:00Z")
+        );
+        assert_eq!(
+            format_date_time(Some("2026-06-15T07:30:00Z")),
+            format_date_time(Some("2026-06-15T12:30:00+05:00"))
         );
         assert_eq!(format_date_time(None), None);
         assert_eq!(
@@ -980,6 +1050,10 @@ mod tests {
         assert_eq!(
             normalize_iso_datetime(Some(" 2026-06-15 ")).as_deref(),
             Some("2026-06-15T00:00:00Z")
+        );
+        assert_eq!(
+            normalize_iso_datetime(Some("2026-06-15T01:00:00-04:00")).as_deref(),
+            Some("2026-06-15T05:00:00Z")
         );
         assert_eq!(normalize_iso_datetime(None), None);
         assert_eq!(normalize_iso_datetime(Some("null")), None);
@@ -1013,8 +1087,14 @@ mod tests {
         assert_eq!(parse_weight(Some("75")), 75);
         assert_eq!(parse_weight(Some("75.9")), 75);
         assert_eq!(parse_weight(Some("0")), 0);
+        // An explicit `%` sign is a literal percentage, so 1 % is expressible.
+        assert_eq!(parse_weight(Some("1%")), 1);
+        assert_eq!(parse_weight(Some("1 %")), 1);
+        assert_eq!(parse_weight(Some("0.5%")), 0);
+        assert_eq!(parse_weight(Some("0%")), 0);
         assert_eq!(parse_weight(Some("abc")), 100);
         assert_eq!(parse_weight(Some("")), 100);
+        assert_eq!(parse_weight(Some("%")), 100);
         assert_eq!(parse_weight(Some("inf")), 100);
         assert_eq!(parse_weight(Some("nan")), 100);
     }
@@ -1208,6 +1288,18 @@ mod tests {
         );
     }
 
+    fn names(values: &[&str]) -> HashSet<String> {
+        values.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    fn outcomes(successful_ads: &[&str], successful_placements: &[&str]) -> EntityOutcomes {
+        EntityOutcomes {
+            successful_ads: names(successful_ads),
+            successful_placements: names(successful_placements),
+            ..EntityOutcomes::default()
+        }
+    }
+
     #[test]
     fn apply_trafficked_status_updates_matching_rows() {
         let raw = sheet(&[
@@ -1222,9 +1314,7 @@ mod tests {
             &["New", "P1"],
             &["New", "P1", "A9", "extra"],
         ]);
-        let ads: HashSet<String> = ["A1".to_string()].into_iter().collect();
-        let placements: HashSet<String> = ["P3".to_string()].into_iter().collect();
-        let (updated, count) = apply_trafficked_status(&raw, &ads, &placements).unwrap();
+        let (updated, count) = apply_trafficked_status(&raw, &outcomes(&["A1"], &["P3"])).unwrap();
         assert_eq!(count, 2);
         assert_eq!(updated[3][0], "Trafficked");
         assert_eq!(updated[4][0], "New");
@@ -1238,42 +1328,77 @@ mod tests {
     }
 
     #[test]
+    fn apply_trafficked_status_requires_every_named_entity_to_succeed() {
+        let raw = sheet(&[
+            &["Trafficking Status", "Placement Name", "Ad Name"],
+            // Placement patched OK but the ad insert failed → stays New so
+            // the next parse → traffic cycle retries the ad.
+            &["New", "P1", "A1"],
+            // Ad OK, placement patch failed → stays Update.
+            &["Update", "P2", "A2"],
+            // Both succeeded.
+            &["New", "P1", "A3"],
+            // Ad succeeded, placement had no operation at all → Trafficked.
+            &["New", "P9", "A3"],
+            // Placement succeeded, ad had no operation → Trafficked.
+            &["New", "P1", "A8"],
+            // Nothing succeeded → untouched.
+            &["New", "P7", "A7"],
+        ]);
+        let outcomes = EntityOutcomes {
+            successful_ads: names(&["A2", "A3"]),
+            successful_placements: names(&["P1"]),
+            failed_ads: names(&["A1"]),
+            failed_placements: names(&["P2"]),
+        };
+        assert!(outcomes.has_successes());
+        let (updated, count) = apply_trafficked_status(&raw, &outcomes).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(updated[1][0], "New");
+        assert_eq!(updated[2][0], "Update");
+        assert_eq!(updated[3][0], "Trafficked");
+        assert_eq!(updated[4][0], "Trafficked");
+        assert_eq!(updated[5][0], "Trafficked");
+        assert_eq!(updated[6][0], "New");
+        // The untouched rows are exactly the ones `clean_sheet` re-processes.
+        let retry_rows = clean_sheet(&updated).unwrap();
+        assert_eq!(
+            retry_rows
+                .iter()
+                .map(|r| r.get_str("Ad Name"))
+                .collect::<Vec<_>>(),
+            vec!["A1", "A2", "A7"]
+        );
+        assert!(!EntityOutcomes::default().has_successes());
+    }
+
+    #[test]
     fn apply_trafficked_status_pads_short_rows() {
         let raw = sheet(&[
             &["Ad Name", "Placement Name", "Trafficking Status"],
             &["A1", "P1"],
         ]);
-        let ads: HashSet<String> = ["A1".to_string()].into_iter().collect();
-        let (updated, count) = apply_trafficked_status(&raw, &ads, &HashSet::new()).unwrap();
+        let (updated, count) = apply_trafficked_status(&raw, &outcomes(&["A1"], &[])).unwrap();
         assert_eq!(count, 1);
         assert_eq!(updated[1], vec!["A1", "P1", "Trafficked"]);
     }
 
     #[test]
     fn apply_trafficked_status_returns_none_when_columns_missing() {
-        let ads: HashSet<String> = ["A1".to_string()].into_iter().collect();
+        let ads = outcomes(&["A1"], &[]);
         let no_header = sheet(&[&["a", "b"], &["c", "d"]]);
-        assert_eq!(
-            apply_trafficked_status(&no_header, &ads, &HashSet::new()),
-            None
-        );
+        assert_eq!(apply_trafficked_status(&no_header, &ads), None);
         let no_status = sheet(&[&["Ad Name", "Placement Name"], &["A1", "P1"]]);
-        assert_eq!(
-            apply_trafficked_status(&no_status, &ads, &HashSet::new()),
-            None
-        );
+        assert_eq!(apply_trafficked_status(&no_status, &ads), None);
         let no_placement = sheet(&[&["Ad Name", "Trafficking Status"], &["A1", "New"]]);
-        assert_eq!(
-            apply_trafficked_status(&no_placement, &ads, &HashSet::new()),
-            None
-        );
+        assert_eq!(apply_trafficked_status(&no_placement, &ads), None);
     }
 
     #[test]
     fn apply_trafficked_status_round_trips_through_csv() {
         let raw = parse_csv(&make_test_csv(&[])).unwrap();
-        let ads: HashSet<String> = ["Test Ad C".to_string()].into_iter().collect();
-        let (updated, count) = apply_trafficked_status(&raw, &ads, &HashSet::new()).unwrap();
+        let (updated, count) =
+            apply_trafficked_status(&raw, &outcomes(&["Test Ad C"], &[])).unwrap();
         assert_eq!(count, 1);
         let text = to_csv(&updated).unwrap();
         let reparsed = parse_csv(&text).unwrap();

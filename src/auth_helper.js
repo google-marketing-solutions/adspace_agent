@@ -15,9 +15,9 @@
 // AdSpace Agent — Google authorization helper & live `adk-ui` renderer for `/ui/`.
 //
 // Injected into `/ui/` from the same origin (`script-src 'self'`).
-// 1. Listens to `/oauth2/events` (SSE) so the instant a tool call needs Google
-//    OAuth consent, a centered popup window opens automatically while the tool
-//    awaits completion on the server.
+// 1. Listens to `/oauth2/events` (SSE, bound to the signed-in user) so the
+//    instant a tool call needs Google OAuth consent, a centered popup window
+//    opens automatically while the tool awaits completion on the server.
 // 2. Watches `details.tool-call` blocks in `/ui/` for `adk-ui` (`UiResponse`)
 //    component trees (`render_chart`, `render_table`, `render_layout`,
 //    `render_card`, `render_form`, `render_confirm`, `render_modal`,
@@ -46,7 +46,9 @@
 
   const seenLinks = new WeakSet();
   const seenDetails = new WeakSet();
-  const handledStates = new Set();
+  // `request_id`s of `auth_required` events already handled (the event carries
+  // only the consent URL and this opaque id, never the signed OAuth state).
+  const handledRequests = new Set();
   let popup = null;
   let modal = null;
 
@@ -191,9 +193,9 @@
   };
 
   const handleAuthRequired = async (data) => {
-    if (!data || !data.auth_url || !data.state) return;
-    if (handledStates.has(data.state)) return;
-    handledStates.add(data.state);
+    if (!data || !data.auth_url || !data.request_id) return;
+    if (handledRequests.has(data.request_id)) return;
+    handledRequests.add(data.request_id);
 
     const win = openPopup(data.auth_url);
     const opened = !!win;
@@ -201,7 +203,7 @@
       const resp = await fetch(ACK_PATH, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ state: data.state, opened }),
+        body: JSON.stringify({ request_id: data.request_id, opened }),
       });
       if (!opened && resp.ok) {
         const body = await resp.json();

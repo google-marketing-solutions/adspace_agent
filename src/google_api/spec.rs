@@ -154,6 +154,8 @@ pub struct PreparedRequest {
     pub url: String,
     /// Query parameters (repeated keys allowed).
     pub query: Vec<(String, String)>,
+    /// Header parameters declared by the method.
+    pub headers: Vec<(String, String)>,
     /// JSON body, if any.
     pub body: Option<Value>,
 }
@@ -215,7 +217,10 @@ fn build_method_spec(
 
     let mut parameters: Vec<ApiParameter> = Vec::new();
 
-    // 1. Path parameters, in template order.
+    // 1. Path parameters, in template order. Path values are always sent as
+    //    strings, so any numeric `format` declared by Discovery is dropped
+    //    along with the type (`{"type":"string","format":"int32"}` is not a
+    //    valid Gemini declaration).
     for (name, reserved) in &template_params {
         let declared = method.parameters.get(name.as_str());
         let mut schema = declared.map_or_else(
@@ -225,6 +230,13 @@ fn build_method_spec(
         if let Some(obj) = schema.as_object_mut() {
             obj.remove("items");
             obj.insert("type".to_string(), Value::String("string".to_string()));
+            if obj
+                .get("format")
+                .and_then(Value::as_str)
+                .is_some_and(|f| !keep_format("string", f))
+            {
+                obj.remove("format");
+            }
         }
         parameters.push(ApiParameter {
             original_name: name.clone(),
@@ -255,6 +267,29 @@ fn build_method_spec(
             location,
             schema: parameter_schema(param, &resolver.options),
             required: param.required,
+            reserved_expansion: false,
+        });
+    }
+
+    // 2b. The global `fields` parameter (partial responses). It is the one
+    //     global parameter worth exposing: it lets the model shrink large
+    //     list/export responses, which the toolset otherwise refuses to hand
+    //     over. Methods that declare their own `fields` keep theirs.
+    if let Some(fields) = doc.parameters.get("fields")
+        && !method.parameters.contains_key("fields")
+        && !template_params.iter().any(|(n, _)| n == "fields")
+    {
+        let mut param = fields.clone();
+        if param.description.trim().is_empty() {
+            param.description =
+                "Selector specifying which fields to include in a partial response.".to_string();
+        }
+        parameters.push(ApiParameter {
+            original_name: "fields".to_string(),
+            name: parameter_name("fields", "query"),
+            location: ParamLocation::Query,
+            schema: parameter_schema(&param, &resolver.options),
+            required: false,
             reserved_expansion: false,
         });
     }
@@ -723,7 +758,36 @@ impl MethodSpec {
             }
         }
 
+        // Headers (rare; e.g. `Content-Language`). Header values cannot carry
+        // line breaks, so those are rejected rather than sent.
+        let mut headers = Vec::new();
+        for param in self
+            .parameters
+            .iter()
+            .filter(|p| p.location == ParamLocation::Header)
+        {
+            let Some(value) = args.get(&param.name).filter(|v| !v.is_null()) else {
+                continue;
+            };
+            let s = scalar_to_string(value);
+            if s.is_empty() {
+                continue;
+            }
+            if s.contains(['\r', '\n']) {
+                bail!(
+                    "Header parameter '{}' for {} must not contain line breaks",
+                    param.name,
+                    self.tool_name
+                );
+            }
+            headers.push((param.original_name.clone(), s));
+        }
+
         // Body.
+        let body_param = self
+            .parameters
+            .iter()
+            .find(|p| p.location == ParamLocation::Body);
         let body = match self.body_kind {
             BodyKind::None => None,
             BodyKind::Object => {
@@ -741,24 +805,31 @@ impl MethodSpec {
                 }
                 Some(Value::Object(body))
             }
-            BodyKind::Array => args.get("array").cloned().filter(|v| !v.is_null()),
-            BodyKind::Whole => self
-                .parameters
-                .iter()
-                .find(|p| p.location == ParamLocation::Body)
+            // The single body parameter is looked up by its (possibly
+            // de-duplicated) LLM-facing name rather than a literal `array`.
+            BodyKind::Array => body_param
                 .and_then(|p| args.get(&p.name))
                 .cloned()
-                .filter(|v| !v.is_null())
-                .map(|v| match v {
-                    Value::String(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
+                .filter(|v| !v.is_null()),
+            // Models sometimes pass an object/array body as a JSON string;
+            // decode it unless the schema really asks for a string.
+            BodyKind::Whole => body_param.and_then(|p| {
+                let value = args.get(&p.name).cloned().filter(|v| !v.is_null())?;
+                let wants_string = p.schema.get("type").and_then(Value::as_str) == Some("string");
+                Some(match value {
+                    Value::String(s) if !wants_string => {
+                        serde_json::from_str(&s).unwrap_or(Value::String(s))
+                    }
                     other => other,
-                }),
+                })
+            }),
         };
 
         Ok(PreparedRequest {
             method: self.http_method.clone(),
             url,
             query,
+            headers,
             body,
         })
     }
@@ -776,9 +847,11 @@ fn scalar_to_string(value: &Value) -> String {
 }
 
 /// Percent-encodes a path segment value (RFC 3986). With `reserved`, the
-/// reserved characters (notably `/`) are kept, matching `{+name}` expansion.
+/// reserved characters are kept (matching `{+name}` expansion, notably `/`)
+/// except `?` and `#`, which would otherwise terminate the path and smuggle
+/// a query string or fragment into the request.
 fn percent_encode(value: &str, reserved: bool) -> String {
-    const RESERVED: &[u8] = b":/?#[]@!$&'()*+,;=";
+    const RESERVED: &[u8] = b":/[]@!$&'()*+,;=";
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         let keep = byte.is_ascii_alphanumeric()
@@ -1037,5 +1110,145 @@ mod tests {
         assert_eq!(percent_encode("a/b c", false), "a%2Fb%20c");
         assert_eq!(percent_encode("a/b c", true), "a/b%20c");
         assert_eq!(percent_encode("customers/123", false), "customers%2F123");
+        // `?` and `#` never survive reserved expansion: they would end the
+        // path and inject a query string / fragment.
+        assert_eq!(percent_encode("a?x=1#f", true), "a%3Fx=1%23f");
+        assert_eq!(percent_encode("a?x=1#f", false), "a%3Fx%3D1%23f");
+    }
+
+    #[test]
+    fn path_parameters_never_carry_numeric_formats() {
+        // dfareporting.videoFormats.get declares `id` as integer/int32.
+        let doc = DiscoveryDocument::parse(
+            r#"{"name":"dfareporting","version":"v5","rootUrl":"https://dfareporting.googleapis.com/","servicePath":"dfareporting/v5/",
+            "resources":{"videoFormats":{"methods":{"get":{"id":"dfareporting.videoFormats.get","path":"userprofiles/{profileId}/videoFormats/{id}","httpMethod":"GET",
+            "parameters":{"profileId":{"type":"string","format":"int64","location":"path","required":true},
+                          "id":{"type":"integer","format":"int32","location":"path","required":true},
+                          "when":{"type":"string","format":"date-time","location":"path","required":true}}}}}}}"#,
+        )
+        .unwrap();
+        let specs = build_method_specs(&doc, &SpecOptions::default());
+        let id = &specs[0].parameter("id").unwrap().schema;
+        assert_eq!(id, &json!({"type": "string"}));
+        let profile = &specs[0].parameter("profile_id").unwrap().schema;
+        assert_eq!(profile, &json!({"type": "string"}));
+        // `when` is not in the template, so it is skipped as a declared
+        // path parameter; string formats that are valid stay valid.
+        assert!(specs[0].parameter("when").is_none());
+    }
+
+    #[test]
+    fn header_parameters_are_sent_and_sanitised() {
+        let doc = DiscoveryDocument::parse(
+            r#"{"name":"x","version":"v1","rootUrl":"https://x.googleapis.com/","servicePath":"",
+            "resources":{"things":{"methods":{"list":{"id":"x.things.list","path":"v1/things","httpMethod":"GET",
+            "parameters":{"X-Goog-Quota-User":{"type":"string","location":"header"}}}}}}}"#,
+        )
+        .unwrap();
+        let specs = build_method_specs(&doc, &SpecOptions::default());
+        let param = &specs[0].parameters[0];
+        assert_eq!(param.location, ParamLocation::Header);
+        assert_eq!(param.name, "x_goog_quota_user");
+        let req = specs[0]
+            .prepare_request(&json!({"x_goog_quota_user": "team-a"}))
+            .unwrap();
+        assert_eq!(
+            req.headers,
+            vec![("X-Goog-Quota-User".to_string(), "team-a".to_string())]
+        );
+        assert!(req.query.is_empty());
+        let err = specs[0]
+            .prepare_request(&json!({"x_goog_quota_user": "a\r\nEvil: 1"}))
+            .unwrap_err();
+        assert!(err.to_string().contains("line breaks"));
+    }
+
+    #[test]
+    fn global_fields_parameter_is_exposed_unless_the_method_declares_one() {
+        let doc = DiscoveryDocument::parse(
+            r#"{"name":"drive","version":"v3","rootUrl":"https://www.googleapis.com/","servicePath":"drive/v3/",
+            "parameters":{"alt":{"type":"string","location":"query"},"fields":{"type":"string","location":"query","description":"Selector specifying which fields to include in a partial response."}},
+            "resources":{"files":{"methods":{
+              "list":{"id":"drive.files.list","path":"files","httpMethod":"GET","parameters":{"q":{"type":"string","location":"query"}}},
+              "own":{"id":"drive.files.own","path":"files:own","httpMethod":"GET","parameters":{"fields":{"type":"string","location":"query","description":"Method-level fields."}}}
+            }}}}"#,
+        )
+        .unwrap();
+        let specs = build_method_specs(&doc, &SpecOptions::default());
+        let names: Vec<&str> = specs[0]
+            .parameters
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["q", "fields"], "alt is not exposed");
+        let fields = specs[0].parameter("fields").unwrap();
+        assert_eq!(fields.location, ParamLocation::Query);
+        assert!(!fields.required);
+        let req = specs[0]
+            .prepare_request(&json!({"fields": "files(id,name)"}))
+            .unwrap();
+        assert_eq!(
+            req.query,
+            vec![("fields".to_string(), "files(id,name)".to_string())]
+        );
+        // The method's own declaration wins (no duplicate).
+        let own: Vec<&ApiParameter> = specs[1]
+            .parameters
+            .iter()
+            .filter(|p| p.original_name == "fields")
+            .collect();
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].schema["description"], "Method-level fields.");
+    }
+
+    #[test]
+    fn array_body_is_read_through_its_deduped_parameter_name() {
+        let doc = DiscoveryDocument::parse(
+            r#"{"name":"x","version":"v1","rootUrl":"https://x.googleapis.com/","servicePath":"",
+            "schemas":{"Items":{"id":"Items","type":"array","items":{"type":"string"}}},
+            "resources":{"things":{"methods":{"set":{"id":"x.things.set","path":"v1/things","httpMethod":"POST",
+            "parameters":{"array":{"type":"string","location":"query"}},"request":{"$ref":"Items"}}}}}}"#,
+        )
+        .unwrap();
+        let specs = build_method_specs(&doc, &SpecOptions::default());
+        assert_eq!(specs[0].body_kind, BodyKind::Array);
+        let names: Vec<&str> = specs[0]
+            .parameters
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["array", "array_0"]);
+        let req = specs[0]
+            .prepare_request(&json!({"array": "q", "array_0": ["a", "b"]}))
+            .unwrap();
+        assert_eq!(req.query, vec![("array".to_string(), "q".to_string())]);
+        assert_eq!(req.body, Some(json!(["a", "b"])));
+    }
+
+    #[test]
+    fn whole_body_strings_are_only_decoded_when_the_schema_is_not_a_string() {
+        let untyped = DiscoveryDocument::parse(
+            r#"{"name":"x","version":"v1","rootUrl":"https://x.googleapis.com/","servicePath":"",
+            "schemas":{"Any":{"id":"Any","type":"any"}},
+            "resources":{"things":{"methods":{"set":{"id":"x.things.set","path":"v1/things","httpMethod":"POST","request":{"$ref":"Any"}}}}}}"#,
+        )
+        .unwrap();
+        let specs = build_method_specs(&untyped, &SpecOptions::default());
+        assert_eq!(specs[0].body_kind, BodyKind::Whole);
+        let req = specs[0]
+            .prepare_request(&json!({"body": "{\"a\": 1}"}))
+            .unwrap();
+        assert_eq!(req.body, Some(json!({"a": 1})));
+
+        let stringly = DiscoveryDocument::parse(
+            r#"{"name":"x","version":"v1","rootUrl":"https://x.googleapis.com/","servicePath":"",
+            "schemas":{"Text":{"id":"Text","type":"string"}},
+            "resources":{"things":{"methods":{"set":{"id":"x.things.set","path":"v1/things","httpMethod":"POST","request":{"$ref":"Text"}}}}}}"#,
+        )
+        .unwrap();
+        let specs = build_method_specs(&stringly, &SpecOptions::default());
+        assert_eq!(specs[0].body_kind, BodyKind::Whole);
+        let req = specs[0].prepare_request(&json!({"body": "123"})).unwrap();
+        assert_eq!(req.body, Some(json!("123")), "string schemas stay strings");
     }
 }

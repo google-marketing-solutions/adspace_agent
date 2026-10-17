@@ -39,7 +39,7 @@ use adspace_agent::auth::{
     CREDENTIALS_STATE_KEY, GoogleOAuthFlow, OAuthClientConfig, OAuthToken, OAuthUiEvent,
     SessionCredentialManager, SessionRef, auth_required,
 };
-use adspace_agent::server::{OAuthRoutes, oauth_router, resume_message};
+use adspace_agent::server::{AdminAllowList, OAuthRoutes, oauth_router, resume_message};
 use async_trait::async_trait;
 use axum::Router;
 use axum::routing::post;
@@ -281,6 +281,7 @@ async fn oauth_callback_attaches_tokens_to_the_requesting_session() {
         credentials: credentials.clone(),
         sessions: sessions.clone(),
         resume: Some(Arc::new(resume)),
+        admins: AdminAllowList::default(),
     }))
     .await;
     let page = reqwest::get(format!(
@@ -465,6 +466,7 @@ async fn in_flight_tool_waits_for_popup_callback_without_stopping_turn() {
         credentials: credentials.clone(),
         sessions: sessions.clone(),
         resume: Some(Arc::new(resume)),
+        admins: AdminAllowList::default(),
     }))
     .await;
 
@@ -484,22 +486,41 @@ async fn in_flight_tool_waits_for_popup_callback_without_stopping_turn() {
     });
 
     // The server immediately broadcasts AuthRequired so `/ui/` pops up the consent window.
+    // The event is addressed to the session's owner and carries the consent URL
+    // plus an opaque request id — never the signed OAuth state itself.
     let event = tokio::time::timeout(std::time::Duration::from_secs(2), events_rx.recv())
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(event.user_id(), "local-user");
     let OAuthUiEvent::AuthRequired {
-        state,
+        request_id,
         session_id,
         auth_url,
         scopes,
-    } = event
+        ..
+    } = event.clone()
     else {
         panic!("expected AuthRequired, got {event:?}");
     };
     assert_eq!(session_id, "s-popup");
     assert!(auth_url.starts_with(&format!("{google}/auth?")));
     assert_eq!(scopes, vec!["https://www.googleapis.com/auth/adwords"]);
+    let wire: Value = serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+    assert_eq!(wire["type"], "auth_required");
+    assert_eq!(wire["request_id"], request_id);
+    assert!(wire.get("state").is_none(), "{wire}");
+    assert!(wire.get("user_id").is_none(), "{wire}");
+    let state = state_param(&auth_url);
+
+    // The popup acknowledgment is keyed by the request id and bound to the user.
+    let ack = reqwest::Client::new()
+        .post(format!("{agent}/oauth2/ack"))
+        .json(&json!({ "request_id": request_id, "opened": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ack.status(), reqwest::StatusCode::UNAUTHORIZED, "no cookie");
 
     // Complete the OAuth redirect in the popup while `access_token` is still waiting.
     let page = reqwest::get(format!(

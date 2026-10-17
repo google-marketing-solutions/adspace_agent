@@ -192,12 +192,37 @@ pub struct SerializedSqliteSessionService {
     lock: RwLock<()>,
 }
 
+/// Maximum number of attempts for a SQLite operation that reports the
+/// database as locked (see [`SerializedSqliteSessionService::with_retry`]).
+const SQLITE_LOCK_ATTEMPTS: u32 = 5;
+
 impl SerializedSqliteSessionService {
     /// Wraps an initialized [`SqliteSessionService`].
     pub fn new(inner: SqliteSessionService) -> Self {
         Self {
             inner,
             lock: RwLock::new(()),
+        }
+    }
+
+    /// Runs `op` up to [`SQLITE_LOCK_ATTEMPTS`] times, sleeping `20 ms × attempt`
+    /// between attempts while SQLite reports `database is locked`/`SQLITE_BUSY`.
+    /// Any other error (or the last locked error) is returned as-is.
+    async fn with_retry<F, Fut, T>(&self, mut op: F) -> adk_rust::Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = adk_rust::Result<T>>,
+    {
+        let mut attempt = 1;
+        loop {
+            match op().await {
+                Ok(value) => return Ok(value),
+                Err(e) if attempt < SQLITE_LOCK_ATTEMPTS && is_sqlite_locked(&e) => {
+                    tokio::time::sleep(Duration::from_millis(20 * u64::from(attempt))).await;
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
 }
@@ -211,128 +236,52 @@ fn is_sqlite_locked(err: &AdkError) -> bool {
 impl SessionService for SerializedSqliteSessionService {
     async fn create(&self, req: CreateRequest) -> adk_rust::Result<Box<dyn Session>> {
         let _guard = self.lock.write().await;
-        for attempt in 1..=5 {
-            match self.inner.create(req.clone()).await {
-                Ok(session) => return Ok(session),
-                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
-                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
+        self.with_retry(|| self.inner.create(req.clone())).await
     }
 
     async fn get(&self, req: GetRequest) -> adk_rust::Result<Box<dyn Session>> {
         let _guard = self.lock.read().await;
-        for attempt in 1..=5 {
-            match self.inner.get(req.clone()).await {
-                Ok(session) => return Ok(session),
-                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
-                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
+        self.with_retry(|| self.inner.get(req.clone())).await
     }
 
     async fn list(&self, req: ListRequest) -> adk_rust::Result<Vec<Box<dyn Session>>> {
         let _guard = self.lock.read().await;
-        for attempt in 1..=5 {
-            match self.inner.list(req.clone()).await {
-                Ok(sessions) => return Ok(sessions),
-                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
-                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
+        self.with_retry(|| self.inner.list(req.clone())).await
     }
 
     async fn delete(&self, req: DeleteRequest) -> adk_rust::Result<()> {
         let _guard = self.lock.write().await;
-        for attempt in 1..=5 {
-            match self.inner.delete(req.clone()).await {
-                Ok(()) => return Ok(()),
-                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
-                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
+        self.with_retry(|| self.inner.delete(req.clone())).await
     }
 
     async fn append_event(&self, session_id: &str, event: Event) -> adk_rust::Result<()> {
         let _guard = self.lock.write().await;
-        for attempt in 1..=5 {
-            match self.inner.append_event(session_id, event.clone()).await {
-                Ok(()) => return Ok(()),
-                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
-                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
+        self.with_retry(|| self.inner.append_event(session_id, event.clone()))
+            .await
     }
 
     async fn get_for_identity(&self, identity: &AdkIdentity) -> adk_rust::Result<Box<dyn Session>> {
         let _guard = self.lock.read().await;
-        for attempt in 1..=5 {
-            match self.inner.get_for_identity(identity).await {
-                Ok(session) => return Ok(session),
-                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
-                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
+        self.with_retry(|| self.inner.get_for_identity(identity))
+            .await
     }
 
     async fn delete_for_identity(&self, identity: &AdkIdentity) -> adk_rust::Result<()> {
         let _guard = self.lock.write().await;
-        for attempt in 1..=5 {
-            match self.inner.delete_for_identity(identity).await {
-                Ok(()) => return Ok(()),
-                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
-                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
+        self.with_retry(|| self.inner.delete_for_identity(identity))
+            .await
     }
 
     async fn append_event_for_identity(&self, req: AppendEventRequest) -> adk_rust::Result<()> {
         let _guard = self.lock.write().await;
-        for attempt in 1..=5 {
-            match self.inner.append_event_for_identity(req.clone()).await {
-                Ok(()) => return Ok(()),
-                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
-                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
+        self.with_retry(|| self.inner.append_event_for_identity(req.clone()))
+            .await
     }
 
     async fn delete_all_sessions(&self, app_name: &str, user_id: &str) -> adk_rust::Result<()> {
         let _guard = self.lock.write().await;
-        for attempt in 1..=5 {
-            match self.inner.delete_all_sessions(app_name, user_id).await {
-                Ok(()) => return Ok(()),
-                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
-                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
+        self.with_retry(|| self.inner.delete_all_sessions(app_name, user_id))
+            .await
     }
 
     async fn rewind(
@@ -341,16 +290,8 @@ impl SessionService for SerializedSqliteSessionService {
         target_event_id: &str,
     ) -> adk_rust::Result<Box<dyn Session>> {
         let _guard = self.lock.write().await;
-        for attempt in 1..=5 {
-            match self.inner.rewind(session_id, target_event_id).await {
-                Ok(session) => return Ok(session),
-                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
-                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
+        self.with_retry(|| self.inner.rewind(session_id, target_event_id))
+            .await
     }
 
     async fn rewind_steps(
@@ -359,16 +300,8 @@ impl SessionService for SerializedSqliteSessionService {
         steps: usize,
     ) -> adk_rust::Result<Box<dyn Session>> {
         let _guard = self.lock.write().await;
-        for attempt in 1..=5 {
-            match self.inner.rewind_steps(session_id, steps).await {
-                Ok(session) => return Ok(session),
-                Err(e) if attempt < 5 && is_sqlite_locked(&e) => {
-                    tokio::time::sleep(Duration::from_millis(20 * attempt)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
+        self.with_retry(|| self.inner.rewind_steps(session_id, steps))
+            .await
     }
 
     async fn health_check(&self) -> adk_rust::Result<()> {
@@ -515,6 +448,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed.len(), 16);
+    }
+
+    #[tokio::test]
+    async fn with_retry_retries_locked_errors_only() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.db");
+        let url = normalize_sqlite_uri(&format!("sqlite:///{}", db.display()));
+        let inner = SqliteSessionService::new(&url).await.unwrap();
+        let service = SerializedSqliteSessionService::new(inner);
+
+        // Locked twice, then succeeds: three attempts in total.
+        let calls = AtomicU32::new(0);
+        let value = service
+            .with_retry(|| {
+                let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                async move {
+                    if n < 3 {
+                        Err(AdkError::session("(code: 5) database is locked"))
+                    } else {
+                        Ok(n)
+                    }
+                }
+            })
+            .await
+            .expect("recovers after transient lock");
+        assert_eq!(value, 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        // A non-lock error is returned immediately.
+        let calls = AtomicU32::new(0);
+        let err = service
+            .with_retry(|| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err::<(), _>(AdkError::session("no such table")) }
+            })
+            .await
+            .expect_err("other errors are not retried");
+        assert!(err.to_string().contains("no such table"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Persistent lock gives up after the configured number of attempts.
+        let calls = AtomicU32::new(0);
+        let err = service
+            .with_retry(|| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err::<(), _>(AdkError::session("SQLITE_BUSY")) }
+            })
+            .await
+            .expect_err("gives up eventually");
+        assert!(is_sqlite_locked(&err));
+        assert_eq!(calls.load(Ordering::SeqCst), SQLITE_LOCK_ATTEMPTS);
     }
 
     #[test]

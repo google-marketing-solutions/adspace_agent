@@ -23,7 +23,6 @@ use adk_rust::memory::{MemoryService, MemoryServiceAdapter};
 use adk_rust::model::GeminiModel;
 use adk_rust::session::SessionService;
 use adk_rust::tool::BasicToolset;
-use adk_rust::tool::bigquery::BigQueryToolset;
 use adk_rust::tool::memory::PreloadMemoryTool;
 use adk_rust::{
     Agent, BeforeAgentCallback, CacheCapable, CallbackContext, Content, ContextCacheConfig,
@@ -33,19 +32,21 @@ use adk_rust::{
 use anyhow::Context;
 use async_trait::async_trait;
 use futures::StreamExt;
+use tracing::Instrument;
 
 use crate::auth::{
     AdcTokenProvider, GoogleOAuthFlow, OAuthClientConfig, SessionCredentialManager, SessionRef,
 };
 use crate::config::{
-    self, APP_NAME, ActiveModels, DISPLAY_VIDEO_360_TOOL_FILTER, DRIVE_TOOL_FILTER,
-    GOOGLE_ADS_API_VERSION, ModelController, STORAGE_TOOL_FILTER, Settings, SimpleModelController,
-    YOUTUBE_TOOL_FILTER, validate_model_name,
+    self, APP_NAME, ActiveModels, DEFAULT_MODEL, DISPLAY_VIDEO_360_TOOL_FILTER, DRIVE_TOOL_FILTER,
+    GOOGLE_ADS_API_VERSION, ModelController, PRESET_MODELS, STORAGE_TOOL_FILTER, Settings,
+    SimpleModelController, YOUTUBE_TOOL_FILTER, validate_model_name,
 };
 use crate::gcs::GcsClient;
 use crate::genai::GenAiClient;
 use crate::google_api::{DiscoveryFetcher, GoogleApiToolset, GoogleApiToolsetConfig, SpecOptions};
 use crate::services;
+use crate::tools::bigquery::BigQueryToolset;
 use crate::tools::cm360_trafficking::{Cm360Services, Cm360TraffickingToolset};
 use crate::tools::data_analysis::{PythonExecutorKind, data_analysis_toolset};
 use crate::tools::gemini_builtins::{GeminiBuiltinTool, gemini_builtin_toolset};
@@ -79,16 +80,37 @@ use `render_chart` (bar/line/area/pie), `render_table` (with `sortable: true` an
 followed by a concise written takeaway (never dump raw component JSON in text). Use `render_form` when collecting structured \
 campaign parameters or missing IDs, and `render_confirm` / `render_card` before executing write/trafficking actions.";
 
-fn intern_model_name(name: &str) -> &'static str {
+/// Upper bound on distinct *custom* (non-preset) model names interned per
+/// process; see [`intern_model_name`].
+const MAX_INTERNED_MODEL_NAMES: usize = 256;
+
+/// Returns a `'static` copy of `name` for [`RuntimeModelConfig`]'s active name.
+///
+/// [`adk_rust::Llm::name`] hands out a borrowed `&str`, so the active name must
+/// outlive every lock guard. Preset names are served straight from the
+/// [`PRESET_MODELS`]/[`DEFAULT_MODEL`] constants (no allocation); only custom
+/// names are interned, once each and bounded by [`MAX_INTERNED_MODEL_NAMES`],
+/// so a stream of distinct `POST /auth/models` bodies cannot grow memory
+/// without bound. Returns `None` once the bound is reached.
+fn intern_model_name(name: &str) -> Option<&'static str> {
+    if let Some(preset) = std::iter::once(&DEFAULT_MODEL)
+        .chain(PRESET_MODELS)
+        .find(|preset| **preset == name)
+    {
+        return Some(preset);
+    }
     static INTERNED: std::sync::LazyLock<Mutex<HashSet<&'static str>>> =
         std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
     let mut set = INTERNED.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(&existing) = set.get(name) {
-        return existing;
+        return Some(existing);
+    }
+    if set.len() >= MAX_INTERNED_MODEL_NAMES {
+        return None;
     }
     let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
     set.insert(leaked);
-    leaked
+    Some(leaked)
 }
 
 type LlmFactory = Box<
@@ -116,7 +138,13 @@ impl RuntimeModelConfig {
         video_model: impl Into<String>,
         image_model: impl Into<String>,
     ) -> Self {
-        let initial_name = intern_model_name(adk_rust::Llm::name(initial.as_ref()));
+        let initial_name = adk_rust::Llm::name(initial.as_ref());
+        let initial_name = intern_model_name(initial_name).unwrap_or_else(|| {
+            tracing::warn!(
+                "Model-name intern table is full; reporting '{DEFAULT_MODEL}' instead of '{initial_name}'"
+            );
+            DEFAULT_MODEL
+        });
         let llm: Arc<dyn adk_rust::Llm> = initial.clone();
         let cache: Arc<dyn CacheCapable> = initial;
         Self {
@@ -169,14 +197,21 @@ impl ModelController for RuntimeModelConfig {
         if let Some(new_model) = validated_model {
             let current = *self.llm_name.read().unwrap_or_else(|e| e.into_inner());
             if new_model != current {
+                // Reserve the name before building the model so a full intern
+                // table rejects the request without swapping anything.
+                let interned = intern_model_name(&new_model).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "too many distinct custom model names ({MAX_INTERNED_MODEL_NAMES}) \
+                         have been configured since start-up; restart the server to use '{new_model}'"
+                    )
+                })?;
                 let (new_llm, new_cache) = (self.factory)(&new_model)?;
                 *self.llm.write().unwrap_or_else(|e| e.into_inner()) = new_llm;
                 *self
                     .cache_capable
                     .write()
                     .unwrap_or_else(|e| e.into_inner()) = new_cache;
-                *self.llm_name.write().unwrap_or_else(|e| e.into_inner()) =
-                    intern_model_name(&new_model);
+                *self.llm_name.write().unwrap_or_else(|e| e.into_inner()) = interned;
                 tracing::info!("Switched active agent LLM model to {new_model}");
             }
         }
@@ -224,8 +259,13 @@ impl adk_rust::Llm for RuntimeModelConfig {
         let model_name = active.name().to_string();
         req.model = model_name.clone();
         req.contents = normalize_gemini_request_contents(req.contents);
+        // The `gen_ai.generate` span wraps the upstream call itself; the
+        // streamed usage is then recorded on that same span as chunks arrive.
         let usage_span = adk_rust::telemetry::llm_generate_span("gemini", &model_name, stream);
-        let response_stream = active.generate_content(req, stream).await?;
+        let response_stream = active
+            .generate_content(req, stream)
+            .instrument(usage_span.clone())
+            .await?;
         Ok(track_stream_token_usage(
             response_stream,
             usage_span,
@@ -510,11 +550,12 @@ fn track_stream_token_usage(
                     audio_input_tokens: usage.audio_input_token_count,
                     audio_output_tokens: usage.audio_output_token_count,
                 };
+                // `record_llm_usage` writes to `Span::current()`, so enter the
+                // `gen_ai.generate` span first and record exactly once.
                 {
                     let _enter = span.enter();
                     adk_rust::telemetry::record_llm_usage(&llm_usage);
                 }
-                adk_rust::telemetry::record_llm_usage(&llm_usage);
 
                 let estimated_cost = config::estimate_usage_cost_usd(&model_name, usage);
                 if response.partial || usage.cost.is_none() {
@@ -1148,13 +1189,13 @@ pub async fn create_agent(
     }
 
     if settings.is_toolset_enabled("bigquery") {
-        let bq = match &settings.google_cloud_project {
-            Some(project) => BigQueryToolset::with_project(project.clone()),
-            None => BigQueryToolset::new(),
-        };
-        toolsets.push(Arc::new(bq.with_read_only(
-            config::env_or("BIGQUERY_READ_ONLY", "true").eq_ignore_ascii_case("true"),
-        )));
+        // Runs with the signed-in user's OAuth token (never the service
+        // account's ADC), like every other data toolset.
+        toolsets.push(Arc::new(
+            BigQueryToolset::new(credentials.clone())
+                .with_project(settings.google_cloud_project.clone())
+                .with_read_only(config::env_bool_or("BIGQUERY_READ_ONLY", true)),
+        ));
     }
 
     if settings.is_toolset_enabled("google_genai") {
@@ -1355,6 +1396,23 @@ mod tests {
 
         settings.enabled_toolsets = vec![];
         assert!(google_api_toolset_configs(&settings).is_empty());
+    }
+
+    #[test]
+    fn model_name_interning_reuses_presets_and_dedupes_custom_names() {
+        // Preset names come straight from the constants: no allocation at all.
+        let preset = intern_model_name(PRESET_MODELS[0]).expect("preset interns");
+        assert!(std::ptr::eq(preset, PRESET_MODELS[0]));
+        assert!(std::ptr::eq(
+            intern_model_name(DEFAULT_MODEL).expect("default interns"),
+            DEFAULT_MODEL
+        ));
+
+        // Custom names are interned once and the same pointer handed back.
+        let first = intern_model_name("custom-model-intern-test").expect("custom interns");
+        let second = intern_model_name("custom-model-intern-test").expect("custom reused");
+        assert_eq!(first, "custom-model-intern-test");
+        assert!(std::ptr::eq(first, second));
     }
 
     #[test]

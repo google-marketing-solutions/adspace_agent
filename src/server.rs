@@ -23,22 +23,26 @@
 //! have to come back and say "done" (the web UI polls the session and shows
 //! the continuation).
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
 use adk_rust::server::shutdown_signal;
+use adk_rust::server::{RequestContext, RequestContextError, RequestContextExtractor};
 use adk_rust::session::SessionService;
 use adk_rust::{CacheCapable, Launcher};
-use axum::body::{Body, to_bytes};
+use async_trait::async_trait;
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Query, Request, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{AppendHeaders, Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures::stream::Stream;
+use futures::stream::StreamExt as _;
 
 use crate::agent::{AgentRuntime, TurnRunner};
 use crate::auth::oauth::OAUTH_CALLBACK_PATH;
@@ -59,6 +63,50 @@ pub struct OAuthCallbackQuery {
     pub error: Option<String>,
 }
 
+/// Who may change the server-wide LLM / image / video models through
+/// `POST /auth/models` (`ADMIN_EMAILS`, comma-separated, case-insensitive).
+///
+/// The models are process-global — switching them affects every user — so
+/// when Google Sign-In is configured only listed administrators may do it.
+/// Without Sign-In (local development, single anonymous user) an empty list
+/// means "anyone", because there is no identity to check.
+#[derive(Clone, Debug, Default)]
+pub struct AdminAllowList(Arc<Vec<String>>);
+
+impl AdminAllowList {
+    /// Reads `ADMIN_EMAILS` from the environment.
+    pub fn from_env() -> Self {
+        Self::new(
+            std::env::var("ADMIN_EMAILS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::to_string),
+        )
+    }
+
+    /// Builds the list from email addresses (blank entries are ignored).
+    pub fn new(emails: impl IntoIterator<Item = String>) -> Self {
+        Self(Arc::new(
+            emails
+                .into_iter()
+                .map(|e| e.trim().to_ascii_lowercase())
+                .filter(|e| !e.is_empty())
+                .collect(),
+        ))
+    }
+
+    /// Whether no administrator is configured.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Whether `email` is an administrator.
+    pub fn allows(&self, email: &str) -> bool {
+        let email = email.trim().to_ascii_lowercase();
+        self.0.contains(&email)
+    }
+}
+
 /// Shared state of the OAuth routes.
 #[derive(Clone)]
 pub struct OAuthRoutes {
@@ -69,6 +117,8 @@ pub struct OAuthRoutes {
     /// When set, the chat is resumed automatically after a successful
     /// authorization (see [`resume_message`]).
     pub resume: Option<Arc<TurnRunner>>,
+    /// Users allowed to switch the server-wide models.
+    pub admins: AdminAllowList,
 }
 
 /// The user-role message that resumes a chat after Google access was granted.
@@ -112,6 +162,21 @@ pub const AUTH_EVENTS_PATH: &str = "/oauth2/events";
 pub const AUTH_ACK_PATH: &str = "/oauth2/ack";
 /// Cookie name storing the signed Google user profile for `/app/`.
 pub const USER_COOKIE_NAME: &str = "adspace_user";
+/// Cookie binding a Google Sign-In started by `/auth/login` to the browser
+/// that started it; only sent back to the callback path.
+pub const LOGIN_NONCE_COOKIE_NAME: &str = "adspace_login";
+/// Lifetime of the `adspace_user` cookie (matches `verify_user_cookie`).
+const USER_COOKIE_MAX_AGE_SECS: u64 = 7 * 86_400;
+/// Lifetime of the sign-in nonce cookie (matches the OAuth state TTL).
+const LOGIN_NONCE_MAX_AGE_SECS: u64 = 15 * 60;
+/// Largest JSON API response that is buffered to strip credentials from it;
+/// bigger ones are refused (never served unscrubbed).
+const MAX_SCRUBBED_JSON_BYTES: usize = 64 * 1024 * 1024;
+/// Largest single SSE event that is buffered to strip credentials from it.
+const MAX_SCRUBBED_SSE_EVENT_BYTES: usize = 32 * 1024 * 1024;
+/// Default time in-flight requests get to finish after SIGTERM
+/// (`SHUTDOWN_GRACE_SECS`; Cloud Run allows 10 s).
+const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(8);
 /// The helper script (see the file for what it does in the UI).
 const AUTH_HELPER_JS: &str = include_str!("auth_helper.js");
 /// Tag injected into the web UI page.
@@ -138,8 +203,8 @@ const STUDIO_FAVICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" view
 /// Body of `POST /oauth2/ack`.
 #[derive(Debug, serde::Deserialize)]
 pub struct OAuthAckRequest {
-    /// Signed OAuth state parameter from the `auth_required` event.
-    pub state: String,
+    /// Opaque `request_id` from the `auth_required` event.
+    pub request_id: String,
     /// Whether `window.open` succeeded in the browser tab.
     pub opened: bool,
 }
@@ -201,41 +266,61 @@ async fn auth_helper() -> Response {
 
 /// Streams real-time `auth_required` / `auth_completed` events to `/ui/` so a
 /// popup opens the instant an in-flight tool call needs Google OAuth consent.
-async fn oauth_events(
-    State(routes): State<OAuthRoutes>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+///
+/// The stream is bound to the signed-in user: it requires the `adspace_user`
+/// cookie (or, without Google Sign-In, serves the anonymous default user) and
+/// only delivers events for that user's sessions.
+async fn oauth_events(State(routes): State<OAuthRoutes>, headers: HeaderMap) -> Response {
+    let Some(user_id) = request_user_id(&headers, &routes.credentials) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     let rx = routes.credentials.subscribe_events();
     let shutdown = routes.credentials.subscribe_shutdown();
-    let stream = futures::stream::unfold((rx, shutdown), |(mut rx, mut shutdown)| async move {
-        if *shutdown.borrow() {
-            return None;
-        }
-        loop {
-            let next = tokio::select! {
-                _ = shutdown.changed() => None,
-                res = rx.recv() => Some(res),
-            };
-            match next? {
-                Ok(event) => {
-                    if let Ok(json) = serde_json::to_string(&event) {
-                        return Some((Ok(SseEvent::default().data(json)), (rx, shutdown)));
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+    let stream = futures::stream::unfold(
+        (rx, shutdown, user_id),
+        |(mut rx, mut shutdown, user_id)| async move {
+            if *shutdown.borrow() {
+                return None;
             }
-        }
-    });
-    Sse::new(stream).keep_alive(KeepAlive::default())
+            loop {
+                let next = tokio::select! {
+                    _ = shutdown.changed() => None,
+                    res = rx.recv() => Some(res),
+                };
+                match next? {
+                    Ok(event) if event.user_id() == user_id => {
+                        if let Ok(json) = serde_json::to_string(&event) {
+                            return Some((
+                                Ok::<_, Infallible>(SseEvent::default().data(json)),
+                                (rx, shutdown, user_id),
+                            ));
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        },
+    );
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 /// Records whether `/ui/` succeeded in opening the OAuth popup via `window.open`.
 async fn oauth_ack(
     State(routes): State<OAuthRoutes>,
+    headers: HeaderMap,
     Json(req): Json<OAuthAckRequest>,
-) -> Json<serde_json::Value> {
-    let fallback_opened = routes.credentials.ack_popup(&req.state, req.opened);
-    Json(serde_json::json!({ "fallback_opened": fallback_opened }))
+) -> Response {
+    let Some(user_id) = request_user_id(&headers, &routes.credentials) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let fallback_opened = routes
+        .credentials
+        .ack_popup(&req.request_id, &user_id, req.opened);
+    Json(serde_json::json!({ "fallback_opened": fallback_opened })).into_response()
 }
 
 /// Inserts the helper `<script>` tag before `</body>` (or at the end).
@@ -358,9 +443,15 @@ async fn studio_favicon() -> Response {
 }
 
 /// Starts a Google Sign-In flow (`openid email profile`) and redirects to Google.
+///
+/// The nonce embedded in the signed `state` is also set as a short-lived
+/// cookie so only this browser can complete the sign-in on the callback.
 async fn auth_login(State(routes): State<OAuthRoutes>) -> Response {
     match routes.credentials.begin_user_login() {
-        Ok(url) => Redirect::to(&url).into_response(),
+        Ok(login) => {
+            let cookie = login_nonce_cookie(&routes.credentials, &login.nonce);
+            ([(header::SET_COOKIE, cookie)], Redirect::to(&login.url)).into_response()
+        }
         Err(e) => {
             let safe_err = escape_html(&e.to_string());
             html_page(
@@ -371,6 +462,38 @@ async fn auth_login(State(routes): State<OAuthRoutes>) -> Response {
             .into_response()
         }
     }
+}
+
+/// `; Secure` when the public URL is HTTPS (cookies then never travel in clear).
+fn cookie_secure_attr(credentials: &SessionCredentialManager) -> &'static str {
+    if credentials.flow().config().is_https() {
+        "; Secure"
+    } else {
+        ""
+    }
+}
+
+/// `Set-Cookie` value for the signed user cookie (`max_age` 0 clears it).
+fn user_cookie(credentials: &SessionCredentialManager, value: &str, max_age: u64) -> HeaderValue {
+    let secure = cookie_secure_attr(credentials);
+    HeaderValue::from_str(&format!(
+        "{USER_COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}"
+    ))
+    .expect("valid cookie header")
+}
+
+/// `Set-Cookie` value for the sign-in nonce (`nonce` empty clears it).
+fn login_nonce_cookie(credentials: &SessionCredentialManager, nonce: &str) -> HeaderValue {
+    let secure = cookie_secure_attr(credentials);
+    let max_age = if nonce.is_empty() {
+        0
+    } else {
+        LOGIN_NONCE_MAX_AGE_SECS
+    };
+    HeaderValue::from_str(&format!(
+        "{LOGIN_NONCE_COOKIE_NAME}={nonce}; Path={OAUTH_CALLBACK_PATH}; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}"
+    ))
+    .expect("valid cookie header")
 }
 
 fn percent_decode_segment(input: &str) -> String {
@@ -393,19 +516,44 @@ fn percent_decode_segment(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The user id named in the path of a user-scoped adk-server route
+/// (`/api/apps/{app}/users/{user}/…`, `/api/sessions/{app}/{user}/…`,
+/// `/api/run/{app}/{user}/{session}`, `/api/debug/graph/{app}/{user}/…`).
 fn extract_api_path_user_id(path: &str) -> Option<String> {
-    let rest = path.strip_prefix("/api/apps/")?;
-    let mut segments = rest.split('/');
-    let _app = segments.next()?;
-    let users_lit = segments.next()?;
-    if users_lit != "users" {
-        return None;
-    }
-    let raw_user = segments.next()?;
+    let raw_user = if let Some(rest) = path.strip_prefix("/api/apps/") {
+        let mut segments = rest.split('/');
+        let _app = segments.next()?;
+        if segments.next()? != "users" {
+            return None;
+        }
+        segments.next()?
+    } else {
+        let rest = path
+            .strip_prefix("/api/sessions/")
+            .or_else(|| path.strip_prefix("/api/run/"))
+            .or_else(|| path.strip_prefix("/api/debug/graph/"))?;
+        let mut segments = rest.split('/');
+        let _app = segments.next()?;
+        segments.next()?
+    };
     if raw_user.is_empty() {
         return None;
     }
     Some(percent_decode_segment(raw_user))
+}
+
+/// Whether an `/api/…` response can carry session events / state (and hence
+/// the OAuth token stored under [`CREDENTIALS_STATE_KEY`]).
+fn carries_session_state(path: &str) -> bool {
+    if path.contains("/artifacts") {
+        return false;
+    }
+    (path.starts_with("/api/apps/") && path.contains("/sessions"))
+        || path.starts_with("/api/sessions")
+        || path == "/api/run"
+        || path == "/api/run_sse"
+        || path.starts_with("/api/run/")
+        || path.starts_with("/api/debug/")
 }
 
 fn scrub_credentials_from_json(val: &mut serde_json::Value) {
@@ -425,40 +573,141 @@ fn scrub_credentials_from_json(val: &mut serde_json::Value) {
     }
 }
 
-/// Middleware that protects user-scoped `/api/apps/{app}/users/{user_id}` routes
-/// with the signed `adspace_user` cookie (for non-default users) and strips raw
-/// OAuth token secrets (`CREDENTIALS_STATE_KEY`) from session JSON responses.
-pub async fn enforce_api_user_cookie(
-    State(credentials): State<Arc<SessionCredentialManager>>,
-    req: Request,
-    next: Next,
-) -> Response {
-    let path = req.uri().path().to_string();
-    if let Some(target_user_id) = extract_api_path_user_id(&path)
-        && target_user_id != DEFAULT_USER_ID
-    {
-        let cookie_user = extract_cookie_user(req.headers(), &credentials);
-        if !matches!(cookie_user, Some(u) if u.id == target_user_id) {
-            return StatusCode::UNAUTHORIZED.into_response();
+/// Removes [`CREDENTIALS_STATE_KEY`] from the `data:` payload of one complete
+/// SSE event (text up to and including its terminating blank line).
+///
+/// Non-`data:` lines (`event:`, `id:`, `retry:`, comments) are kept; the data
+/// lines are joined as the SSE spec prescribes, parsed as JSON, scrubbed and
+/// re-emitted as a single `data:` line. Data that is not JSON passes through.
+fn scrub_sse_event(frame: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(frame);
+    let body = text.trim_end_matches('\n');
+    let mut out = String::with_capacity(text.len());
+    let mut data_lines: Vec<&str> = Vec::new();
+    for line in body.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        match line.strip_prefix("data:") {
+            Some(data) => data_lines.push(data.strip_prefix(' ').unwrap_or(data)),
+            None => {
+                out.push_str(line);
+                out.push('\n');
+            }
         }
     }
+    if !data_lines.is_empty() {
+        let data = data_lines.join("\n");
+        match serde_json::from_str::<serde_json::Value>(&data) {
+            Ok(mut json) => {
+                scrub_credentials_from_json(&mut json);
+                out.push_str("data: ");
+                out.push_str(&serde_json::to_string(&json).unwrap_or_default());
+                out.push('\n');
+            }
+            Err(_) => {
+                for line in data_lines {
+                    out.push_str("data: ");
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    out.push('\n');
+    out.into_bytes()
+}
 
-    let is_session_api = path.starts_with("/api/apps/") && path.contains("/sessions");
-    let response = next.run(req).await;
-    if !is_session_api || !response.status().is_success() {
-        return response;
+/// Incremental SSE scrubber: buffers bytes until an event is complete
+/// (terminated by a blank line), scrubs it and emits it.
+#[derive(Default)]
+struct SseScrubber {
+    buf: Vec<u8>,
+}
+
+impl SseScrubber {
+    /// Feeds a chunk; returns the scrubbed bytes of every event completed by it.
+    fn push(&mut self, chunk: &[u8]) -> Result<Bytes, axum::Error> {
+        // Bytes already buffered were scanned before, except the last one,
+        // which may pair with the first byte of this chunk into `\n\n`.
+        let mut search_from = self.buf.len().saturating_sub(1);
+        self.buf.extend_from_slice(chunk);
+        let mut out = Vec::new();
+        while let Some(at) = self.buf[search_from..]
+            .windows(2)
+            .position(|w| w == b"\n\n")
+        {
+            let end = search_from + at + 2;
+            out.extend(scrub_sse_event(&self.buf[..end]));
+            self.buf.drain(..end);
+            search_from = 0;
+        }
+        if self.buf.len() > MAX_SCRUBBED_SSE_EVENT_BYTES {
+            self.buf.clear();
+            return Err(axum::Error::new(
+                "SSE event too large to scrub credentials from; stream aborted",
+            ));
+        }
+        Ok(Bytes::from(out))
     }
-    let is_json = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.starts_with("application/json"));
-    if !is_json {
-        return response;
+
+    /// Flushes a trailing event that was not terminated by a blank line.
+    fn finish(&mut self) -> Bytes {
+        if self.buf.is_empty() {
+            Bytes::new()
+        } else {
+            Bytes::from(scrub_sse_event(&std::mem::take(&mut self.buf)))
+        }
     }
+}
+
+/// Re-streams a `text/event-stream` response with credentials removed from
+/// every event (`/api/run_sse`, `/api/run/{app}/{user}/{session}`).
+fn scrub_sse_response(response: Response) -> Response {
     let (mut parts, body) = response.into_parts();
-    let Ok(bytes) = to_bytes(body, 16 * 1024 * 1024).await else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    let upstream = body.into_data_stream();
+    let scrubbed = futures::stream::unfold(
+        (upstream, SseScrubber::default(), false),
+        |(mut upstream, mut scrubber, done)| async move {
+            if done {
+                return None;
+            }
+            match upstream.next().await {
+                Some(Ok(chunk)) => {
+                    let out = scrubber.push(&chunk);
+                    let failed = out.is_err();
+                    Some((out, (upstream, scrubber, failed)))
+                }
+                Some(Err(e)) => Some((Err(e), (upstream, scrubber, true))),
+                None => {
+                    let tail = scrubber.finish();
+                    if tail.is_empty() {
+                        None
+                    } else {
+                        Some((Ok(tail), (upstream, scrubber, true)))
+                    }
+                }
+            }
+        },
+    );
+    Response::from_parts(parts, Body::from_stream(scrubbed))
+}
+
+/// Buffers an `application/json` response and removes credentials from it.
+/// Bodies above [`MAX_SCRUBBED_JSON_BYTES`] are refused with `413` rather
+/// than served unscrubbed.
+async fn scrub_json_response(response: Response) -> Response {
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = to_bytes(body, MAX_SCRUBBED_JSON_BYTES).await else {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "error": format!(
+                    "The session is too large to serve safely (over {} MB of JSON); start a new session or delete this one.",
+                    MAX_SCRUBBED_JSON_BYTES / (1024 * 1024)
+                )
+            })),
+        )
+            .into_response();
     };
     if let Ok(mut json_val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
         scrub_credentials_from_json(&mut json_val);
@@ -468,6 +717,68 @@ pub async fn enforce_api_user_cookie(
         }
     }
     Response::from_parts(parts, Body::from(bytes))
+}
+
+/// Middleware in front of the adk-server routes:
+///
+/// 1. hides the stock `/ui/` dev UI once Google Sign-In is configured (it has
+///    no sign-in; `/app/` is the user interface then);
+/// 2. requires the identity named in a user-scoped `/api/…` path to match the
+///    caller (defence in depth — [`CookieIdentityExtractor`] makes adk-server
+///    enforce the same thing on every route, including body-addressed ones);
+/// 3. strips raw OAuth token secrets ([`CREDENTIALS_STATE_KEY`]) from JSON and
+///    SSE responses that carry session events or state.
+pub async fn guard_adk_routes(
+    State(credentials): State<Arc<SessionCredentialManager>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let path = req.uri().path().to_string();
+    let oauth_configured = credentials.flow().config().is_configured();
+    if oauth_configured && (path == "/ui" || path.starts_with("/ui/")) {
+        return if path == "/ui" || path == "/ui/" {
+            Redirect::to("/app/").into_response()
+        } else {
+            StatusCode::NOT_FOUND.into_response()
+        };
+    }
+    if let Some(target_user_id) = extract_api_path_user_id(&path) {
+        match request_user_id(req.headers(), &credentials) {
+            Some(caller) if caller == target_user_id => {}
+            Some(_) => return StatusCode::FORBIDDEN.into_response(),
+            None => return StatusCode::UNAUTHORIZED.into_response(),
+        }
+    }
+
+    let scrub = carries_session_state(&path);
+    let response = next.run(req).await;
+    if !scrub || !response.status().is_success() {
+        return response;
+    }
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if content_type.starts_with("application/json") {
+        scrub_json_response(response).await
+    } else if content_type.starts_with("text/event-stream") {
+        scrub_sse_response(response)
+    } else {
+        response
+    }
+}
+
+/// Value of the cookie `name`, if present.
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let cookie_hdr = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookie_hdr.split(';').find_map(|part| {
+        part.trim()
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix('='))
+            .map(str::to_string)
+    })
 }
 
 fn extract_cookie_user(
@@ -486,6 +797,90 @@ fn extract_cookie_user(
     None
 }
 
+/// The user a request acts as: the signed-in Google user, or — only while
+/// Google Sign-In is not configured — the anonymous [`DEFAULT_USER_ID`].
+fn request_user_id(headers: &HeaderMap, credentials: &SessionCredentialManager) -> Option<String> {
+    if let Some(user) = extract_cookie_user(headers, credentials) {
+        return Some(user.id);
+    }
+    (!credentials.flow().config().is_configured()).then(|| DEFAULT_USER_ID.to_string())
+}
+
+/// adk-server [`RequestContextExtractor`] backed by the signed `adspace_user`
+/// cookie.
+///
+/// With it installed, adk-server's own auth layer resolves the caller on
+/// *every* session / runtime / artifact / debug route — including the ones
+/// that take the user id from the JSON body (`POST /api/run`, `/api/run_sse`,
+/// `/api/sessions`) — rejects anonymous calls with `401` when Sign-In is
+/// configured, and answers `403` when a path names another user.
+pub struct CookieIdentityExtractor {
+    credentials: Arc<SessionCredentialManager>,
+}
+
+impl CookieIdentityExtractor {
+    /// Creates the extractor for `credentials`.
+    pub fn new(credentials: Arc<SessionCredentialManager>) -> Self {
+        Self { credentials }
+    }
+}
+
+#[async_trait]
+impl RequestContextExtractor for CookieIdentityExtractor {
+    async fn extract(&self, parts: &Parts) -> Result<RequestContext, RequestContextError> {
+        match extract_cookie_user(&parts.headers, &self.credentials) {
+            Some(user) => Ok(RequestContext {
+                user_id: user.id,
+                scopes: Vec::new(),
+                metadata: HashMap::from([
+                    ("email".to_string(), user.email),
+                    ("name".to_string(), user.name),
+                ]),
+            }),
+            None if self.credentials.flow().config().is_configured() => {
+                Err(RequestContextError::MissingAuth)
+            }
+            None => Ok(RequestContext {
+                user_id: DEFAULT_USER_ID.to_string(),
+                scopes: Vec::new(),
+                metadata: HashMap::new(),
+            }),
+        }
+    }
+}
+
+/// Whether the caller may change the server-wide models; the `Err` is the
+/// response to send otherwise.
+fn authorize_model_update(routes: &OAuthRoutes, headers: &HeaderMap) -> Result<(), Box<Response>> {
+    let deny = |status: StatusCode, error: &str| {
+        Err(Box::new(
+            (status, Json(serde_json::json!({ "error": error }))).into_response(),
+        ))
+    };
+    let oauth_configured = routes.credentials.flow().config().is_configured();
+    let user = extract_cookie_user(headers, &routes.credentials);
+    if oauth_configured && user.is_none() {
+        return deny(StatusCode::UNAUTHORIZED, "Authentication required");
+    }
+    if routes.admins.is_empty() {
+        return if oauth_configured {
+            deny(
+                StatusCode::FORBIDDEN,
+                "Model switching is disabled: set ADMIN_EMAILS to the administrators allowed to change the server-wide models",
+            )
+        } else {
+            Ok(())
+        };
+    }
+    match user {
+        Some(user) if routes.admins.allows(&user.email) => Ok(()),
+        _ => deny(
+            StatusCode::FORBIDDEN,
+            "Only administrators (ADMIN_EMAILS) may change the server-wide models",
+        ),
+    }
+}
+
 fn models_payload(routes: &OAuthRoutes) -> serde_json::Value {
     let active = routes.credentials.model_controller().active_models();
     serde_json::json!({
@@ -496,24 +891,29 @@ fn models_payload(routes: &OAuthRoutes) -> serde_json::Value {
             "models": PRESET_MODELS,
             "video_models": PRESET_VIDEO_MODELS,
             "image_models": PRESET_IMAGE_MODELS,
-        }
+        },
+        "pricing": crate::config::model_pricing_table([active.model.as_str()]),
     })
 }
 
-/// Returns the currently signed-in Google user for `/app/`.
+/// Returns the currently signed-in Google user for `/app/` (`is_admin` tells
+/// whether they may switch the server-wide models).
 async fn auth_me(State(routes): State<OAuthRoutes>, headers: HeaderMap) -> Json<serde_json::Value> {
     let oauth_configured = routes.credentials.flow().config().is_configured();
     let models = models_payload(&routes);
+    let is_admin = authorize_model_update(&routes, &headers).is_ok();
     match extract_cookie_user(&headers, &routes.credentials) {
         Some(user) => Json(serde_json::json!({
             "authenticated": true,
             "oauth_configured": oauth_configured,
             "user": user,
+            "is_admin": is_admin,
             "models": models,
         })),
         None => Json(serde_json::json!({
             "authenticated": false,
             "oauth_configured": oauth_configured,
+            "is_admin": is_admin,
             "models": models,
         })),
     }
@@ -536,19 +936,16 @@ async fn get_models(State(routes): State<OAuthRoutes>) -> Json<serde_json::Value
 }
 
 /// Updates the active LLM, video, and/or image models at runtime.
+///
+/// The change is server-wide, so it is limited to administrators (see
+/// [`AdminAllowList`]).
 async fn update_models(
     State(routes): State<OAuthRoutes>,
     headers: HeaderMap,
     Json(body): Json<UpdateModelsRequest>,
 ) -> Response {
-    if routes.credentials.flow().config().is_configured()
-        && extract_cookie_user(&headers, &routes.credentials).is_none()
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": "Authentication required" })),
-        )
-            .into_response();
+    if let Err(denied) = authorize_model_update(&routes, &headers) {
+        return *denied;
     }
 
     match routes.credentials.model_controller().update_models(
@@ -566,13 +963,9 @@ async fn update_models(
 }
 
 /// Logs out the current user by clearing the `adspace_user` cookie.
-async fn auth_logout() -> Response {
-    let clear = format!("{USER_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+async fn auth_logout(State(routes): State<OAuthRoutes>) -> Response {
     (
-        [(
-            header::SET_COOKIE,
-            HeaderValue::from_str(&clear).expect("valid cookie header"),
-        )],
+        [(header::SET_COOKIE, user_cookie(&routes.credentials, "", 0))],
         Json(serde_json::json!({ "ok": true })),
     )
         .into_response()
@@ -583,6 +976,7 @@ async fn auth_logout() -> Response {
 /// tokens in the chat session that started the authorization.
 pub async fn oauth_callback(
     State(routes): State<OAuthRoutes>,
+    headers: HeaderMap,
     Query(query): Query<OAuthCallbackQuery>,
 ) -> Response {
     if let Some(error) = query.error {
@@ -607,6 +1001,17 @@ pub async fn oauth_callback(
         )
         .into_response();
     };
+    // A sign-in may only be completed by the browser that started it.
+    if let Some(expected_nonce) = routes.credentials.login_state_nonce(&state)
+        && cookie_value(&headers, LOGIN_NONCE_COOKIE_NAME).as_deref() != Some(&*expected_nonce)
+    {
+        return html_page(
+            "Sign-in failed",
+            "<p>This sign-in was not started in this browser (or it took too long). <a href=\"/auth/login\">Sign in again</a>.</p>",
+            "error",
+        )
+        .into_response();
+    }
     let (session, token) = match routes
         .credentials
         .complete_authorization(&state, &code)
@@ -635,9 +1040,6 @@ pub async fn oauth_callback(
         {
             Ok(user) => {
                 let signed = routes.credentials.sign_user_cookie(&user);
-                let cookie = format!(
-                    "{USER_COOKIE_NAME}={signed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800"
-                );
                 let safe_name = escape_html(&user.name);
                 let safe_email = escape_html(&user.email);
                 let page = html_page(
@@ -648,10 +1050,16 @@ pub async fn oauth_callback(
                     "login_ok",
                 );
                 return (
-                    [(
-                        header::SET_COOKIE,
-                        HeaderValue::from_str(&cookie).expect("valid cookie header"),
-                    )],
+                    AppendHeaders([
+                        (
+                            header::SET_COOKIE,
+                            user_cookie(&routes.credentials, &signed, USER_COOKIE_MAX_AGE_SECS),
+                        ),
+                        (
+                            header::SET_COOKIE,
+                            login_nonce_cookie(&routes.credentials, ""),
+                        ),
+                    ]),
                     page,
                 )
                     .into_response();
@@ -736,6 +1144,7 @@ impl AgentRuntime {
             credentials: self.credentials.clone(),
             sessions: self.session_service.clone(),
             resume: resume.then(|| Arc::new(self.turn_runner())),
+            admins: AdminAllowList::from_env(),
         }
     }
 
@@ -754,6 +1163,10 @@ impl AgentRuntime {
 /// the memory service with the invocation's own `user_id`, and
 /// `MemorySavingAgent` writes under it too. The runner-level `Memory` only
 /// backs `ToolContext::search_memory()`, which no tool of ours uses.
+///
+/// Over HTTP this user only exists while Google Sign-In is **not**
+/// configured; otherwise every `/api/…` call must carry the `adspace_user`
+/// cookie (see [`CookieIdentityExtractor`]).
 const DEFAULT_USER_ID: &str = "user";
 
 /// adk-cli launcher configured with the runtime's services.
@@ -770,6 +1183,35 @@ fn launcher(runtime: &AgentRuntime) -> Launcher {
         )
 }
 
+/// Assembles the HTTP application: adk-server's routes (authenticated through
+/// [`CookieIdentityExtractor`]), the OAuth / studio routes, the `/ui/` helper
+/// injection and [`guard_adk_routes`].
+///
+/// # Errors
+///
+/// Returns an error when the adk-server application cannot be built.
+pub fn build_app(launcher: Launcher, routes: OAuthRoutes) -> anyhow::Result<Router> {
+    let credentials = routes.credentials.clone();
+    let app = launcher
+        .with_request_context_extractor(Arc::new(CookieIdentityExtractor::new(credentials.clone())))
+        .build_app()?
+        .merge(oauth_router(routes))
+        .layer(middleware::from_fn(inject_auth_helper))
+        .layer(middleware::from_fn_with_state(
+            credentials,
+            guard_adk_routes,
+        ));
+    Ok(app)
+}
+
+/// How long in-flight requests may finish after SIGTERM (`SHUTDOWN_GRACE_SECS`).
+fn shutdown_grace_period() -> Duration {
+    std::env::var("SHUTDOWN_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map_or(DEFAULT_SHUTDOWN_GRACE, Duration::from_secs)
+}
+
 /// Serves the agent (web UI at `/ui/`, REST API under `/api`, OAuth callback).
 ///
 /// # Errors
@@ -779,18 +1221,23 @@ pub async fn serve(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Resu
     runtime
         .credentials
         .enable_interactive_wait(Duration::from_secs(300), true);
-    let app = launcher(&runtime)
-        .build_app()?
-        .merge(oauth_router(runtime.oauth_routes(true)))
-        .layer(middleware::from_fn(inject_auth_helper))
-        .layer(middleware::from_fn_with_state(
-            runtime.credentials.clone(),
-            enforce_api_user_cookie,
-        ));
+    runtime
+        .credentials
+        .attach_session_service(runtime.session_service.clone());
+    let app = build_app(launcher(&runtime), runtime.oauth_routes(true))?;
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
-    tracing::info!(
-        "AdSpace Agent listening on http://{host}:{port}  (studio: http://{host}:{port}/app/  ·  dev UI: http://{host}:{port}/ui/)"
-    );
+    if runtime.credentials.flow().config().is_configured() {
+        tracing::info!(
+            "AdSpace Agent listening on http://{host}:{port}  (studio: http://{host}:{port}/app/  ·  Google Sign-In required; /ui/ disabled)"
+        );
+    } else {
+        tracing::info!(
+            "AdSpace Agent listening on http://{host}:{port}  (studio: http://{host}:{port}/app/  ·  dev UI: http://{host}:{port}/ui/)"
+        );
+        tracing::warn!(
+            "CLIENT_ID / CLIENT_SECRET are not set: the API and /ui/ are open to anyone who can reach this port as the anonymous user"
+        );
+    }
     runtime.log_redirect_uri();
 
     let credentials = runtime.credentials.clone();
@@ -805,11 +1252,15 @@ pub async fn serve(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Resu
         let _ = graceful_rx.wait_for(|&v| v).await;
     });
 
+    // Let in-flight turns finish, but never outlive the platform's grace
+    // period (Cloud Run sends SIGKILL 10 s after SIGTERM).
+    let grace = shutdown_grace_period();
     tokio::select! {
         res = server => res?,
         _ = async move {
             let _ = force_rx.wait_for(|&v| v).await;
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            tokio::time::sleep(grace).await;
+            tracing::warn!("Shutdown grace period ({grace:?}) elapsed; aborting in-flight requests");
         } => {}
     }
     Ok(())
@@ -962,6 +1413,7 @@ mod tests {
             credentials: credentials.clone(),
             sessions: Arc::new(InMemorySessionService::new()),
             resume: None,
+            admins: AdminAllowList::new(["Nate@example.com".to_string()]),
         };
         let app = oauth_router(routes);
 
@@ -1013,6 +1465,7 @@ mod tests {
             email: "nate@example.com".into(),
             name: "Nate".into(),
             picture: Some("https://example.com/avatar.png".into()),
+            sub: Some("1234567890".into()),
             iat: chrono::Utc::now().timestamp(),
         };
         let cookie_val = credentials.sign_user_cookie(&user);
@@ -1031,6 +1484,8 @@ mod tests {
             serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
         assert_eq!(body["authenticated"], true);
         assert_eq!(body["user"]["email"], "nate@example.com");
+        assert_eq!(body["is_admin"], true);
+        assert!(body["models"]["pricing"].is_object());
 
         // 4. `/oauth2/callback` escapes reflected query error strings.
         let resp = app
@@ -1053,8 +1508,8 @@ mod tests {
         assert!(!err_html.contains("<script>alert(1)</script>"));
         assert!(err_html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
 
-        // 5. `enforce_api_user_cookie` blocks unauthenticated non-default user API calls
-        // and scrubs `CREDENTIALS_STATE_KEY` from session responses.
+        // 5. `guard_adk_routes` blocks unauthenticated user API calls and scrubs
+        // `CREDENTIALS_STATE_KEY` from session responses.
         let api_app = Router::new()
             .route(
                 "/api/apps/{app}/users/{user_id}/sessions",
@@ -1070,7 +1525,7 @@ mod tests {
             )
             .layer(middleware::from_fn_with_state(
                 credentials.clone(),
-                enforce_api_user_cookie,
+                guard_adk_routes,
             ));
 
         let unauth = api_app
@@ -1102,7 +1557,7 @@ mod tests {
         assert!(scrubbed[0]["state"].get(CREDENTIALS_STATE_KEY).is_none());
         assert_eq!(scrubbed[0]["state"]["visible"], "ok");
 
-        // 6. `/auth/models` allows authenticated updates to agent, image, and video models.
+        // 6. `/auth/models` allows administrators to update agent, image, and video models.
         let unauth_models = app
             .clone()
             .oneshot(
@@ -1139,12 +1594,62 @@ mod tests {
         assert_eq!(updated_models["model"], "gemini-4-argon");
         assert_eq!(updated_models["image_model"], "imagen-4.0-generate-001");
         assert_eq!(updated_models["video_model"], "veo-3.1-generate-001");
+        assert!(updated_models["pricing"].is_object());
 
-        // 7. `/oauth2/events` SSE stream closes immediately on `notify_shutdown()`.
+        // 6b. A signed-in user who is not an administrator is refused.
+        let other = AuthenticatedUser {
+            id: "guest@example.com".into(),
+            email: "guest@example.com".into(),
+            ..user.clone()
+        };
+        let other_cookie = credentials.sign_user_cookie(&other);
+        let forbidden = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/auth/models")
+                    .header(header::COOKIE, format!("{USER_COOKIE_NAME}={other_cookie}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"model":"gemini-4-argon"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        let me = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/me")
+                    .header(header::COOKIE, format!("{USER_COOKIE_NAME}={other_cookie}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let me: serde_json::Value =
+            serde_json::from_slice(&to_bytes(me.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(me["is_admin"], false);
+
+        // 7. `/oauth2/events` requires the user cookie, then closes immediately
+        // on `notify_shutdown()`.
+        let anonymous = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(AUTH_EVENTS_PATH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(AUTH_EVENTS_PATH)
+                    .header(header::COOKIE, format!("{USER_COOKIE_NAME}={cookie_val}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1160,5 +1665,369 @@ mod tests {
         .expect("SSE stream must close immediately on shutdown")
         .unwrap();
         assert!(bytes.is_empty());
+    }
+
+    fn test_credentials(configured: bool) -> Arc<SessionCredentialManager> {
+        let flow = crate::auth::GoogleOAuthFlow::new(crate::auth::OAuthClientConfig {
+            client_id: if configured {
+                "cid".into()
+            } else {
+                String::new()
+            },
+            client_secret: if configured {
+                "secret".into()
+            } else {
+                String::new()
+            },
+            redirect_uri: "https://agent.example.com/oauth2/callback".into(),
+        });
+        Arc::new(SessionCredentialManager::new(flow))
+    }
+
+    fn signed_cookie(credentials: &SessionCredentialManager, email: &str) -> String {
+        let user = AuthenticatedUser {
+            id: email.into(),
+            email: email.into(),
+            name: "Test".into(),
+            picture: None,
+            sub: None,
+            iat: chrono::Utc::now().timestamp(),
+        };
+        format!("{USER_COOKIE_NAME}={}", credentials.sign_user_cookie(&user))
+    }
+
+    #[test]
+    fn user_scoped_api_paths_are_recognised() {
+        for (path, expected) in [
+            ("/api/apps/a/users/u%40x.com/sessions", Some("u@x.com")),
+            ("/api/apps/a/users/u/sessions/s", Some("u")),
+            ("/api/sessions/a/u/s", Some("u")),
+            ("/api/sessions/a/u/s/artifacts/f", Some("u")),
+            ("/api/run/a/u/s", Some("u")),
+            ("/api/debug/graph/a/u/s/e", Some("u")),
+            ("/api/run", None),
+            ("/api/run_sse", None),
+            ("/api/sessions", None),
+            ("/api/apps", None),
+            ("/api/apps/a/eval_sets", None),
+            ("/auth/me", None),
+        ] {
+            assert_eq!(
+                extract_api_path_user_id(path).as_deref(),
+                expected,
+                "{path}"
+            );
+        }
+        assert!(carries_session_state("/api/run_sse"));
+        assert!(carries_session_state("/api/run"));
+        assert!(carries_session_state("/api/run/a/u/s"));
+        assert!(carries_session_state("/api/sessions/a/u/s"));
+        assert!(carries_session_state("/api/apps/a/users/u/sessions/s"));
+        assert!(!carries_session_state("/api/sessions/a/u/s/artifacts/f"));
+        assert!(!carries_session_state("/api/apps"));
+        assert!(!carries_session_state("/api/health"));
+    }
+
+    #[test]
+    fn sse_events_are_scrubbed_frame_by_frame() {
+        let event = serde_json::json!({
+            "id": "e1",
+            "actions": { "stateDelta": {
+                CREDENTIALS_STATE_KEY: { "access_token": "ya29.secret", "refresh_token": "1//r" },
+                "other": 1
+            } }
+        });
+        let frame = format!("event: message\ndata: {event}\n\n");
+        let mut scrubber = SseScrubber::default();
+        // Fed in two pieces: nothing is emitted before the frame is complete.
+        let (head, tail) = frame.split_at(frame.len() / 2);
+        let first = scrubber.push(head.as_bytes()).unwrap();
+        assert!(first.is_empty());
+        let out = scrubber.push(tail.as_bytes()).unwrap();
+        let text = String::from_utf8(out.to_vec()).unwrap();
+        assert!(text.starts_with("event: message\ndata: "), "{text}");
+        assert!(text.ends_with("\n\n"));
+        assert!(!text.contains("ya29.secret"));
+        assert!(!text.contains(CREDENTIALS_STATE_KEY));
+        assert!(text.contains("\"other\":1"));
+
+        // Keep-alive comments and non-JSON data pass through; a trailing
+        // unterminated frame is still scrubbed on finish.
+        let out = scrubber
+            .push(b": keep-alive\n\ndata: plain text\n\n")
+            .unwrap();
+        assert_eq!(out.as_ref(), b": keep-alive\n\ndata: plain text\n\n");
+        // A frame terminator split across chunks is still detected.
+        assert!(scrubber.push(b"data: {\"a\":1}\n").unwrap().is_empty());
+        assert_eq!(
+            scrubber.push(b"\n").unwrap().as_ref(),
+            b"data: {\"a\":1}\n\n"
+        );
+        let last = format!("data: {event}");
+        assert!(scrubber.push(last.as_bytes()).unwrap().is_empty());
+        let flushed = String::from_utf8(scrubber.finish().to_vec()).unwrap();
+        assert!(!flushed.contains("ya29.secret"));
+        assert!(flushed.starts_with("data: {"));
+    }
+
+    #[tokio::test]
+    async fn api_responses_with_session_state_are_scrubbed_including_sse() {
+        use tower::ServiceExt as _;
+
+        let credentials = test_credentials(true);
+        let cookie = signed_cookie(&credentials, "nate@example.com");
+        let event = serde_json::json!({
+            "id": "e1",
+            "actions": { "stateDelta": { CREDENTIALS_STATE_KEY: { "access_token": "ya29.secret" } } }
+        });
+        let sse_body = format!("data: {event}\n\ndata: {event}\n\n");
+        let api_app = Router::new()
+            .route(
+                "/api/run_sse",
+                post(move || {
+                    let body = sse_body.clone();
+                    async move {
+                        (
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            Body::from(body),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/api/sessions/{app}/{user}/{session}",
+                get(move || {
+                    let event = event.clone();
+                    async move { Json(serde_json::json!({ "events": [event] })) }
+                }),
+            )
+            .layer(middleware::from_fn_with_state(
+                credentials.clone(),
+                guard_adk_routes,
+            ));
+
+        let sse = api_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/run_sse")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sse.status(), StatusCode::OK);
+        let text = String::from_utf8(
+            to_bytes(sse.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(text.matches("data: ").count(), 2, "{text}");
+        assert!(!text.contains("ya29.secret"), "{text}");
+
+        let session = api_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions/adspace_agent/nate%40example.com/s1")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(session.status(), StatusCode::OK);
+        let json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(session.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert!(
+            json["events"][0]["actions"]["stateDelta"]
+                .get(CREDENTIALS_STATE_KEY)
+                .is_none()
+        );
+
+        // Path-scoped routes are refused for another user's id.
+        let foreign = api_app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions/adspace_agent/victim%40example.com/s1")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn dev_ui_is_hidden_once_sign_in_is_configured() {
+        use tower::ServiceExt as _;
+
+        let ui = || {
+            Router::new()
+                .route("/ui/", get(|| async { Html("<html></html>") }))
+                .route("/ui/assets/x.js", get(|| async { "js" }))
+        };
+        let configured = ui().layer(middleware::from_fn_with_state(
+            test_credentials(true),
+            guard_adk_routes,
+        ));
+        let resp = configured
+            .clone()
+            .oneshot(Request::builder().uri("/ui/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers()[header::LOCATION], "/app/");
+        let resp = configured
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/assets/x.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let open = ui().layer(middleware::from_fn_with_state(
+            test_credentials(false),
+            guard_adk_routes,
+        ));
+        let resp = open
+            .oneshot(Request::builder().uri("/ui/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn cookie_identity_extractor_follows_the_sign_in_configuration() {
+        let configured = test_credentials(true);
+        let extractor = CookieIdentityExtractor::new(configured.clone());
+        let anonymous = Request::builder().body(()).unwrap().into_parts().0;
+        assert!(matches!(
+            extractor.extract(&anonymous).await,
+            Err(RequestContextError::MissingAuth)
+        ));
+        let signed = Request::builder()
+            .header(
+                header::COOKIE,
+                signed_cookie(&configured, "nate@example.com"),
+            )
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        let context = extractor.extract(&signed).await.unwrap();
+        assert_eq!(context.user_id, "nate@example.com");
+        assert_eq!(context.metadata["email"], "nate@example.com");
+
+        // Without an OAuth client there is no sign-in: everyone is the default user.
+        let extractor = CookieIdentityExtractor::new(test_credentials(false));
+        let context = extractor.extract(&anonymous).await.unwrap();
+        assert_eq!(context.user_id, DEFAULT_USER_ID);
+    }
+
+    #[tokio::test]
+    async fn login_sets_a_nonce_cookie_and_the_callback_requires_it() {
+        use adk_rust::session::InMemorySessionService;
+        use tower::ServiceExt as _;
+
+        let credentials = test_credentials(true);
+        let app = oauth_router(OAuthRoutes {
+            credentials: credentials.clone(),
+            sessions: Arc::new(InMemorySessionService::new()),
+            resume: None,
+            admins: AdminAllowList::default(),
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let location = resp.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let set_cookie = resp.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            set_cookie.starts_with(&format!("{LOGIN_NONCE_COOKIE_NAME}=")),
+            "{set_cookie}"
+        );
+        assert!(
+            set_cookie.contains("; Secure"),
+            "https base URL: {set_cookie}"
+        );
+        assert!(set_cookie.contains(&format!("Path={OAUTH_CALLBACK_PATH}")));
+        let state = url::Url::parse(&location)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.to_string())
+            .unwrap();
+        let nonce = credentials.login_state_nonce(&state).unwrap();
+        assert!(set_cookie.starts_with(&format!("{LOGIN_NONCE_COOKIE_NAME}={nonce};")));
+
+        // The callback refuses a sign-in state from another browser (no / wrong
+        // nonce cookie) before it ever contacts Google.
+        for cookie in [None, Some(format!("{LOGIN_NONCE_COOKIE_NAME}=other"))] {
+            let mut req = Request::builder().uri(format!("/oauth2/callback?code=c&state={state}"));
+            if let Some(cookie) = cookie {
+                req = req.header(header::COOKIE, cookie);
+            }
+            let resp = app
+                .clone()
+                .oneshot(req.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let html = String::from_utf8(
+                to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(html.contains("not started in this browser"), "{html}");
+        }
+
+        // Logging out clears the (Secure) user cookie.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/auth/logout")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cleared = resp.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(cleared.starts_with(&format!("{USER_COOKIE_NAME}=;")));
+        assert!(cleared.contains("Max-Age=0") && cleared.contains("; Secure"));
+    }
+
+    #[test]
+    fn admin_allow_list_is_case_insensitive_and_ignores_blanks() {
+        let admins = AdminAllowList::new([" Admin@Example.com ".to_string(), String::new()]);
+        assert!(!admins.is_empty());
+        assert!(admins.allows("admin@example.com"));
+        assert!(admins.allows("ADMIN@example.com"));
+        assert!(!admins.allows("other@example.com"));
+        assert!(AdminAllowList::new(Vec::<String>::new()).is_empty());
     }
 }

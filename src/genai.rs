@@ -71,6 +71,20 @@ pub struct GenAiClient {
     base_override: Option<String>,
 }
 
+/// Consecutive poll failures tolerated before a Veo operation is given up on.
+/// The operation (and its billing) keeps running server-side, so a transient
+/// 5xx or network blip must not abort the wait.
+const MAX_CONSECUTIVE_POLL_FAILURES: u32 = 5;
+
+/// HTTP client with sane timeouts for the REST-only operations.
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_default()
+}
+
 impl std::fmt::Debug for GenAiClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let backend = match &self.backend {
@@ -94,7 +108,7 @@ impl GenAiClient {
         token_provider: SharedTokenProvider,
     ) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: http_client(),
             backend: Backend::Vertex {
                 project: project.into(),
                 location: location.into(),
@@ -109,7 +123,7 @@ impl GenAiClient {
     /// Builds a Gemini Developer API client.
     pub fn studio(api_key: impl Into<String>) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: http_client(),
             backend: Backend::Studio {
                 api_key: api_key.into(),
             },
@@ -240,13 +254,16 @@ impl GenAiClient {
     ///
     /// # Errors
     ///
-    /// Returns an error on transport or API failures.
+    /// Returns an error when `youtube_video_id` is not a valid video id, or
+    /// on transport or API failures.
     pub async fn ask_youtube_video(
         &self,
         model: &str,
         youtube_video_id: &str,
         prompt: &str,
     ) -> anyhow::Result<String> {
+        let youtube_video_id = normalize_youtube_video_id(youtube_video_id)
+            .with_context(|| format!("'{youtube_video_id}' is not a valid YouTube video id"))?;
         let message = Message {
             role: Role::User,
             content: GeminiContent {
@@ -365,21 +382,49 @@ impl GenAiClient {
             .to_string();
 
         let deadline = tokio::time::Instant::now() + self.poll_timeout;
+        let mut consecutive_failures: u32 = 0;
         loop {
-            let operation = match &self.backend {
+            let polled = match &self.backend {
                 Backend::Vertex { .. } => {
                     self.post_json(
                         &self.model_url(model, "fetchPredictOperation"),
                         &json!({ "operationName": name }),
                     )
-                    .await?
+                    .await
                 }
                 Backend::Studio { .. } => {
                     let base = self
                         .base_override
                         .clone()
                         .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
-                    self.get_json(&format!("{base}/v1beta/{name}")).await?
+                    self.get_json(&format!("{base}/v1beta/{name}")).await
+                }
+            };
+            let operation = match polled {
+                Ok(operation) => {
+                    consecutive_failures = 0;
+                    operation
+                }
+                // Transient failures (5xx, 429, network blips) must not abandon
+                // an operation that keeps running - and billing - server-side.
+                // Back off and retry a few times before giving up.
+                Err(e) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= MAX_CONSECUTIVE_POLL_FAILURES
+                        || tokio::time::Instant::now() >= deadline
+                    {
+                        return Err(e.context(format!(
+                            "Video generation: polling operation {name} failed {consecutive_failures} times in a row"
+                        )));
+                    }
+                    tracing::warn!(
+                        "Polling video operation {name} failed (attempt {consecutive_failures}): {e:#}"
+                    );
+                    let backoff = self
+                        .poll_interval
+                        .saturating_mul(1 << consecutive_failures.min(4));
+                    tokio::time::sleep(backoff.min(Duration::from_secs(60))).await;
+                    continue;
                 }
             };
             if operation
@@ -472,10 +517,92 @@ impl GenAiClient {
     }
 }
 
+static YOUTUBE_VIDEO_ID: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[A-Za-z0-9_-]{11}$").expect("valid regex"));
+
+/// Validates a YouTube video id (eleven URL-safe base64 characters). A full
+/// `youtube.com/watch?v=`, `youtu.be/`, `/shorts/`, `/embed/` or `/live/` URL
+/// is accepted too and reduced to its id. Anything else yields `None`, so an
+/// arbitrary string can never be spliced into the `file_uri` sent to Gemini.
+pub fn normalize_youtube_video_id(input: &str) -> Option<String> {
+    let input = input.trim();
+    if YOUTUBE_VIDEO_ID.is_match(input) {
+        return Some(input.to_string());
+    }
+    let url = url::Url::parse(input).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url
+        .host_str()?
+        .trim_start_matches("www.")
+        .trim_start_matches("m.");
+    let candidate = match host {
+        "youtu.be" => url.path_segments()?.next().map(str::to_string),
+        "youtube.com" | "music.youtube.com" | "youtube-nocookie.com" => {
+            let mut segments = url.path_segments()?;
+            match segments.next() {
+                Some("watch") => url
+                    .query_pairs()
+                    .find(|(k, _)| k == "v")
+                    .map(|(_, v)| v.into_owned()),
+                Some("shorts" | "embed" | "live" | "v") => segments.next().map(str::to_string),
+                _ => None,
+            }
+        }
+        _ => None,
+    }?;
+    YOUTUBE_VIDEO_ID.is_match(&candidate).then_some(candidate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::StaticTokenProvider;
+
+    #[test]
+    fn youtube_video_ids_are_validated_and_extracted_from_urls() {
+        for ok in ["dQw4w9WgXcQ", " dQw4w9WgXcQ ", "a-b_c123XYZ"] {
+            assert_eq!(
+                normalize_youtube_video_id(ok).as_deref(),
+                Some(ok.trim()),
+                "{ok:?}"
+            );
+        }
+        for (url, id) in [
+            (
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s",
+                "dQw4w9WgXcQ",
+            ),
+            ("https://youtu.be/dQw4w9WgXcQ?si=abc", "dQw4w9WgXcQ"),
+            ("https://youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+            ("https://m.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ] {
+            assert_eq!(
+                normalize_youtube_video_id(url).as_deref(),
+                Some(id),
+                "{url}"
+            );
+        }
+        for bad in [
+            "",
+            "abc",
+            "dQw4w9WgXc",
+            "dQw4w9WgXcQQ",
+            "dQw4w9WgXc$",
+            "abc&list=PL1",
+            "x\"></script>",
+            "https://evil.example/watch?v=dQw4w9WgXcQ",
+            "https://www.youtube.com/watch?v=too-short",
+            "ftp://youtu.be/dQw4w9WgXcQ",
+        ] {
+            assert_eq!(
+                normalize_youtube_video_id(bad),
+                None,
+                "{bad:?} must be rejected"
+            );
+        }
+    }
 
     #[test]
     fn vertex_urls_handle_global_and_regional_locations() {

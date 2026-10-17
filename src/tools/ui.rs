@@ -84,8 +84,13 @@ impl Tool for CleanUiTool {
     }
 
     async fn execute(&self, ctx: Arc<dyn ToolContext>, mut args: Value) -> Result<Value> {
+        // Strip every protocol field, consistent with the advertised schema,
+        // so a model that echoes one back cannot steer the surface/thread
+        // plumbing.
         if let Some(obj) = args.as_object_mut() {
-            obj.remove("protocol");
+            for key in PROTOCOL_FIELDS {
+                obj.remove(*key);
+            }
         }
         self.inner.execute(ctx, args).await
     }
@@ -168,6 +173,35 @@ mod tests {
         assert_eq!(
             out["components"][0]["title"],
             "Top Campaigns by Impressions"
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_fields_in_args_are_dropped_before_rendering() {
+        let ts = ui_toolset();
+        let ctx = Arc::new(SimpleToolContext::new("ui-test"));
+        let tools = ts.tools(ctx.clone()).await.unwrap();
+        let alert = tools.iter().find(|t| t.name() == "render_alert").unwrap();
+        let out = alert
+            .execute(
+                ctx,
+                json!({
+                    "title": "Heads up",
+                    "message": "Budget nearly spent",
+                    "protocol": "ag_ui",
+                    "surface_id": "injected",
+                    "kit_id": "injected",
+                    "ag_ui_thread_id": "injected",
+                    "ag_ui_run_id": "injected",
+                    "mcp_apps": [{"id": "injected"}]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["components"][0]["type"], "alert");
+        assert!(
+            !out.to_string().contains("injected"),
+            "no protocol field leaks into the rendered response: {out}"
         );
     }
 }

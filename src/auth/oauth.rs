@@ -33,10 +33,10 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::time::{Duration, Instant};
 
-use adk_rust::session::{AppendEventRequest, SessionService};
+use adk_rust::session::{AppendEventRequest, GetRequest, SessionService};
 use adk_rust::{AdkIdentity, AppName, Event, ReadonlyContext, SessionId, ToolContext, UserId};
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -80,6 +80,10 @@ pub struct AuthenticatedUser {
     /// Profile avatar URL (`picture` claim from Google userinfo).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub picture: Option<String>,
+    /// Google account subject (`sub` claim): the identifier that never changes
+    /// even when the email address does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub: Option<String>,
     /// Issued-at Unix timestamp.
     pub iat: i64,
 }
@@ -90,16 +94,41 @@ struct GoogleUserInfoResponse {
     sub: String,
     #[serde(default)]
     email: String,
+    /// Google sends a boolean, but older endpoints used the strings
+    /// `"true"` / `"false"`; both are accepted.
+    #[serde(default, deserialize_with = "bool_or_string")]
+    email_verified: Option<bool>,
     #[serde(default)]
     name: String,
     #[serde(default)]
     picture: Option<String>,
 }
 
+fn bool_or_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Flag {
+        Bool(bool),
+        Text(String),
+    }
+    Ok(match Option::<Flag>::deserialize(d)? {
+        Some(Flag::Bool(b)) => Some(b),
+        Some(Flag::Text(s)) => Some(s.eq_ignore_ascii_case("true")),
+        None => None,
+    })
+}
+
 /// How long before expiry a token is treated as expired.
 const EXPIRY_SKEW: Duration = Duration::from_secs(60);
 /// Authorization links older than this are rejected by the callback.
 const PENDING_TTL: Duration = Duration::from_secs(15 * 60);
+/// How long a freshly granted token is kept in process memory to bridge the
+/// gap until the next turn reloads the session (it is persisted in the
+/// session state right away, so nothing is lost when it is evicted).
+const LIVE_TOKEN_TTL: Duration = Duration::from_secs(60 * 60);
+/// How often an in-flight waiter re-reads the session state for a token
+/// persisted by another server instance (Cloud Run with several instances).
+const PERSISTED_TOKEN_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// OAuth client configuration.
 #[derive(Debug, Clone)]
@@ -129,6 +158,14 @@ impl OAuthClientConfig {
     /// Whether a client ID and secret are configured.
     pub fn is_configured(&self) -> bool {
         !self.client_id.is_empty() && !self.client_secret.is_empty()
+    }
+
+    /// Whether the public URL of this server (`PUBLIC_BASE_URL`) is HTTPS, in
+    /// which case browser cookies are marked `Secure`.
+    pub fn is_https(&self) -> bool {
+        self.redirect_uri
+            .get(..8)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
     }
 }
 
@@ -248,6 +285,7 @@ pub struct GoogleOAuthFlow {
     http: reqwest::Client,
     auth_endpoint: String,
     token_endpoint: String,
+    userinfo_endpoint: String,
 }
 
 impl GoogleOAuthFlow {
@@ -258,6 +296,7 @@ impl GoogleOAuthFlow {
             http: reqwest::Client::new(),
             auth_endpoint: GOOGLE_AUTH_ENDPOINT.to_string(),
             token_endpoint: GOOGLE_TOKEN_ENDPOINT.to_string(),
+            userinfo_endpoint: GOOGLE_USERINFO_ENDPOINT.to_string(),
         }
     }
 
@@ -269,6 +308,12 @@ impl GoogleOAuthFlow {
     ) -> Self {
         self.auth_endpoint = auth_endpoint.into();
         self.token_endpoint = token_endpoint.into();
+        self
+    }
+
+    /// Overrides the OpenID Connect userinfo endpoint (tests).
+    pub fn with_userinfo_endpoint(mut self, userinfo_endpoint: impl Into<String>) -> Self {
+        self.userinfo_endpoint = userinfo_endpoint.into();
         self
     }
 
@@ -309,13 +354,18 @@ impl GoogleOAuthFlow {
     /// Fetches the user's Google profile (`sub`, `email`, `name`, `picture`)
     /// from OpenID Connect userinfo using `access_token`.
     ///
+    /// The email address is the user id, so it must be **verified**: Google
+    /// accounts created with a third-party address can carry an unverified
+    /// email, which would otherwise let one account sign in as another.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the userinfo request fails.
+    /// Returns an error if the userinfo request fails, the profile carries
+    /// neither `sub` nor `email`, or the email is not verified.
     pub async fn fetch_user_info(&self, access_token: &str) -> anyhow::Result<AuthenticatedUser> {
         let resp = self
             .http
-            .get(GOOGLE_USERINFO_ENDPOINT)
+            .get(&self.userinfo_endpoint)
             .bearer_auth(access_token)
             .send()
             .await?;
@@ -325,6 +375,15 @@ impl GoogleOAuthFlow {
             anyhow::bail!("Google userinfo request failed ({status}): {body}");
         }
         let info: GoogleUserInfoResponse = serde_json::from_str(&body)?;
+        if info.email.is_empty() && info.sub.is_empty() {
+            anyhow::bail!("Google userinfo returned neither a subject nor an email address");
+        }
+        if !info.email.is_empty() && info.email_verified != Some(true) {
+            anyhow::bail!(
+                "The Google account's email address ({}) is not verified; sign in with a verified account.",
+                info.email
+            );
+        }
         let email = if info.email.is_empty() {
             info.sub.clone()
         } else {
@@ -341,6 +400,7 @@ impl GoogleOAuthFlow {
             email,
             name,
             picture: info.picture.filter(|p| !p.is_empty()),
+            sub: Some(info.sub).filter(|s| !s.is_empty()),
             iat: Utc::now().timestamp(),
         })
     }
@@ -451,13 +511,22 @@ impl std::fmt::Display for SessionRef {
 
 /// Real-time event broadcast to the web UI (`/oauth2/events`) so it can open
 /// the consent popup immediately while a tool call waits in-flight.
+///
+/// Every event names the `user_id` owning the session so the SSE route only
+/// delivers it to that user's browser; the field itself is not serialised.
+/// The signed OAuth `state` is deliberately **not** part of the payload: the
+/// browser only needs `auth_url`, and `request_id` is the opaque handle it
+/// uses to acknowledge the popup (`/oauth2/ack`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OAuthUiEvent {
     /// A tool call is waiting for the user to grant `scopes` for `session_id`.
     AuthRequired {
-        /// Signed state token identifying this authorization request.
-        state: String,
+        /// Owner of the session (used for routing; never sent to the browser).
+        #[serde(skip)]
+        user_id: String,
+        /// Opaque id of this authorization request (for `/oauth2/ack`).
+        request_id: String,
         /// Session ID that requested authorization.
         session_id: String,
         /// Full Google OAuth 2.0 consent URL to open in a popup.
@@ -467,11 +536,33 @@ pub enum OAuthUiEvent {
     },
     /// The authorization flow for `session_id` finished (`"ok"` or `"error"`).
     AuthCompleted {
+        /// Owner of the session (used for routing; never sent to the browser).
+        #[serde(skip)]
+        user_id: String,
         /// Session ID that requested authorization.
         session_id: String,
         /// `"ok"` or `"error"`.
         status: String,
     },
+}
+
+impl OAuthUiEvent {
+    /// The user the event is addressed to.
+    pub fn user_id(&self) -> &str {
+        match self {
+            Self::AuthRequired { user_id, .. } | Self::AuthCompleted { user_id, .. } => user_id,
+        }
+    }
+}
+
+/// Google Sign-In started by `/auth/login`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserLogin {
+    /// Google consent URL to redirect the browser to.
+    pub url: String,
+    /// Nonce the browser must present (as a cookie) on the callback, binding
+    /// the sign-in to the browser that started it.
+    pub nonce: String,
 }
 
 /// In-flight authorization state for a single session.
@@ -480,6 +571,20 @@ struct PendingSessionAuth {
     scopes: Vec<String>,
     auth_required: AuthRequired,
     tx: broadcast::Sender<Result<OAuthToken, String>>,
+}
+
+/// Popup-open acknowledgment channel of one authorization request.
+struct PopupAck {
+    user_id: String,
+    created: Instant,
+    tx: watch::Sender<Option<bool>>,
+}
+
+/// How an in-flight wait for the OAuth callback ended.
+enum WaitOutcome {
+    Granted(OAuthToken),
+    Denied(String),
+    TimedOut,
 }
 
 /// Claims carried by the signed OAuth `state` parameter.
@@ -558,6 +663,13 @@ fn open_in_system_browser(url: &str) -> bool {
     }
 }
 
+/// Locks a mutex, tolerating poisoning: the guarded maps stay consistent
+/// across a panic in one tool call, so a poisoned lock must not take down
+/// every later authorization.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Google credentials attached to the chat session.
 ///
 /// Tokens are stored in the session state (key [`CREDENTIALS_STATE_KEY`]):
@@ -572,7 +684,8 @@ fn open_in_system_browser(url: &str) -> bool {
 /// LLM to print an authorization link in the chat window.
 pub struct SessionCredentialManager {
     flow: GoogleOAuthFlow,
-    /// HMAC key for the `state` parameter (derived from the client secret).
+    /// HMAC key for the `state` parameter and the user cookie (see
+    /// [`Self::with_state_secret`]).
     state_key: [u8; 32],
     /// How long [`Self::access_token`] waits in-flight for the user to finish
     /// OAuth consent in the popup before falling back to [`AuthRequired`].
@@ -586,12 +699,17 @@ pub struct SessionCredentialManager {
     shutdown: watch::Sender<bool>,
     /// In-flight authorizations keyed by session.
     pending: Mutex<HashMap<SessionRef, PendingSessionAuth>>,
-    /// Popup-open acknowledgments keyed by signed `state`.
-    acks: Mutex<HashMap<String, watch::Sender<Option<bool>>>>,
+    /// Popup-open acknowledgments keyed by the opaque request id.
+    acks: Mutex<HashMap<String, PopupAck>>,
     /// Newly granted tokens for active sessions (bridges the gap between
     /// `/oauth2/callback` persisting to `SessionService` and the in-flight
     /// `ToolContext::session()` snapshot of the currently running turn).
-    live_tokens: Mutex<HashMap<SessionRef, OAuthToken>>,
+    /// Entries expire after [`LIVE_TOKEN_TTL`].
+    live_tokens: Mutex<HashMap<SessionRef, (Instant, OAuthToken)>>,
+    /// Session store an in-flight waiter polls for a token persisted by the
+    /// callback — possibly on another server instance (see
+    /// [`Self::attach_session_service`]).
+    sessions: RwLock<Option<Arc<dyn SessionService>>>,
     /// Runtime model controller allowing the Studio UI to inspect and switch
     /// the active LLM, video, and image models.
     models: RwLock<Arc<dyn crate::config::ModelController>>,
@@ -606,11 +724,38 @@ impl std::fmt::Debug for SessionCredentialManager {
 }
 
 impl SessionCredentialManager {
-    /// Creates a manager for the given flow.
+    /// Creates a manager for the given flow, taking the optional extra signing
+    /// secret from `OAUTH_STATE_SECRET` (see [`Self::with_state_secret`]).
     pub fn new(flow: GoogleOAuthFlow) -> Self {
+        let secret = std::env::var("OAUTH_STATE_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
+        Self::with_state_secret(flow, secret)
+    }
+
+    /// Creates a manager whose HMAC key (OAuth `state`, `adspace_user`
+    /// cookie) is derived from the client secret and `secret`.
+    ///
+    /// Without a client secret and without `secret` the key would be a
+    /// public constant, so a random per-process key is used instead: cookies
+    /// and states then only verify on the process that issued them, which is
+    /// fine because nothing can be signed in without an OAuth client anyway.
+    pub fn with_state_secret(flow: GoogleOAuthFlow, secret: Option<String>) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"adspace-agent/oauth-state:");
         hasher.update(flow.config.client_secret.as_bytes());
+        match secret {
+            Some(secret) => {
+                hasher.update(b"/secret:");
+                hasher.update(secret.as_bytes());
+            }
+            None if flow.config.client_secret.is_empty() => {
+                hasher.update(b"/process:");
+                hasher.update(uuid::Uuid::new_v4().as_bytes());
+                hasher.update(uuid::Uuid::new_v4().as_bytes());
+            }
+            None => {}
+        }
         let (ui_events, _) = broadcast::channel(64);
         let (shutdown, _) = watch::channel(false);
         Self {
@@ -623,6 +768,7 @@ impl SessionCredentialManager {
             pending: Mutex::new(HashMap::new()),
             acks: Mutex::new(HashMap::new()),
             live_tokens: Mutex::new(HashMap::new()),
+            sessions: RwLock::new(None),
             models: RwLock::new(Arc::new(crate::config::SimpleModelController::default())),
         }
     }
@@ -640,13 +786,21 @@ impl SessionCredentialManager {
         *self.models.write().unwrap_or_else(|e| e.into_inner()) = controller;
     }
 
+    /// Attaches the session store so an in-flight [`Self::access_token`] wait
+    /// also completes when the OAuth callback was handled by *another* server
+    /// instance (which persisted the token to the shared session service but
+    /// cannot reach this process's in-memory waiter).
+    pub fn attach_session_service(&self, sessions: Arc<dyn SessionService>) {
+        *self.sessions.write().unwrap_or_else(|e| e.into_inner()) = Some(sessions);
+    }
+
     /// Enables in-flight waiting inside [`Self::access_token`] for up to
     /// `timeout` while the popup consent flow completes. When
     /// `system_browser_fallback` is `true` and the redirect URI points at
     /// `localhost` / `127.0.0.1`, the server also opens the consent URL via
     /// the OS browser opener if the web UI's `window.open` is blocked.
     pub fn enable_interactive_wait(&self, timeout: Duration, system_browser_fallback: bool) {
-        *self.wait_timeout.write().unwrap() = Some(timeout);
+        *self.wait_timeout.write().unwrap_or_else(|e| e.into_inner()) = Some(timeout);
         self.system_browser_fallback
             .store(system_browser_fallback, Ordering::Relaxed);
     }
@@ -666,14 +820,16 @@ impl SessionCredentialManager {
         let _ = self.shutdown.send(true);
     }
 
-    /// Records whether the web UI succeeded in opening the popup for `state`.
-    /// Returns `true` if the server opened (or will open) the URL via the
-    /// local system browser fallback instead.
-    pub fn ack_popup(&self, state: &str, opened: bool) -> bool {
-        if let Some(tx) = self.acks.lock().unwrap().get(state)
-            && *tx.borrow() != Some(true)
+    /// Records whether the web UI of `user_id` succeeded in opening the popup
+    /// for the authorization request `request_id` (ignored when the request
+    /// belongs to another user). Returns `true` if the server opened (or will
+    /// open) the URL via the local system browser fallback instead.
+    pub fn ack_popup(&self, request_id: &str, user_id: &str, opened: bool) -> bool {
+        if let Some(ack) = lock(&self.acks).get(request_id)
+            && ack.user_id == user_id
+            && *ack.tx.borrow() != Some(true)
         {
-            let _ = tx.send(Some(opened));
+            let _ = ack.tx.send(Some(opened));
         }
         !opened && self.should_fallback_to_system_browser()
     }
@@ -718,13 +874,28 @@ impl SessionCredentialManager {
 
     fn current_token(&self, ctx: &dyn ToolContext, session: &SessionRef) -> Option<OAuthToken> {
         let from_ctx = Self::stored_token(ctx);
-        let from_live = self.live_tokens.lock().unwrap().get(session).cloned();
+        let from_live = self.live_token(session);
         match (from_ctx, from_live) {
             (Some(a), Some(b)) => Some(merge_tokens(&a, &b)),
             (Some(a), None) => Some(a),
             (None, Some(b)) => Some(b),
             (None, None) => None,
         }
+    }
+
+    /// The in-memory copy of a recently granted token, unless it expired.
+    fn live_token(&self, session: &SessionRef) -> Option<OAuthToken> {
+        lock(&self.live_tokens)
+            .get(session)
+            .filter(|(at, _)| at.elapsed() < LIVE_TOKEN_TTL)
+            .map(|(_, token)| token.clone())
+    }
+
+    /// Remembers a freshly granted token for `session`, evicting stale entries.
+    fn remember_live_token(&self, session: &SessionRef, token: &OAuthToken) {
+        let mut live = lock(&self.live_tokens);
+        live.retain(|_, (at, _)| at.elapsed() < LIVE_TOKEN_TTL);
+        live.insert(session.clone(), (Instant::now(), token.clone()));
     }
 
     /// Writes (or, with `None`, clears) the token in the session state through
@@ -769,10 +940,7 @@ impl SessionCredentialManager {
                     match self.flow.refresh(&token).await {
                         Ok(refreshed) => {
                             let merged = merge_tokens(&token, &refreshed);
-                            self.live_tokens
-                                .lock()
-                                .unwrap()
-                                .insert(session.clone(), merged.clone());
+                            self.remember_live_token(&session, &merged);
                             Self::store_token(ctx, Some(&merged));
                             return Ok(merged.access_token);
                         }
@@ -780,7 +948,7 @@ impl SessionCredentialManager {
                             tracing::warn!(
                                 "Failed to refresh Google credentials of session {session}: {e}"
                             );
-                            self.live_tokens.lock().unwrap().remove(&session);
+                            lock(&self.live_tokens).remove(&session);
                             Self::store_token(ctx, None);
                         }
                     }
@@ -792,7 +960,7 @@ impl SessionCredentialManager {
             }
         }
 
-        let wait_timeout = *self.wait_timeout.read().unwrap();
+        let wait_timeout = *self.wait_timeout.read().unwrap_or_else(|e| e.into_inner());
         let Some(timeout) = wait_timeout else {
             return Err(self.begin_authorization(&session, scopes).into());
         };
@@ -800,20 +968,107 @@ impl SessionCredentialManager {
             return Err(self.begin_authorization(&session, scopes).into());
         }
 
-        let (mut rx, auth_req) = self.start_or_join_pending(&session, scopes);
-        match tokio::time::timeout(timeout, rx.recv()).await {
-            Ok(Ok(Ok(token))) => {
+        let (mut rx, auth_req, request_id) = self.start_or_join_pending(&session, scopes);
+        let outcome = self
+            .wait_for_authorization(&session, scopes, &mut rx, timeout)
+            .await;
+        if let Some(request_id) = request_id {
+            lock(&self.acks).remove(&request_id);
+        }
+        match outcome {
+            WaitOutcome::Granted(token) => {
                 Self::store_token(ctx, Some(&token));
                 Ok(token.access_token)
             }
-            Ok(Ok(Err(reason))) => {
+            WaitOutcome::Denied(reason) => {
                 tracing::warn!("Google authorization for session {session} failed: {reason}");
                 Err(auth_req.into())
             }
-            Ok(Err(_)) | Err(_) => {
-                self.pending.lock().unwrap().remove(&session);
+            WaitOutcome::TimedOut => {
+                self.leave_pending(&session, rx);
                 Err(auth_req.into())
             }
+        }
+    }
+
+    /// Awaits the callback for `session`: either the in-process notification
+    /// from [`Self::persist`] / [`Self::fail_authorization`], or — when the
+    /// callback landed on another instance — the token showing up in the
+    /// session store (polled every [`PERSISTED_TOKEN_POLL_INTERVAL`]).
+    async fn wait_for_authorization(
+        &self,
+        session: &SessionRef,
+        scopes: &[String],
+        rx: &mut broadcast::Receiver<Result<OAuthToken, String>>,
+        timeout: Duration,
+    ) -> WaitOutcome {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut poll = tokio::time::interval(PERSISTED_TOKEN_POLL_INTERVAL);
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                received = rx.recv() => match received {
+                    Ok(Ok(token)) => return WaitOutcome::Granted(token),
+                    Ok(Err(reason)) => return WaitOutcome::Denied(reason),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return WaitOutcome::TimedOut,
+                },
+                _ = poll.tick() => {
+                    if let Some(token) = self.persisted_token(session, scopes).await {
+                        self.complete_pending(session, &token);
+                        return WaitOutcome::Granted(token);
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => return WaitOutcome::TimedOut,
+            }
+        }
+    }
+
+    /// A valid token covering `scopes` already persisted in the session store.
+    async fn persisted_token(&self, session: &SessionRef, scopes: &[String]) -> Option<OAuthToken> {
+        let sessions = self
+            .sessions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        let loaded = sessions
+            .get(GetRequest {
+                app_name: session.app_name.clone(),
+                user_id: session.user_id.clone(),
+                session_id: session.session_id.clone(),
+                num_recent_events: Some(1),
+                after: None,
+            })
+            .await
+            .ok()?;
+        let value = loaded.state().get(CREDENTIALS_STATE_KEY)?;
+        let token: OAuthToken = serde_json::from_value(value).ok()?;
+        (token.covers(scopes) && !token.is_expired()).then_some(token)
+    }
+
+    /// Finishes the in-flight authorization of `session` with `token`: keeps
+    /// the token in memory and wakes every waiter.
+    fn complete_pending(&self, session: &SessionRef, token: &OAuthToken) {
+        self.remember_live_token(session, token);
+        if let Some(pending) = lock(&self.pending).remove(session) {
+            let _ = pending.tx.send(Ok(token.clone()));
+        }
+    }
+
+    /// Drops this waiter's subscription; the pending authorization is kept
+    /// alive as long as other tool calls are still waiting on it.
+    fn leave_pending(
+        &self,
+        session: &SessionRef,
+        rx: broadcast::Receiver<Result<OAuthToken, String>>,
+    ) {
+        let mut pending = lock(&self.pending);
+        drop(rx);
+        if pending
+            .get(session)
+            .is_some_and(|p| p.tx.receiver_count() == 0)
+        {
+            pending.remove(session);
         }
     }
 
@@ -824,8 +1079,9 @@ impl SessionCredentialManager {
     ) -> (
         broadcast::Receiver<Result<OAuthToken, String>>,
         AuthRequired,
+        Option<String>,
     ) {
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = lock(&self.pending);
         if let Some(existing) = pending.get(session)
             && scopes.iter().all(|needed| {
                 existing
@@ -834,7 +1090,11 @@ impl SessionCredentialManager {
                     .any(|granted| scope_covers(granted, needed))
             })
         {
-            return (existing.tx.subscribe(), existing.auth_required.clone());
+            return (
+                existing.tx.subscribe(),
+                existing.auth_required.clone(),
+                None,
+            );
         }
 
         let mut combined: Vec<String> = pending
@@ -846,7 +1106,7 @@ impl SessionCredentialManager {
                 combined.push(scope.clone());
             }
         }
-        let (state, auth_req) = self.begin_authorization_with_state(session, &combined);
+        let auth_req = self.begin_authorization(session, &combined);
         let tx = pending
             .get(session)
             .map(|p| p.tx.clone())
@@ -862,11 +1122,24 @@ impl SessionCredentialManager {
         );
         drop(pending);
 
+        let request_id = uuid::Uuid::new_v4().simple().to_string();
         let (ack_tx, mut ack_rx) = watch::channel(None);
-        self.acks.lock().unwrap().insert(state.clone(), ack_tx);
+        {
+            let mut acks = lock(&self.acks);
+            acks.retain(|_, ack| ack.created.elapsed() < PENDING_TTL);
+            acks.insert(
+                request_id.clone(),
+                PopupAck {
+                    user_id: session.user_id.clone(),
+                    created: Instant::now(),
+                    tx: ack_tx,
+                },
+            );
+        }
 
         let _ = self.ui_events.send(OAuthUiEvent::AuthRequired {
-            state: state.clone(),
+            user_id: session.user_id.clone(),
+            request_id: request_id.clone(),
             session_id: session.session_id.clone(),
             auth_url: auth_req.auth_url.clone(),
             scopes: auth_req.scopes.clone(),
@@ -890,29 +1163,16 @@ impl SessionCredentialManager {
             });
         }
 
-        (rx, auth_req)
+        (rx, auth_req, Some(request_id))
     }
 
     /// Starts an authorization for `session` asking for `scopes`
     /// (least privilege), returning the instructions.
     pub fn begin_authorization(&self, session: &SessionRef, scopes: &[String]) -> AuthRequired {
-        self.begin_authorization_with_state(session, scopes).1
-    }
-
-    fn begin_authorization_with_state(
-        &self,
-        session: &SessionRef,
-        scopes: &[String],
-    ) -> (String, AuthRequired) {
-        let unavailable = |message: &str| {
-            (
-                String::new(),
-                AuthRequired {
-                    auth_url: String::new(),
-                    scopes: Vec::new(),
-                    message: message.to_string(),
-                },
-            )
+        let unavailable = |message: &str| AuthRequired {
+            auth_url: String::new(),
+            scopes: Vec::new(),
+            message: message.to_string(),
         };
         if !self.flow.config.is_configured() {
             return unavailable(
@@ -939,17 +1199,14 @@ impl SessionCredentialManager {
             .iter()
             .map(|s| s.rsplit('/').next().unwrap_or(s))
             .collect();
-        (
-            state,
-            AuthRequired {
-                auth_url: auth_url.clone(),
-                scopes: requested.clone(),
-                message: format!(
-                    "Authorization required for this chat session (requested access: {}). Show the user this link as a markdown link labelled \"Authorize Google access\" and ask them to open it and grant the permission; the conversation resumes automatically once access is granted (if it does not, they can say \"done\"): {auth_url}",
-                    names.join(", ")
-                ),
-            },
-        )
+        AuthRequired {
+            auth_url: auth_url.clone(),
+            scopes: requested.clone(),
+            message: format!(
+                "Authorization required for this chat session (requested access: {}). Show the user this link as a markdown link labelled \"Authorize Google access\" and ask them to open it and grant the permission; the conversation resumes automatically once access is granted (if it does not, they can say \"done\"): {auth_url}",
+                names.join(", ")
+            ),
+        }
     }
 
     /// Completes an authorization from the redirect handler: validates the
@@ -965,11 +1222,10 @@ impl SessionCredentialManager {
         state: &str,
         code: &str,
     ) -> anyhow::Result<(SessionRef, OAuthToken)> {
-        self.acks.lock().unwrap().remove(state);
         let claims = self.verify_state(state)?;
         let token = self.flow.exchange_code(code, &claims.scopes).await?;
-        let merged = match self.live_tokens.lock().unwrap().get(&claims.session) {
-            Some(existing) => merge_tokens(existing, &token),
+        let merged = match self.live_token(&claims.session) {
+            Some(existing) => merge_tokens(&existing, &token),
             None => token,
         };
         Ok((claims.session, merged))
@@ -978,12 +1234,12 @@ impl SessionCredentialManager {
     /// Notifies any in-flight tool call waiting on `state` that authorization
     /// was denied or failed.
     pub fn fail_authorization(&self, state: &str, error: &str) {
-        self.acks.lock().unwrap().remove(state);
         if let Ok(claims) = self.verify_state(state) {
-            if let Some(pending) = self.pending.lock().unwrap().remove(&claims.session) {
+            if let Some(pending) = lock(&self.pending).remove(&claims.session) {
                 let _ = pending.tx.send(Err(error.to_string()));
             }
             let _ = self.ui_events.send(OAuthUiEvent::AuthCompleted {
+                user_id: claims.session.user_id,
                 session_id: claims.session.session_id,
                 status: "error".to_string(),
             });
@@ -993,9 +1249,7 @@ impl SessionCredentialManager {
     /// Whether an in-flight tool call is currently awaiting OAuth completion
     /// for `session`.
     pub fn has_pending_waiter(&self, session: &SessionRef) -> bool {
-        self.pending
-            .lock()
-            .unwrap()
+        lock(&self.pending)
             .get(session)
             .is_some_and(|p| p.tx.receiver_count() > 0)
     }
@@ -1028,14 +1282,9 @@ impl SessionCredentialManager {
             .map_err(|e| {
                 anyhow::anyhow!("failed to store credentials in session {session}: {e}")
             })?;
-        self.live_tokens
-            .lock()
-            .unwrap()
-            .insert(session.clone(), token.clone());
-        if let Some(pending) = self.pending.lock().unwrap().remove(session) {
-            let _ = pending.tx.send(Ok(token.clone()));
-        }
+        self.complete_pending(session, token);
         let _ = self.ui_events.send(OAuthUiEvent::AuthCompleted {
+            user_id: session.user_id.clone(),
             session_id: session.session_id.clone(),
             status: "ok".to_string(),
         });
@@ -1049,16 +1298,26 @@ impl SessionCredentialManager {
 
     /// Builds the signed `state` parameter naming `session` and `scopes`.
     fn sign_state(&self, session: &SessionRef, scopes: &[String]) -> String {
+        self.sign_state_with_nonce(session, scopes).0
+    }
+
+    /// Like [`Self::sign_state`], also returning the random nonce embedded in
+    /// the claims.
+    fn sign_state_with_nonce(&self, session: &SessionRef, scopes: &[String]) -> (String, String) {
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
         let claims = StateClaims {
             session: session.clone(),
             scopes: scopes.to_vec(),
             iat: Utc::now().timestamp(),
-            nonce: uuid::Uuid::new_v4().simple().to_string(),
+            nonce: nonce.clone(),
         };
         let payload = b64(&serde_json::to_vec(&claims).expect("claims serialize"));
         let mut mac = self.mac();
         mac.update(payload.as_bytes());
-        format!("{payload}.{}", b64(&mac.finalize().into_bytes()))
+        (
+            format!("{payload}.{}", b64(&mac.finalize().into_bytes())),
+            nonce,
+        )
     }
 
     /// Validates a `state` parameter and returns its claims.
@@ -1083,12 +1342,14 @@ impl SessionCredentialManager {
     }
 
     /// Starts a Google Sign-In flow (`openid email profile`), returning the
-    /// Google OAuth URL whose signed `state` carries [`LOGIN_SENTINEL_APP`].
+    /// Google OAuth URL whose signed `state` carries [`LOGIN_SENTINEL_APP`]
+    /// and the nonce the callback must see again as a cookie (see
+    /// [`Self::login_state_nonce`]).
     ///
     /// # Errors
     ///
     /// Returns an error when `CLIENT_ID` or `CLIENT_SECRET` is not configured.
-    pub fn begin_user_login(&self) -> anyhow::Result<String> {
+    pub fn begin_user_login(&self) -> anyhow::Result<UserLogin> {
         if !self.flow.config.is_configured() {
             anyhow::bail!(
                 "Google OAuth is not configured: set CLIENT_ID and CLIENT_SECRET in .env and restart the server."
@@ -1104,8 +1365,23 @@ impl SessionCredentialManager {
             "email".to_string(),
             "profile".to_string(),
         ];
-        let state = self.sign_state(&session, &scopes);
-        Ok(self.flow.login_authorization_url(&state))
+        let (state, nonce) = self.sign_state_with_nonce(&session, &scopes);
+        Ok(UserLogin {
+            url: self.flow.login_authorization_url(&state),
+            nonce,
+        })
+    }
+
+    /// For a valid sign-in `state` (one issued by [`Self::begin_user_login`]),
+    /// the nonce the initiating browser holds in its cookie. `None` for
+    /// invalid states and for tool authorizations.
+    ///
+    /// The callback compares it with the cookie so that a sign-in can only be
+    /// completed by the browser that started it — otherwise an attacker could
+    /// finish their own sign-in in a victim's browser (login CSRF).
+    pub fn login_state_nonce(&self, state: &str) -> Option<String> {
+        let claims = self.verify_state(state).ok()?;
+        (claims.session.app_name == LOGIN_SENTINEL_APP).then_some(claims.nonce)
     }
 
     /// Signs `user` into a tamper-proof cookie value (`<payload>.<sig>`).
@@ -1611,6 +1887,205 @@ mod tests {
                 .persist(&sessions, &missing, &token)
                 .await
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn userinfo_email_verified_accepts_bool_and_string() {
+        let parse = |body: &str| serde_json::from_str::<GoogleUserInfoResponse>(body).unwrap();
+        assert_eq!(
+            parse(r#"{"sub":"1","email":"a@b.c","email_verified":true}"#).email_verified,
+            Some(true)
+        );
+        assert_eq!(
+            parse(r#"{"sub":"1","email":"a@b.c","email_verified":"true"}"#).email_verified,
+            Some(true)
+        );
+        assert_eq!(
+            parse(r#"{"sub":"1","email":"a@b.c","email_verified":"false"}"#).email_verified,
+            Some(false)
+        );
+        assert_eq!(parse(r#"{"sub":"1","email":"a@b.c"}"#).email_verified, None);
+    }
+
+    #[test]
+    fn https_base_url_is_detected_for_secure_cookies() {
+        assert!(
+            OAuthClientConfig {
+                redirect_uri: "https://agent.example.com/oauth2/callback".into(),
+                ..config()
+            }
+            .is_https()
+        );
+        assert!(!config().is_https());
+    }
+
+    #[test]
+    fn unconfigured_managers_do_not_share_a_public_signing_key() {
+        let unconfigured = || OAuthClientConfig {
+            client_id: String::new(),
+            client_secret: String::new(),
+            redirect_uri: String::new(),
+        };
+        let a = SessionCredentialManager::new(GoogleOAuthFlow::new(unconfigured()));
+        let b = SessionCredentialManager::new(GoogleOAuthFlow::new(unconfigured()));
+        let user = AuthenticatedUser {
+            id: "u".into(),
+            email: "u@example.com".into(),
+            name: "U".into(),
+            picture: None,
+            sub: None,
+            iat: Utc::now().timestamp(),
+        };
+        let cookie = a.sign_user_cookie(&user);
+        assert_eq!(a.verify_user_cookie(&cookie), Some(user.clone()));
+        assert!(
+            b.verify_user_cookie(&cookie).is_none(),
+            "a cookie forged with the (previously constant) key must not verify elsewhere"
+        );
+
+        // An explicit shared secret makes the key stable across processes.
+        let c = SessionCredentialManager::with_state_secret(
+            GoogleOAuthFlow::new(unconfigured()),
+            Some("shared".into()),
+        );
+        let d = SessionCredentialManager::with_state_secret(
+            GoogleOAuthFlow::new(unconfigured()),
+            Some("shared".into()),
+        );
+        assert_eq!(d.verify_user_cookie(&c.sign_user_cookie(&user)), Some(user));
+    }
+
+    #[test]
+    fn login_state_carries_the_browser_nonce() {
+        let manager = manager();
+        let login = manager.begin_user_login().unwrap();
+        let state = state_param(&login.url);
+        assert_eq!(
+            manager.login_state_nonce(&state).as_deref(),
+            Some(login.nonce.as_str())
+        );
+        // Tool authorizations are not sign-ins.
+        let tool_state = manager.sign_state(&session(), &["s".to_string()]);
+        assert!(manager.login_state_nonce(&tool_state).is_none());
+        assert!(manager.login_state_nonce("garbage").is_none());
+    }
+
+    #[test]
+    fn live_tokens_expire() {
+        let manager = manager();
+        let token = OAuthToken {
+            access_token: "a".into(),
+            refresh_token: Some("r".into()),
+            expires_at: None,
+            scopes: vec![],
+        };
+        let stale = SessionRef {
+            session_id: "stale".into(),
+            ..session()
+        };
+        if let Some(long_ago) = Instant::now().checked_sub(LIVE_TOKEN_TTL + Duration::from_secs(1))
+        {
+            lock(&manager.live_tokens).insert(stale.clone(), (long_ago, token.clone()));
+            assert!(
+                manager.live_token(&stale).is_none(),
+                "stale entries are ignored"
+            );
+            manager.remember_live_token(&session(), &token);
+            assert!(
+                !lock(&manager.live_tokens).contains_key(&stale),
+                "stale entries are evicted on insert"
+            );
+        }
+        assert_eq!(manager.live_token(&session()), Some(token));
+    }
+
+    #[tokio::test]
+    async fn a_waiter_timing_out_does_not_orphan_co_waiters_or_leak_acks() {
+        let manager = manager();
+        let scopes = ["s".to_string()];
+        let (rx1, _, request1) = manager.start_or_join_pending(&session(), &scopes);
+        let (rx2, _, request2) = manager.start_or_join_pending(&session(), &scopes);
+        assert!(request1.is_some(), "first waiter starts the authorization");
+        assert!(request2.is_none(), "second waiter joins it");
+        assert_eq!(lock(&manager.acks).len(), 1);
+        assert!(manager.has_pending_waiter(&session()));
+
+        manager.leave_pending(&session(), rx1);
+        assert!(
+            manager.has_pending_waiter(&session()),
+            "the authorization stays alive for the second waiter"
+        );
+        manager.leave_pending(&session(), rx2);
+        assert!(!manager.has_pending_waiter(&session()));
+        assert!(lock(&manager.pending).is_empty());
+
+        // The full wait path removes the ack entry on timeout.
+        lock(&manager.acks).clear();
+        manager.enable_interactive_wait(Duration::from_millis(50), false);
+        let ctx = FakeToolContext::with_state(&[]);
+        let err = manager
+            .access_token(ctx.as_ref(), &scopes)
+            .await
+            .unwrap_err();
+        assert!(auth_required(&err).is_some());
+        assert!(lock(&manager.acks).is_empty());
+        assert!(lock(&manager.pending).is_empty());
+    }
+
+    #[tokio::test]
+    async fn waiter_completes_from_a_token_persisted_by_another_instance() {
+        let sessions: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        sessions
+            .create(CreateRequest {
+                app_name: "adspace_agent".into(),
+                user_id: "local-user".into(),
+                session_id: Some("s-1".into()),
+                state: HashMap::new(),
+            })
+            .await
+            .unwrap();
+        let waiting = Arc::new(manager());
+        waiting.attach_session_service(sessions.clone());
+        waiting.enable_interactive_wait(Duration::from_secs(10), false);
+
+        let ctx = FakeToolContext::with_state(&[]);
+        let waiter = {
+            let waiting = waiting.clone();
+            let ctx = ctx.clone();
+            tokio::spawn(
+                async move { waiting.access_token(ctx.as_ref(), &["s".to_string()]).await },
+            )
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(waiting.has_pending_waiter(&session()));
+
+        // The OAuth callback lands on a different server instance, which only
+        // shares the session store with the waiting one.
+        let token = OAuthToken {
+            access_token: "from-other-instance".into(),
+            refresh_token: Some("r".into()),
+            expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+            scopes: vec!["s".into()],
+        };
+        manager()
+            .persist(sessions.as_ref(), &session(), &token)
+            .await
+            .unwrap();
+
+        let got = tokio::time::timeout(
+            PERSISTED_TOKEN_POLL_INTERVAL + Duration::from_secs(3),
+            waiter,
+        )
+        .await
+        .expect("the waiter picks the persisted token up by polling")
+        .unwrap()
+        .unwrap();
+        assert_eq!(got, "from-other-instance");
+        assert!(!waiting.has_pending_waiter(&session()));
+        assert_eq!(
+            ctx.actions().state_delta[CREDENTIALS_STATE_KEY],
+            serde_json::to_value(&token).unwrap()
         );
     }
 }

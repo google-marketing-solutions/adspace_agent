@@ -14,6 +14,7 @@
 
 //! Custom tools and toolsets for the AdSpace Agent.
 
+pub mod bigquery;
 pub mod cm360_trafficking;
 pub mod data_analysis;
 pub mod gemini_builtins;

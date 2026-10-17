@@ -22,8 +22,9 @@
 //! `reload_skills` tool that re-reads every source at runtime.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use adk_rust::skill::{
     ResourceAccessPolicy, SkillIndex, SkillToolset, SkillToolsetConfig, load_skill_index,
@@ -34,12 +35,16 @@ use adk_rust::{
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::gcs::GcsClient;
 
 /// Prefix inside the bucket under which skills live.
 pub const GCS_SKILLS_PREFIX: &str = "skills/";
+
+/// Per-process staging directories left behind by processes that did not
+/// shut down cleanly are removed once they are older than this.
+const STALE_STAGING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Where skills come from.
 #[derive(Clone)]
@@ -48,7 +53,9 @@ pub struct SkillSources {
     pub local_dir: Option<PathBuf>,
     /// GCS bucket (and client) containing `skills/<name>/SKILL.md`.
     pub gcs: Option<(GcsClient, String)>,
-    /// Staging directory where skills are materialised for adk-skill.
+    /// Staging directory where skills are materialised for adk-skill. Every
+    /// (re)load stages into a fresh `<staging_dir>/<uuid>/.skills` generation
+    /// so a reload never pulls files out from under an in-flight `load_skill`.
     pub staging_dir: PathBuf,
 }
 
@@ -64,6 +71,10 @@ impl std::fmt::Debug for SkillSources {
 
 impl SkillSources {
     /// Builds sources from `LOCAL_SKILLS_DIR` / `SKILLS_BUCKET_NAME`.
+    ///
+    /// The staging directory is private to this process
+    /// (`<tmp>/adspace-agent/skills-staging/<pid>-<uuid>`); stale directories
+    /// of earlier processes are swept on the way.
     pub fn from_env(gcs: Option<GcsClient>) -> Self {
         let local_dir = std::env::var("LOCAL_SKILLS_DIR")
             .ok()
@@ -73,14 +84,93 @@ impl SkillSources {
         let bucket = std::env::var("SKILLS_BUCKET_NAME")
             .ok()
             .filter(|b| !b.is_empty());
-        let staging_dir = std::env::temp_dir()
+        let staging_root = std::env::temp_dir()
             .join("adspace-agent")
             .join("skills-staging");
+        remove_stale_staging_dirs(&staging_root, STALE_STAGING_AGE);
+        let staging_dir = staging_root.join(format!(
+            "{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
         Self {
             local_dir,
             gcs: gcs.zip(bucket),
             staging_dir,
         }
+    }
+}
+
+/// Removes per-process staging directories under `root` that have not been
+/// touched for `max_age` (left behind by crashed or killed processes). Only
+/// entries named like `<pid>-<uuid>` are considered.
+fn remove_stale_staging_dirs(root: &Path, max_age: Duration) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let looks_like_staging = name
+            .split_once('-')
+            .is_some_and(|(pid, rest)| pid.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty());
+        if !looks_like_staging || !path.is_dir() {
+            continue;
+        }
+        let age = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| now.duration_since(m).ok());
+        if age.is_some_and(|age| age > max_age)
+            && let Err(e) = std::fs::remove_dir_all(&path)
+        {
+            tracing::debug!(
+                "could not remove stale skills staging dir {}: {e}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Validates a skill id derived from a bucket prefix or directory name: it
+/// must be a single plain path component (no separators, no `..`).
+fn is_safe_skill_id(skill_id: &str) -> bool {
+    !skill_id.is_empty()
+        && skill_id != "."
+        && !skill_id.contains("..")
+        && !skill_id.contains(['/', '\\', '\0'])
+        && matches!(
+            Path::new(skill_id)
+                .components()
+                .collect::<Vec<_>>()
+                .as_slice(),
+            [Component::Normal(_)]
+        )
+}
+
+/// Turns an object name relative to its skill prefix into a path that is
+/// guaranteed to stay inside the skill directory: every component must be a
+/// plain name (no root, no `.`/`..`, no backslashes).
+fn safe_relative_path(relative: &str) -> Option<PathBuf> {
+    if relative.is_empty() || relative.contains(['\\', '\0']) {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for component in Path::new(relative).components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            _ => return None,
+        }
+    }
+    if out.as_os_str().is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 
@@ -108,6 +198,13 @@ struct SkillsState {
     inner: RwLock<Arc<SkillToolset>>,
     index: RwLock<Arc<SkillIndex>>,
     last_report: RwLock<SkillLoadReport>,
+    /// Serialises reloads: staging, indexing and the `Arc` swap happen under
+    /// this lock so two concurrent `reload_skills` calls cannot interleave.
+    reload_lock: Mutex<()>,
+    /// Staging generations (`<staging_dir>/<uuid>`), oldest first. The current
+    /// one is last; the previous one is kept until the next reload so a
+    /// `load_skill` that raced the swap still finds its files.
+    generations: Mutex<Vec<PathBuf>>,
 }
 
 /// Copies a local skill directory (recursively) into the staging area.
@@ -143,18 +240,17 @@ fn validate_skill_dir(dir: &Path) -> anyhow::Result<String> {
 }
 
 impl SkillsState {
-    /// Rebuilds the staging directory from every source and reloads the index.
+    /// Stages every source into a fresh generation directory, reloads the
+    /// index and swaps it in. Reloads are serialised; the previous generation
+    /// is retired only when the one after it lands.
     async fn reload(&self) -> SkillLoadReport {
+        let _reload = self.reload_lock.lock().await;
         let mut errors = Vec::new();
-        let staging = self.sources.staging_dir.join(".skills");
-        if let Err(e) = tokio::fs::remove_dir_all(&staging).await
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            errors.push(format!(
-                "Failed to clear skills staging dir '{}': {e}",
-                staging.display()
-            ));
-        }
+        let generation = self
+            .sources
+            .staging_dir
+            .join(uuid::Uuid::new_v4().simple().to_string());
+        let staging = generation.join(".skills");
         if let Err(e) = tokio::fs::create_dir_all(&staging).await {
             errors.push(format!(
                 "Failed to create skills staging dir '{}': {e}",
@@ -173,22 +269,34 @@ impl SkillsState {
             {
                 Ok((_, prefixes)) => {
                     for prefix in prefixes {
-                        let skill_id = prefix
-                            .trim_start_matches(GCS_SKILLS_PREFIX)
-                            .trim_end_matches('/')
-                            .to_string();
+                        let Some(skill_id) = prefix
+                            .strip_prefix(GCS_SKILLS_PREFIX)
+                            .map(|id| id.trim_end_matches('/'))
+                        else {
+                            continue;
+                        };
                         if skill_id.is_empty() {
                             continue;
                         }
+                        if !is_safe_skill_id(skill_id) {
+                            errors.push(format!(
+                                "GCS skill prefix '{prefix}' skipped: unsafe skill id '{skill_id}'"
+                            ));
+                            continue;
+                        }
                         match self
-                            .stage_gcs_skill(client, bucket, &skill_id, &staging)
+                            .stage_gcs_skill(client, bucket, skill_id, &staging)
                             .await
                         {
                             Ok(name) => {
-                                staged.insert(skill_id, name);
+                                staged.insert(skill_id.to_string(), name);
                             }
                             Err(e) => {
-                                errors.push(format!("GCS skill '{skill_id}' failed to load: {e:#}"))
+                                errors
+                                    .push(format!("GCS skill '{skill_id}' failed to load: {e:#}"));
+                                // Never leave a half-staged skill behind for
+                                // the indexer to pick up.
+                                let _ = tokio::fs::remove_dir_all(staging.join(skill_id)).await;
                             }
                         }
                     }
@@ -216,7 +324,7 @@ impl SkillsState {
                             .and_then(|n| n.to_str())
                             .unwrap_or_default()
                             .to_string();
-                        if !dir.join("SKILL.md").is_file() {
+                        if !is_safe_skill_id(&skill_id) || !dir.join("SKILL.md").is_file() {
                             continue;
                         }
                         let target = staging.join(&skill_id);
@@ -247,7 +355,7 @@ impl SkillsState {
             }
         }
 
-        let index = match load_skill_index(&self.sources.staging_dir) {
+        let index = match load_skill_index(&generation) {
             Ok(index) => index,
             Err(e) => {
                 errors.push(format!("Failed to index skills: {e}"));
@@ -265,6 +373,24 @@ impl SkillsState {
         *self.inner.write().await = toolset;
         let report = SkillLoadReport { names, errors };
         *self.last_report.write().await = report.clone();
+
+        // Retire everything but the current and the previous generation.
+        let retired: Vec<PathBuf> = {
+            let mut generations = self.generations.lock().await;
+            generations.push(generation);
+            let keep = generations.len().saturating_sub(2);
+            generations.drain(..keep).collect()
+        };
+        for old in retired {
+            if let Err(e) = tokio::fs::remove_dir_all(&old).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::debug!(
+                    "could not remove old skills staging dir {}: {e}",
+                    old.display()
+                );
+            }
+        }
         report
     }
 
@@ -285,6 +411,9 @@ impl SkillsState {
         skill_id: &str,
         staging: &Path,
     ) -> anyhow::Result<String> {
+        if !is_safe_skill_id(skill_id) {
+            anyhow::bail!("unsafe skill id '{skill_id}'");
+        }
         let prefix = format!("{GCS_SKILLS_PREFIX}{skill_id}/");
         let (objects, _) = client.list_objects(bucket, &prefix, None).await?;
         if !objects.iter().any(|o| o == &format!("{prefix}SKILL.md")) {
@@ -293,11 +422,21 @@ impl SkillsState {
         let target = staging.join(skill_id);
         tokio::fs::create_dir_all(&target).await?;
         for object in objects {
-            let relative = object.trim_start_matches(&prefix);
+            // `strip_prefix` (not `trim_start_matches`) so a repeated prefix
+            // in the object name is not swallowed.
+            let Some(relative) = object.strip_prefix(&prefix) else {
+                anyhow::bail!("object '{object}' is outside gs://{bucket}/{prefix}");
+            };
             if relative.is_empty() || relative.ends_with('/') {
                 continue;
             }
+            let Some(relative) = safe_relative_path(relative) else {
+                anyhow::bail!("refusing to stage object '{object}': unsafe path");
+            };
             let path = target.join(relative);
+            if !path.starts_with(&target) {
+                anyhow::bail!("refusing to stage object '{object}': escapes the skill directory");
+            }
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
@@ -368,6 +507,8 @@ impl SkillsToolset {
             ))),
             index: RwLock::new(empty_index),
             last_report: RwLock::new(SkillLoadReport::default()),
+            reload_lock: Mutex::new(()),
+            generations: Mutex::new(Vec::new()),
             sources,
         });
         let report = state.reload().await;
@@ -492,5 +633,116 @@ mod tests {
 
         let block = toolset.available_skills_block().await.unwrap();
         assert!(block.contains("`demo-skill`: Demo skill for tests."));
+
+        // Each reload stages into a fresh generation; only the current and
+        // the previous one are kept.
+        toolset.reload().await;
+        let generations: Vec<_> = std::fs::read_dir(dir.path().join("staging"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(generations.len(), 2, "current + previous generation");
+        assert_eq!(toolset.state.generations.lock().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_reloads_are_serialised() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("skills");
+        std::fs::create_dir_all(local.join("demo-skill")).unwrap();
+        std::fs::write(
+            local.join("demo-skill").join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: Demo.\n---\n\nBody\n",
+        )
+        .unwrap();
+        let toolset = Arc::new(
+            SkillsToolset::load(SkillSources {
+                local_dir: Some(local),
+                gcs: None,
+                staging_dir: dir.path().join("staging"),
+            })
+            .await,
+        );
+        let reloads: Vec<_> = (0..4)
+            .map(|_| {
+                let toolset = toolset.clone();
+                tokio::spawn(async move { toolset.reload().await })
+            })
+            .collect();
+        for handle in reloads {
+            let report = handle.await.unwrap();
+            assert_eq!(report.names, vec!["demo-skill"]);
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+        }
+        assert_eq!(toolset.skill_names().await, vec!["demo-skill"]);
+    }
+
+    #[test]
+    fn skill_ids_must_be_single_plain_components() {
+        for ok in ["demo", "demo-skill", "Demo_Skill.v2"] {
+            assert!(is_safe_skill_id(ok), "{ok}");
+        }
+        for bad in [
+            "", ".", "..", "a..b", "a/b", "a\\b", "/abs", "../x", "x/..", "a\0b",
+        ] {
+            assert!(!is_safe_skill_id(bad), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn relative_object_paths_cannot_escape_the_skill_dir() {
+        assert_eq!(
+            safe_relative_path("SKILL.md"),
+            Some(PathBuf::from("SKILL.md"))
+        );
+        assert_eq!(
+            safe_relative_path("resources/a/b.md"),
+            Some(PathBuf::from("resources/a/b.md"))
+        );
+        // Interior `.` segments are normalised away by `Path::components`.
+        assert_eq!(safe_relative_path("a/./b"), Some(PathBuf::from("a/b")));
+        for bad in [
+            "",
+            "/etc/cron.d/x",
+            "../../../x",
+            "a/../../x",
+            "./x",
+            "..",
+            "a\\..\\b",
+            "a\0b",
+        ] {
+            assert_eq!(safe_relative_path(bad), None, "{bad:?} must be rejected");
+        }
+        // Belt and braces: whatever comes back stays under the target.
+        let target = Path::new("/staging/.skills/demo");
+        for name in ["SKILL.md", "deep/er/file.txt"] {
+            let joined = target.join(safe_relative_path(name).unwrap());
+            assert!(joined.starts_with(target));
+        }
+    }
+
+    #[test]
+    fn stale_staging_dirs_are_swept_but_live_and_foreign_dirs_are_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let stale = root.path().join("123-abc");
+        let fresh = root.path().join("456-def");
+        let foreign = root.path().join("skills");
+        for d in [&stale, &fresh, &foreign] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let old = SystemTime::now() - Duration::from_secs(48 * 60 * 60);
+        std::fs::File::open(&stale)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        std::fs::File::open(&foreign)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        remove_stale_staging_dirs(root.path(), STALE_STAGING_AGE);
+        assert!(!stale.exists(), "stale per-process dir is removed");
+        assert!(fresh.exists(), "recent per-process dir is kept");
+        assert!(foreign.exists(), "unrelated dirs are never touched");
     }
 }

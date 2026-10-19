@@ -206,14 +206,28 @@ macro_rules! app_modules {
 app_modules! {
     "app.js",
     "adk-ui/charts.js",
+    "adk-ui/components.js",
+    "adk-ui/index.js",
+    "adk-ui/modal.js",
     "adk-ui/tables.js",
+    "auth.js",
     "dom.js",
     "format.js",
     "markdown.js",
+    "oauth-popup.js",
+    "prefs.js",
+    "sessions.js",
+    "settings-ui.js",
+    "sse.js",
+    "stage-bridge.js",
     "stage.js",
     "state.js",
     "status.js",
+    "transcript.js",
     "usage/counter.js",
+    "usage/pricing.js",
+    "usage/session-usage.js",
+    "usage/telemetry.js",
 }
 
 /// Inline robot SVG favicon served at `/favicon.svg` and `/favicon.ico`.

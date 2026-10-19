@@ -811,6 +811,11 @@ void main() {
           rafId = requestAnimationFrame(tick);
           return;
         }
+        // Moving the window to a monitor with a different DPR does not change
+        // clientWidth/Height, so the ResizeObserver never fires; re-sync the
+        // backing store here (right before a render, so the cleared canvas is
+        // repainted in the same frame).
+        if (Math.min(window.devicePixelRatio || 1, 2) !== dpr) syncSize();
         const dt = lastNow ? Math.min(Math.max(elapsedMs, 0), 100) / 1000 : 0;
         lastNow = now;
         phase = (phase + dt / DEFAULTS.loopSeconds) % 1;
@@ -892,6 +897,11 @@ void main() {
           running = false;
           tracker.reset();
           syncLoop();
+          // Settle the wave instead of freezing it mid-fade; mirrors the
+          // paused branch of update().
+          stream = streamTarget;
+          streamTime = 0;
+          snapAccent();
           renderFrame(0, performance.now());
         },
         update(next = {}) {

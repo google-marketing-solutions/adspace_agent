@@ -205,8 +205,15 @@ macro_rules! app_modules {
 // `/app/<path>` (`/app/app.js` is the entry point loaded by `studio.html`).
 app_modules! {
     "app.js",
+    "adk-ui/charts.js",
+    "adk-ui/tables.js",
+    "dom.js",
+    "format.js",
+    "markdown.js",
     "stage.js",
+    "usage/counter.js",
 }
+
 /// Inline robot SVG favicon served at `/favicon.svg` and `/favicon.ico`.
 const STUDIO_FAVICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 -960 960 960\">\
 <defs><linearGradient id=\"g\" x1=\"120\" y1=\"-840\" x2=\"840\" y2=\"-120\" gradientUnits=\"userSpaceOnUse\">\

@@ -43,9 +43,11 @@
     <link rel="stylesheet" href="/app/app.css" />
   </head>
   <body>
+    <a class="sr-only skip-link" href="#chat-input">Skip to composer</a>
     <div class="app-shell">
       <!-- Top Navigation Bar -->
       <header class="topbar">
+        <h1 class="sr-only">AdSpace Agent</h1>
         <a class="brand" href="/app/">
           <span class="brand-mark" aria-hidden="true">
             <span class="google-symbols filled">robot</span>
@@ -54,14 +56,14 @@
         </a>
         <span class="top-divider"></span>
 
-        <span id="status-pill" class="status status-ready">
+        <span id="status-pill" class="status status-ready" role="status">
           <i></i>
           <span id="status-text">ready</span>
         </span>
 
         <div id="session-controls" class="session-picker hidden">
           <label for="session-select">Session</label>
-          <select id="session-select" aria-label="Select chat session"></select>
+          <select id="session-select"></select>
           <button
             id="new-session-btn"
             type="button"
@@ -77,14 +79,23 @@
 
         <!-- Settings Menu -->
         <div class="popover-anchor">
-          <button id="settings-btn" type="button" class="icon-button" aria-label="Workspace settings" title="Settings">
+          <button
+            id="settings-btn"
+            type="button"
+            class="icon-button"
+            aria-label="Workspace settings"
+            title="Settings"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="settings-menu"
+          >
             <span class="google-symbols" aria-hidden="true">tune</span>
           </button>
 
           <div id="settings-menu" class="popover-card settings-popover settings-popover--auth-only hidden" role="dialog" aria-label="Workspace settings">
             <div class="popover-section">
               <div class="popover-label">Appearance</div>
-              <div class="segmented" id="theme-segmented">
+              <div class="segmented" id="theme-segmented" role="group" aria-label="Appearance theme">
                 <button type="button" data-theme-choice="system">System</button>
                 <button type="button" data-theme-choice="light">Light</button>
                 <button type="button" data-theme-choice="dark">Dark</button>
@@ -93,7 +104,7 @@
 
             <div class="popover-section hidden" data-session-only>
               <div class="popover-label">Interactive UI Canvas Mode</div>
-              <div class="segmented" id="canvas-mode-segmented">
+              <div class="segmented" id="canvas-mode-segmented" role="group" aria-label="Interactive UI canvas mode">
                 <button type="button" data-canvas-mode="stacked">All Cards</button>
                 <button type="button" data-canvas-mode="focused">Focused Tab</button>
               </div>
@@ -280,7 +291,15 @@
 
         <!-- Logged-In User Avatar & Menu -->
         <div id="user-menu-anchor" class="popover-anchor hidden">
-          <button id="user-btn" type="button" class="user-pill" aria-label="Account menu">
+          <button
+            id="user-btn"
+            type="button"
+            class="user-pill"
+            aria-label="Account menu"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="user-menu"
+          >
             <img id="user-avatar-img" class="user-avatar hidden" alt="" referrerpolicy="no-referrer" />
             <span id="user-avatar-fallback" class="user-avatar-fallback">U</span>
             <span id="user-name" class="user-pill-name">User</span>
@@ -366,7 +385,7 @@
       <!-- Main Split Workspace: Chat on Left, Interactive ADK-UI Canvas on Right -->
       <main id="workspace" class="studio-workspace hidden">
         <!-- Left Pane: Chat Interface -->
-        <section class="chat-pane" aria-label="Conversation">
+        <section id="chat-pane" class="chat-pane" aria-label="Conversation">
           <div class="chat-floating-actions">
               <div id="session-usage-anchor" class="popover-anchor">
                 <button
@@ -375,6 +394,9 @@
                   class="usage-pill"
                   title="Session token usage &amp; estimated cost (adk_telemetry)"
                   aria-label="Session token usage and estimated cost"
+                  aria-haspopup="dialog"
+                  aria-expanded="false"
+                  aria-controls="session-usage-popover"
                 >
                   <span class="google-symbols filled" aria-hidden="true">bolt</span>
                   <span id="session-usage-tokens">0 tok</span>
@@ -482,13 +504,17 @@
               </button>
           </div>
 
-          <div id="chat-transcript" class="transcript" aria-live="polite"></div>
+          <div id="chat-transcript" class="transcript"></div>
+          <!-- Screen-reader announcer: studio.js writes short status strings
+               here instead of exposing the whole streaming transcript as a
+               live region. -->
+          <div id="sr-announcer" class="sr-only" role="status" aria-live="polite"></div>
 
           <div class="composer-wrap">
             <div id="attachment-chips" class="attachment-chips hidden"></div>
             <div class="composer">
               <label class="attach-button" title="Attach file (CSV, image, PDF…)">
-                <input id="file-input" type="file" multiple />
+                <input id="file-input" type="file" multiple accept=".csv,text/csv,image/*,application/pdf" />
                 <span class="google-symbols" aria-hidden="true">attach_file</span>
                 <span class="sr-only">Attach file</span>
               </label>
@@ -518,8 +544,20 @@
           </div>
         </section>
 
-        <!-- Resizable Split Divider -->
-        <div id="pane-resizer" class="pane-resizer" role="separator" aria-orientation="vertical" title="Drag to resize panes"></div>
+        <!-- Resizable Split Divider (aria-value* mirror the 28–68% clamp in studio.js) -->
+        <div
+          id="pane-resizer"
+          class="pane-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize panes"
+          aria-controls="chat-pane"
+          aria-valuemin="28"
+          aria-valuemax="68"
+          aria-valuenow="44"
+          tabindex="0"
+          title="Drag to resize panes"
+        ></div>
 
         <!-- Right Pane: Interactive ADK-UI Canvas -->
         <section class="canvas-pane" aria-label="Interactive UI Canvas">
@@ -542,7 +580,7 @@
             <div id="canvas-body" class="canvas-body">
               <div id="canvas-empty" class="canvas-empty">
                 <div class="cover__text">
-                  <h3 class="cover__text--title">Interactive UI Canvas</h3>
+                  <h2 class="cover__text--title">Interactive UI Canvas</h2>
                   <p class="cover__text--description">
                     Charts, sortable tables, KPI dashboards, and two-way forms generated by
                     <code>render_layout</code>, <code>render_chart</code>, <code>render_table</code>, and

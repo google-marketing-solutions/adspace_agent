@@ -25,6 +25,7 @@ built on [adk-rust](https://github.com/zavora-ai/adk-rust) 2.3.0.
 - [Authentication and authorization](#authentication-and-authorization)
 - [Toolsets](#toolsets)
 - [Skills](#skills)
+- [Frontend layout](#frontend-layout)
 - [Deployment](#deployment)
 - [Troubleshooting](#troubleshooting)
 - [Differences from the Python agent](#differences-from-the-python-agent)
@@ -61,7 +62,9 @@ flowchart LR
   the optional Vertex sandbox.
 - **Studio UI.** `/app/` is a purpose-built chat UI with Google Sign-In, an
   interactive `adk-ui` canvas (charts, tables, KPI tiles, forms), file uploads,
-  usage/cost tracking and a trace view.
+  usage/cost tracking and a trace view. It is plain browser JavaScript shipped
+  as native ES modules (see [Frontend layout](#frontend-layout)); there is no
+  bundler or Node toolchain.
 
 ## Getting started
 
@@ -299,6 +302,64 @@ rejected when staging from GCS.
 > [!NOTE]
 > The former `cm360-trafficking` skill is no longer a skill: its workflow lives
 > in the CM360 trafficking toolset so there is a single source of truth.
+
+## Frontend layout
+
+The studio client lives in `src/app/` and is served by the Rust binary as
+native ES modules: `src/studio.html` loads `<script type="module"
+src="/app/app.js">`, modules import each other with relative paths, and
+`server.rs` embeds every file in the `app_modules!` list with `include_str!`
+and serves it at `/app/<path>` (anything not in that list is 404). Adding a
+module means adding the file, the `app_modules!` entry and a
+`<link rel="modulepreload">` in `studio.html`. `src/studio.css` is served as
+`/app/app.css`.
+
+```text
+src/app/
+├── app.js                 entry: imports everything, wires late bindings, runs the init block
+├── state.js               `state` (shared mutable singletons), `prefs`, `els` (DOM handles), constants
+├── dom.js                 $(), style(), svgEl(), popovers, focus helpers, showToast — no app state
+├── status.js              setStatus() / showError() + the `onStatusChange` hook
+├── format.js              number / currency / cell-value / initials formatting — pure
+├── markdown.js            Markdown → DOM for transcript text — pure
+├── prefs.js               preference persistence, settings controls sync, applyPreferences()
+├── auth.js                /auth/me, login / logout, openPopup()
+├── oauth-popup.js         in-flight OAuth consent (SSE events, BroadcastChannel, postMessage)
+├── sessions.js            ADK session list / create / load / delete
+├── transcript.js          transcript + canvas rendering, streamed-event merging
+├── sse.js                 sendMessage(), SSE parsing, composer and attachment handlers
+├── settings-ui.js         settings popover controls, model pickers, pricing inputs, pane resizer
+├── stage.js               WebGL dotted-grid stage (`AdSpaceStage`)
+├── stage-bridge.js        mounts the stage, syncs theme / activity with the app
+├── adk-ui/
+│   ├── index.js           UiResponse extraction / classification, standalone cards
+│   ├── components.js      renderInnerComponent (the component switch) + button handler
+│   ├── modal.js           modal / confirm overlay with focus trap
+│   ├── charts.js          SVG chart renderer — pure
+│   └── tables.js          sortable / filterable table renderer — pure
+└── usage/
+    ├── pricing.js         server + fallback model pricing, custom overrides
+    ├── telemetry.js       per-event token usage and cost extraction
+    ├── session-usage.js   session usage pill / popover
+    └── counter.js         animated odometer counters — pure
+```
+
+Rules of the road:
+
+- **Leaf modules import no app state.** `format.js`, `markdown.js`,
+  `adk-ui/charts.js`, `adk-ui/tables.js` and `usage/counter.js` import nothing
+  from `state.js` (they may use the DOM helpers in `dom.js`); that keeps them
+  reusable and trivially testable.
+- **Shared mutable state lives on `state.state`.** ES module `let` exports are
+  read-only to importers, so cross-module mutable values (`currentUser`,
+  `activeSession`, `isRunning`, …) are properties of the exported `state`
+  object; DOM handles are on `els`.
+- **No import cycles.** Where a low module must call a high one, the high
+  module is injected from `app.js` through a documented setter
+  (`onStatusChange`, `bindPreferenceRenderers`, `bindModalComponentRenderer`,
+  `bindSendMessage`).
+- No bundler: every file must be valid as-is in the browser (ES2022, no JSX,
+  no TypeScript).
 
 ## Deployment
 

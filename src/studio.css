@@ -23,7 +23,6 @@
   --bg-primary: #eff2f7;
   --bg-secondary: rgba(255, 255, 255, 0.88);
   --surface-card: #ffffff;
-  --surface-glass: rgba(255, 255, 255, 0.96);
   --text-primary: #121317;
   --text-secondary: #45474d;
   --text-muted: #5f6368;
@@ -31,9 +30,6 @@
   --border-default: rgba(33, 34, 38, 0.08);
   --border-strong: rgba(33, 34, 38, 0.14);
   --accent-primary: #1a73e8;
-  --accent-indigo: #5b6cf9;
-  --accent-violet: #9b72cb;
-  --accent-coral: #d96570;
   /* #137333 (Google green 700) clears WCAG AA at 12px on --bg-primary; #188038 did not. */
   --accent-success: #137333;
   --accent-warning: #d97706;
@@ -51,20 +47,10 @@
   --tint-warn-ring: rgba(249, 171, 0, 0.38);
   --tint-warn-spin: #e37400;
   --ring: rgba(18, 19, 23, 0.14);
-  --gemini-gradient: linear-gradient(
-    135deg,
-    #1a73e8 0%,
-    #5b6cf9 38%,
-    #9b72cb 72%,
-    #d96570 100%
-  );
-  --gemini-gradient-subtle: #eff2f7;
-  --ambient-aura: none;
   --shadow-sm: 0 2px 8px rgba(18, 19, 23, 0.04), 0 1px 2px rgba(18, 19, 23, 0.02);
   --shadow-md: 0 12px 32px -12px rgba(18, 19, 23, 0.08), 0 2px 8px -2px rgba(18, 19, 23, 0.04);
   --shadow-lg: 0 24px 52px -12px rgba(18, 19, 23, 0.16), 0 6px 18px -4px rgba(18, 19, 23, 0.08),
     0 1px 3px rgba(18, 19, 23, 0.05);
-  --protected-btn-bg: rgba(255, 255, 255, 0.65);
   --protected-btn-outline: rgba(33, 34, 38, 0.12);
   --protected-btn-hover: rgba(33, 34, 38, 0.04);
   --protected-btn-focus: rgba(33, 34, 38, 0.12);
@@ -90,15 +76,25 @@
   --mono: "Google Sans Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco,
     Consolas, monospace;
   --left-pane-width: 44%;
+  /* Stacking scale. Note: z-index is scoped to the nearest stacking context,
+     so --z-popover only orders popovers against siblings inside the same
+     pane/topbar; the fixed modal and toast layers sit at the root. */
+  --z-topbar: 30;
+  --z-popover: 40;
+  --z-modal: 2100;
+  --z-toast: 2200;
 }
 
+/* MIRROR: the dark token values below are duplicated verbatim in the
+   `:root[data-theme="dark"]` block that follows (JS sets data-theme only for
+   an explicit light/dark choice; "system" relies on this media query).
+   Keep both in sync — `scripts/check-dark-tokens.sh` diffs them. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg-canvas: #121317;
     --bg-primary: #18191d;
     --bg-secondary: rgba(18, 19, 23, 0.88);
     --surface-card: #18191d;
-    --surface-glass: rgba(24, 25, 29, 0.96);
     --text-primary: #f8f9fc;
     --text-secondary: #b2bbc5;
     --text-muted: #8a94a0;
@@ -106,9 +102,6 @@
     --border-default: rgba(230, 234, 240, 0.09);
     --border-strong: rgba(230, 234, 240, 0.16);
     --accent-primary: #8ab4f8;
-    --accent-indigo: #8c9eff;
-    --accent-violet: #b39ddb;
-    --accent-coral: #e57373;
     --accent-success: #81c995;
     --accent-warning: #fdd663;
     --accent-error: #f28b82;
@@ -122,20 +115,10 @@
     --tint-warn-ring: rgba(253, 214, 99, 0.4);
     --tint-warn-spin: #fdd663;
     --ring: rgba(248, 249, 252, 0.16);
-    --gemini-gradient: linear-gradient(
-      135deg,
-      #8ab4f8 0%,
-      #8c9eff 38%,
-      #b39ddb 72%,
-      #e57373 100%
-    );
-    --gemini-gradient-subtle: #212226;
-    --ambient-aura: none;
     --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.28);
     --shadow-md: 0 16px 40px -12px rgba(0, 0, 0, 0.5), 0 2px 10px rgba(0, 0, 0, 0.3);
     --shadow-lg: 0 28px 60px -12px rgba(0, 0, 0, 0.65), 0 8px 22px -4px rgba(0, 0, 0, 0.42),
       0 1px 4px rgba(0, 0, 0, 0.32);
-    --protected-btn-bg: rgba(24, 25, 29, 0.65);
     --protected-btn-outline: rgba(230, 234, 240, 0.12);
     --protected-btn-hover: rgba(230, 234, 240, 0.06);
     --protected-btn-focus: rgba(230, 234, 240, 0.14);
@@ -159,12 +142,13 @@
   }
 }
 
+/* MIRROR: keep in sync with the `@media (prefers-color-scheme: dark)` block
+   above (see scripts/check-dark-tokens.sh). */
 :root[data-theme="dark"] {
   --bg-canvas: #121317;
   --bg-primary: #18191d;
   --bg-secondary: rgba(18, 19, 23, 0.88);
   --surface-card: #18191d;
-  --surface-glass: rgba(24, 25, 29, 0.96);
   --text-primary: #f8f9fc;
   --text-secondary: #b2bbc5;
   --text-muted: #8a94a0;
@@ -172,9 +156,6 @@
   --border-default: rgba(230, 234, 240, 0.09);
   --border-strong: rgba(230, 234, 240, 0.16);
   --accent-primary: #8ab4f8;
-  --accent-indigo: #8c9eff;
-  --accent-violet: #b39ddb;
-  --accent-coral: #e57373;
   --accent-success: #81c995;
   --accent-warning: #fdd663;
   --accent-error: #f28b82;
@@ -188,20 +169,10 @@
   --tint-warn-ring: rgba(253, 214, 99, 0.4);
   --tint-warn-spin: #fdd663;
   --ring: rgba(248, 249, 252, 0.16);
-  --gemini-gradient: linear-gradient(
-    135deg,
-    #8ab4f8 0%,
-    #8c9eff 38%,
-    #b39ddb 72%,
-    #e57373 100%
-  );
-  --gemini-gradient-subtle: #212226;
-  --ambient-aura: none;
   --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.28);
   --shadow-md: 0 16px 40px -12px rgba(0, 0, 0, 0.5), 0 2px 10px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 28px 60px -12px rgba(0, 0, 0, 0.65), 0 8px 22px -4px rgba(0, 0, 0, 0.42),
     0 1px 4px rgba(0, 0, 0, 0.32);
-  --protected-btn-bg: rgba(24, 25, 29, 0.65);
   --protected-btn-outline: rgba(230, 234, 240, 0.12);
   --protected-btn-hover: rgba(230, 234, 240, 0.06);
   --protected-btn-focus: rgba(230, 234, 240, 0.14);
@@ -231,6 +202,10 @@
 html,
 body {
   height: 100%;
+  /* 100vh/100dvh so mobile Safari's collapsing toolbar does not clip the
+     composer; 100% is the fallback for engines without dvh. */
+  height: 100vh;
+  height: 100dvh;
   margin: 0;
 }
 
@@ -286,7 +261,7 @@ select {
 select:not([multiple]) {
   -webkit-appearance: none;
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='%2345474d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 11px center;
   background-size: 13px 13px;
@@ -296,11 +271,22 @@ select:not([multiple]) {
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
-select:focus-visible {
+select:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
   outline: 2px solid var(--text-primary);
   outline-offset: 2px;
 }
 
+/* The file input is visually hidden inside the label, so surface its focus on
+   the label itself. */
+.attach-button:focus-within {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 2px;
+}
+
+[hidden],
 .hidden {
   display: none !important;
 }
@@ -315,6 +301,26 @@ select:focus-visible {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* Skip link: visually hidden until keyboard-focused, then pinned top-left
+   above the topbar. */
+.skip-link:focus {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: var(--z-toast);
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 8px 14px;
+  clip: auto;
+  overflow: visible;
+  border-radius: 999px;
+  background: var(--primary-btn-bg);
+  color: var(--primary-btn-fg);
+  text-decoration: none;
+  font-weight: 500;
 }
 
 .app-shell {
@@ -335,7 +341,7 @@ select:focus-visible {
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
   border-bottom: 1px solid var(--border-default);
-  z-index: 30;
+  z-index: var(--z-topbar);
 }
 
 .brand {
@@ -599,10 +605,6 @@ select:focus-visible {
   font-size: 12.5px;
 }
 
-.black-action-button .google-symbols {
-  color: var(--primary-btn-fg);
-}
-
 .black-action-button:hover {
   background: color-mix(in srgb, var(--primary-btn-bg) 88%, var(--primary-btn-fg));
   color: var(--primary-btn-fg);
@@ -624,7 +626,9 @@ select:focus-visible {
 
 .danger-button:hover {
   background: var(--accent-error);
-  color: #ffffff;
+  /* --primary-btn-fg flips with the theme: white on light-mode red,
+     near-black on dark-mode salmon. */
+  color: var(--primary-btn-fg);
 }
 
 .full-width {
@@ -704,13 +708,15 @@ select:focus-visible {
   border: 1px solid var(--border-strong);
   border-radius: 24px;
   box-shadow: var(--dm-modal-shadow);
-  z-index: 1000;
+  z-index: var(--z-popover);
   overflow: hidden;
 }
 
 .settings-popover {
   width: 340px;
+  max-width: calc(100vw - 24px);
   max-height: calc(100vh - 68px);
+  max-height: calc(100dvh - 68px);
   overflow-y: auto;
 }
 
@@ -754,6 +760,7 @@ select:focus-visible {
 .popover-link-btn {
   border: 0;
   background: transparent;
+  min-height: 28px;
   padding: 0;
   font-size: 12px;
   font-weight: 500;
@@ -791,6 +798,7 @@ select:focus-visible {
 .segmented button {
   border: 0;
   border-radius: 999px;
+  min-height: 28px;
   padding: 6px 10px;
   font-size: 12px;
   font-weight: 500;
@@ -799,7 +807,8 @@ select:focus-visible {
   transition: background 0.15s, color 0.15s;
 }
 
-.segmented button.active {
+.segmented button.active,
+.segmented button[aria-pressed="true"] {
   background: var(--surface-card);
   color: var(--text-primary);
   box-shadow: var(--shadow-sm);
@@ -964,7 +973,11 @@ select:focus-visible {
 }
 
 .error-banner button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
   border: 0;
+  border-radius: 50%;
   background: none;
   color: var(--text-secondary);
   font-size: 18px;
@@ -1126,21 +1139,22 @@ select:focus-visible {
 }
 
 .pane-resizer {
+  position: relative;
   background: var(--border-default);
   cursor: col-resize;
   transition: background 0.15s;
 }
 
+/* Widen the grab target beyond the 5px visual track. */
+.pane-resizer::before {
+  content: "";
+  position: absolute;
+  inset: 0 -6px;
+}
+
 .pane-resizer:hover,
 .pane-resizer.dragging {
   background: var(--text-muted);
-}
-
-.eyebrow {
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: -0.002em;
 }
 
 /* Session Token Telemetry Pill & Popover */
@@ -1230,7 +1244,6 @@ select:focus-visible {
   display: flex;
   flex-direction: column;
   width: 100%;
-  will-change: transform;
 }
 
 .odometer-cell {
@@ -1276,6 +1289,7 @@ select:focus-visible {
 
 .usage-popover {
   width: 345px;
+  max-width: calc(100vw - 24px);
 }
 
 .usage-kpi-grid {
@@ -1306,10 +1320,6 @@ select:focus-visible {
   font-weight: 450;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
-  color: var(--text-primary);
-}
-
-.usage-kpi-card strong.usage-kpi-cost {
   color: var(--text-primary);
 }
 
@@ -1399,13 +1409,16 @@ select:focus-visible {
   pointer-events: auto;
 }
 
-.chat-floating-actions .quiet-button {
+.chat-floating-actions .quiet-button,
+.canvas-floating-actions .quiet-button {
   height: 32px;
   padding: 0 13px;
 }
 
+/* Shared glass treatment for both panes' floating controls. */
 .chat-floating-actions .usage-pill,
-.chat-floating-actions .quiet-button {
+.chat-floating-actions .quiet-button,
+.canvas-floating-actions .quiet-button {
   background: var(--bg-secondary);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -1413,7 +1426,8 @@ select:focus-visible {
 }
 
 .chat-floating-actions .usage-pill:hover,
-.chat-floating-actions .quiet-button:hover {
+.chat-floating-actions .quiet-button:hover,
+.canvas-floating-actions .quiet-button:hover {
   border-color: var(--border-strong);
   color: var(--text-primary);
   background: var(--dm-surface-gray-subtle);
@@ -1608,7 +1622,10 @@ select:focus-visible {
 
 .message-text table {
   width: 100%;
-  border-collapse: collapse;
+  /* separate + 0 spacing: border-radius/overflow:hidden are ignored on a
+     border-collapse:collapse table, so cell borders carry the row rules. */
+  border-collapse: separate;
+  border-spacing: 0;
   margin: 10px 0;
   font-size: 13px;
   border: 1px solid var(--border-default);
@@ -1701,6 +1718,12 @@ select:focus-visible {
 .tool-call summary:hover {
   background: var(--dm-surface-gray-subtle);
   color: var(--text-primary);
+}
+
+/* .tool-call clips overflow, so draw the ring inside the summary. */
+.tool-call summary:focus-visible {
+  outline: 2px solid var(--text-primary);
+  outline-offset: -2px;
 }
 
 .tool-call pre {
@@ -1813,8 +1836,6 @@ select:focus-visible {
   gap: 8px;
   background-color: var(--dm-surface-gray);
   border-color: var(--border-strong);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
 }
 
 .button.button--protected.canvas-jump-btn:hover {
@@ -1833,11 +1854,6 @@ select:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.canvas-jump-eyebrow {
-  color: var(--text-secondary);
-  font-weight: 500;
 }
 
 .canvas-jump-cta {
@@ -1863,6 +1879,19 @@ select:focus-visible {
   color: var(--text-muted);
   background: transparent;
   cursor: pointer;
+}
+
+/* studio.js renders .message-usage as a <button>; strip the UA chrome. The
+   font/colour/padding come from .message-usage above (lower specificity, so
+   only reset what that rule does not already set). */
+button.message-usage {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  line-height: inherit;
 }
 
 .message-usage:hover {
@@ -1960,6 +1989,7 @@ select:focus-visible {
 .attachment-chips button {
   display: inline-flex;
   align-items: center;
+  min-height: 28px;
   gap: 5px;
   padding: 5px 12px;
   border: 1px solid var(--border-default);
@@ -2058,18 +2088,6 @@ select:focus-visible {
 
 .canvas-floating-actions .quiet-button {
   pointer-events: auto;
-  height: 32px;
-  padding: 0 13px;
-  background: var(--bg-secondary);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: var(--shadow-sm);
-}
-
-.canvas-floating-actions .quiet-button:hover {
-  border-color: var(--border-strong);
-  color: var(--text-primary);
-  background: var(--dm-surface-gray-subtle);
 }
 
 .canvas-body {
@@ -2142,9 +2160,9 @@ select:focus-visible {
   font-size: 12px;
   padding: 1.5px 6px;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--surface-card) 65%, transparent);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  /* Opaque surface (no backdrop-filter): these sit over the animating WebGL
+     stage, and every blur layer there is recomposited each frame. */
+  background: var(--dm-surface-gray);
   border: 1px solid var(--protected-btn-outline);
 }
 
@@ -2235,9 +2253,8 @@ select:focus-visible {
   border-radius: 9999px;
   border: 1px solid var(--protected-btn-outline);
   box-shadow: none;
-  background-color: var(--protected-btn-bg);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  /* Opaque like .canvas-jump-btn: no backdrop-filter over the WebGL stage. */
+  background-color: var(--dm-surface-gray);
   color: var(--text-primary);
   font-family: var(--sans);
   font-size: 14.5px;
@@ -2343,7 +2360,7 @@ select:focus-visible {
   position: fixed;
   bottom: 24px;
   right: 24px;
-  z-index: 2200;
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column-reverse;
   gap: 12px;
@@ -2457,7 +2474,7 @@ select:focus-visible {
 .ui-modal-root {
   position: fixed;
   inset: 0;
-  z-index: 2100;
+  z-index: var(--z-modal);
   display: grid;
   place-items: center;
   padding: 24px;
@@ -2476,6 +2493,7 @@ select:focus-visible {
   z-index: 1;
   width: 100%;
   max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
   display: flex;
   flex-direction: column;
   border-radius: 28px;
@@ -2582,8 +2600,7 @@ select:focus-visible {
   border-radius: 24px;
   background: var(--surface-card);
   border: 1px solid var(--dm-outline);
-  box-shadow: 0 12px 32px -12px rgba(18, 19, 23, 0.08),
-    0 2px 8px -2px rgba(18, 19, 23, 0.04);
+  box-shadow: var(--shadow-md);
 }
 
 .dm-alert-inline {
@@ -2664,6 +2681,7 @@ select:focus-visible {
 .ui-modal-dialog select:focus-visible,
 .ui-modal-dialog textarea:focus-visible {
   outline: none;
+  /* !important: adk-ui components set border-color inline from studio.js. */
   border-color: var(--dm-text-primary) !important;
   box-shadow: 0 0 0 1px var(--dm-text-primary);
 }
@@ -2683,19 +2701,47 @@ select:focus-visible {
 }
 
 .adk-ui-surface tbody tr:hover {
+  /* !important: table rows get an inline background from studio.js. */
   background-color: color-mix(in srgb, var(--dm-surface-gray) 65%, transparent) !important;
 }
 
 @media (max-width: 920px) {
   .studio-workspace {
     grid-template-columns: 1fr;
-    grid-template-rows: 1fr 1fr;
+    grid-template-rows: minmax(0, 3fr) minmax(0, 2fr);
   }
   .pane-resizer {
     display: none;
   }
   .session-picker label {
     display: none;
+  }
+  .session-picker select {
+    min-width: 120px;
+  }
+  /* Icon-only "New Session" and avatar-only user pill keep the bar on one line. */
+  #new-session-btn .button__label,
+  .user-pill-name {
+    display: none;
+  }
+  /* Take the Export/Clear buttons out of the overlay flow so they stop
+     overlapping the empty-state title. Stay positioned (relative, not static)
+     so z-index:10 still paints them above the absolute #canvas-stage. */
+  .canvas-floating-actions {
+    position: relative;
+    top: auto;
+    right: auto;
+    justify-content: flex-end;
+    padding: 10px 18px 0;
+  }
+}
+
+@media (max-width: 600px) {
+  .topbar {
+    height: auto;
+    min-height: 56px;
+    flex-wrap: wrap;
+    padding: 8px 12px;
   }
 }
 

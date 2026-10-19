@@ -33,6 +33,8 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/app/app.css" />
+    <link rel="modulepreload" href="/app/app.js" />
+    <link rel="modulepreload" href="/app/stage.js" />
   </head>
   <body>
     <a class="sr-only skip-link" href="#chat-input">Skip to composer</a>
@@ -639,7 +641,6 @@
       <div id="ui-modal-root" class="ui-modal-root hidden" role="dialog" aria-modal="true"></div>
     </div>
 
-    <script src="/app/stage.js" defer></script>
-    <script src="/app/app.js" defer></script>
+    <script type="module" src="/app/app.js"></script>
   </body>
 </html>

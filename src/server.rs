@@ -34,7 +34,7 @@ use adk_rust::session::SessionService;
 use adk_rust::{CacheCapable, Launcher};
 use async_trait::async_trait;
 use axum::body::{Body, Bytes, to_bytes};
-use axum::extract::{Query, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -185,10 +185,28 @@ const AUTH_HELPER_TAG: &str = "<script src=\"/oauth2/helper.js\" defer></script>
 const STUDIO_HTML: &str = include_str!("studio.html");
 /// Custom AdSpace Agent studio interface CSS (`/app/app.css`).
 const STUDIO_CSS: &str = include_str!("studio.css");
-/// Custom AdSpace Agent studio interface JS (`/app/app.js`).
-const STUDIO_JS: &str = include_str!("studio.js");
-/// Custom AdSpace Agent Interactive Canvas WebGL stage shader (`/app/stage.js`).
-const STUDIO_STAGE_JS: &str = include_str!("stage.js");
+
+/// Expands a list of module paths into the `match` arms of [`app_module`] so
+/// the served file list lives in exactly one place.
+macro_rules! app_modules {
+    ($($path:literal),* $(,)?) => {
+        /// Resolves a path relative to `/app/` to the embedded ES module
+        /// source, or `None` for anything that is not a module we ship.
+        fn app_module(name: &str) -> Option<&'static str> {
+            match name {
+                $($path => Some(include_str!(concat!("app/", $path))),)*
+                _ => None,
+            }
+        }
+    };
+}
+
+// Custom AdSpace Agent studio client, served as native ES modules under
+// `/app/<path>` (`/app/app.js` is the entry point loaded by `studio.html`).
+app_modules! {
+    "app.js",
+    "stage.js",
+}
 /// Inline robot SVG favicon served at `/favicon.svg` and `/favicon.ico`.
 const STUDIO_FAVICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 -960 960 960\">\
 <defs><linearGradient id=\"g\" x1=\"120\" y1=\"-840\" x2=\"840\" y2=\"-120\" gradientUnits=\"userSpaceOnUse\">\
@@ -394,34 +412,23 @@ async fn studio_css() -> Response {
         .into_response()
 }
 
-/// Serves the custom AdSpace Agent studio client script (`/app/app.js`).
-async fn studio_js() -> Response {
-    (
-        [
-            (
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/javascript; charset=utf-8"),
-            ),
-            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
-        ],
-        STUDIO_JS,
-    )
-        .into_response()
-}
-
-/// Serves the Interactive Canvas WebGL stage effect (`/app/stage.js`).
-async fn studio_stage_js() -> Response {
-    (
-        [
-            (
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/javascript; charset=utf-8"),
-            ),
-            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
-        ],
-        STUDIO_STAGE_JS,
-    )
-        .into_response()
+/// Serves one of the studio's ES modules (`/app/{*path}`), e.g. `/app/app.js`
+/// or `/app/stage.js`. Paths outside the embedded module list are 404.
+async fn app_js(Path(path): Path<String>) -> Response {
+    match app_module(&path) {
+        Some(src) => (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/javascript; charset=utf-8"),
+                ),
+                (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+            ],
+            src,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// Serves the robot SVG favicon (`/favicon.svg` and `/favicon.ico`).
@@ -1137,8 +1144,7 @@ pub fn oauth_router(routes: OAuthRoutes) -> Router {
         .route("/app", get(|| async { Redirect::to("/app/") }))
         .route("/app/", get(studio_index))
         .route("/app/app.css", get(studio_css))
-        .route("/app/app.js", get(studio_js))
-        .route("/app/stage.js", get(studio_stage_js))
+        .route("/app/{*path}", get(app_js))
         .route("/favicon.ico", get(studio_favicon))
         .route("/favicon.svg", get(studio_favicon))
         .with_state(routes)
@@ -1439,6 +1445,48 @@ mod tests {
         .unwrap();
         assert!(html.contains("AdSpace"));
         assert!(html.contains("/app/app.js"));
+
+        // 1a. The studio client is served as ES modules under `/app/<path>`;
+        // `/app/app.css` keeps its own route and unknown paths are 404.
+        for path in ["/app/app.js", "/app/stage.js"] {
+            let js = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(js.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                js.headers()[header::CONTENT_TYPE],
+                "application/javascript; charset=utf-8"
+            );
+            assert_eq!(js.headers()[header::CACHE_CONTROL], "no-cache");
+        }
+        let css = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/app/app.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(css.status(), StatusCode::OK);
+        assert_eq!(
+            css.headers()[header::CONTENT_TYPE],
+            "text/css; charset=utf-8"
+        );
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/app/nope.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 
         // 1b. `/favicon.ico` and `/favicon.svg` return 200 OK with the SVG icon.
         for path in ["/favicon.ico", "/favicon.svg"] {

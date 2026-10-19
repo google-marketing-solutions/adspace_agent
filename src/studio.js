@@ -255,21 +255,50 @@
     }
   };
 
+  const MODEL_SELECT_IDS = {
+    model: "setting-model-select",
+    imageModel: "setting-image-model-select",
+    videoModel: "setting-video-model-select",
+  };
+
+  // `PRESET_MODEL_OPTIONS` is the single source of truth for the preset lists:
+  // the <option>s in studio.html are replaced here so the two cannot drift
+  // (drift would make `syncModelControl` silently fall back to "Custom…").
+  const populateModelSelects = () => {
+    for (const [key, id] of Object.entries(MODEL_SELECT_IDS)) {
+      const selectEl = $(id);
+      if (!selectEl) continue;
+      const frag = document.createDocumentFragment();
+      for (const name of PRESET_MODEL_OPTIONS[key]) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        frag.appendChild(opt);
+      }
+      const custom = document.createElement("option");
+      custom.value = "__custom__";
+      custom.textContent = "Custom…";
+      frag.appendChild(custom);
+      selectEl.replaceChildren(frag);
+    }
+  };
+  populateModelSelects();
+
   const syncAllModelControls = () => {
     syncModelControl(
-      $("setting-model-select"),
+      $(MODEL_SELECT_IDS.model),
       $("setting-model-custom"),
       PRESET_MODEL_OPTIONS.model,
       prefs.model
     );
     syncModelControl(
-      $("setting-image-model-select"),
+      $(MODEL_SELECT_IDS.imageModel),
       $("setting-image-model-custom"),
       PRESET_MODEL_OPTIONS.imageModel,
       prefs.imageModel
     );
     syncModelControl(
-      $("setting-video-model-select"),
+      $(MODEL_SELECT_IDS.videoModel),
       $("setting-video-model-custom"),
       PRESET_MODEL_OPTIONS.videoModel,
       prefs.videoModel
@@ -302,16 +331,19 @@
     }
   };
 
-  const applyPreferences = ({
-    rerender = true,
-    syncModels = true,
-    syncPricing = true,
-  } = {}) => {
-    if (prefs.theme === "light" || prefs.theme === "dark") {
-      document.documentElement.setAttribute("data-theme", prefs.theme);
-    } else {
-      document.documentElement.removeAttribute("data-theme");
-    }
+  // Settings controls, resolved once (they live in the static settings popover).
+  const settingEls = {
+    themeButtons: Array.from(document.querySelectorAll("#theme-segmented button")),
+    canvasModeButtons: Array.from(document.querySelectorAll("#canvas-mode-segmented button")),
+    showTools: $("setting-show-tools"),
+    showSessionUsage: $("setting-show-session-usage"),
+    showMessageUsage: $("setting-show-message-usage"),
+    showCost: $("setting-show-cost"),
+    autoScroll: $("setting-autoscroll"),
+  };
+
+  // Writes every preference to localStorage. Pure persistence, no DOM work.
+  const persistPrefs = () => {
     localStorage.setItem(STORAGE_KEYS.theme, prefs.theme);
     localStorage.setItem(STORAGE_KEYS.canvasMode, prefs.canvasMode);
     localStorage.setItem(STORAGE_KEYS.showTools, String(prefs.showTools));
@@ -324,40 +356,56 @@
     localStorage.setItem(STORAGE_KEYS.videoModel, prefs.videoModel);
     localStorage.setItem(STORAGE_KEYS.pricingTier, prefs.pricingTier || "standard");
     localStorage.setItem(STORAGE_KEYS.modelPricing, JSON.stringify(prefs.modelPricing || {}));
+  };
 
-    document.querySelectorAll("#theme-segmented button").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.themeChoice === prefs.theme);
-    });
-    document.querySelectorAll("#canvas-mode-segmented button").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.canvasMode === prefs.canvasMode);
-    });
-    $("setting-show-tools").checked = prefs.showTools;
-    if ($("setting-show-session-usage")) {
-      $("setting-show-session-usage").checked = prefs.showSessionUsage;
+  const syncSegmented = (buttons, dataKey, value) => {
+    for (const btn of buttons) {
+      const on = btn.dataset[dataKey] === value;
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
     }
-    if ($("setting-show-message-usage")) {
-      $("setting-show-message-usage").checked = prefs.showMessageUsage;
-    }
-    if ($("setting-show-cost")) {
-      $("setting-show-cost").checked = prefs.showCost;
-    }
-    $("setting-autoscroll").checked = prefs.autoScroll;
+  };
+
+  // Reflects `prefs` into the settings popover controls and the composer hint.
+  const syncPrefControls = ({ syncModels = true, syncPricing = true } = {}) => {
+    syncSegmented(settingEls.themeButtons, "themeChoice", prefs.theme);
+    syncSegmented(settingEls.canvasModeButtons, "canvasMode", prefs.canvasMode);
+    if (settingEls.showTools) settingEls.showTools.checked = prefs.showTools;
+    if (settingEls.showSessionUsage) settingEls.showSessionUsage.checked = prefs.showSessionUsage;
+    if (settingEls.showMessageUsage) settingEls.showMessageUsage.checked = prefs.showMessageUsage;
+    if (settingEls.showCost) settingEls.showCost.checked = prefs.showCost;
+    if (settingEls.autoScroll) settingEls.autoScroll.checked = prefs.autoScroll;
     if (syncModels) {
       syncAllModelControls();
     }
-    if (syncPricing && typeof syncPricingControls === "function") {
+    if (syncPricing) {
       syncPricingControls();
     }
+    composerContextHint.textContent = `${prefs.model} · Enter to send`;
+  };
+
+  // Entry point used throughout the file: persist, reflect into the controls,
+  // apply the theme, then re-render (or at least refresh the usage UI).
+  const applyPreferences = ({
+    rerender = true,
+    syncModels = true,
+    syncPricing = true,
+  } = {}) => {
+    if (prefs.theme === "light" || prefs.theme === "dark") {
+      document.documentElement.setAttribute("data-theme", prefs.theme);
+    } else {
+      document.documentElement.removeAttribute("data-theme");
+    }
+    persistPrefs();
+    syncPrefControls({ syncModels, syncPricing });
     if (typeof syncCanvasStageTheme === "function") {
       syncCanvasStageTheme();
     }
 
-    composerContextHint.textContent = `${prefs.model} · Enter to send`;
-
     if (rerender) {
       renderTranscript();
       renderCanvas();
-    } else if (typeof updateSessionUsageUi === "function") {
+    } else {
       updateSessionUsageUi();
     }
   };
@@ -401,10 +449,19 @@
     if (!currentUser || !activeSession) return;
     if (data.session_id && data.session_id !== activeSession.id) return;
     if (handledAuthRequests.has(data.request_id)) return;
+    // Defense in depth: the server is trusted, but never hand `window.open` a
+    // `javascript:` (or other non-web) URL — the new window inherits our origin.
+    let authUrl;
+    try {
+      authUrl = new URL(data.auth_url, location.href);
+    } catch {
+      return;
+    }
+    if (authUrl.protocol !== "https:" && authUrl.origin !== location.origin) return;
     handledAuthRequests.add(data.request_id);
 
     setStatus("authorizing", "authorizing…");
-    const win = openPopup(data.auth_url);
+    const win = openPopup(authUrl.href);
     const opened = !!win;
     try {
       await fetch(ACK_PATH, {
@@ -527,6 +584,10 @@
     authCheckPromise = (async () => {
       try {
         const resp = await fetch("/auth/me");
+        if (!resp.ok) {
+          showError(`Could not verify authentication status: server returned HTTP ${resp.status}.`);
+          return;
+        }
         const data = await resp.json();
         if (!data.authenticated || !data.user) {
           currentUser = null;
@@ -566,32 +627,13 @@
 
         if (data.models) {
           ingestServerPricing(data.models);
-          if (!canManageModels) {
-            // Non-admins follow the server's global selection: show it and
-            // never try to push local preferences (that would 403).
-            if (data.models.model) prefs.model = data.models.model;
-            if (data.models.image_model) prefs.imageModel = data.models.image_model;
-            if (data.models.video_model) prefs.videoModel = data.models.video_model;
-            applyPreferences({ rerender: false });
-          } else {
-            if (!localStorage.getItem(STORAGE_KEYS.model) && data.models.model) {
-              prefs.model = data.models.model;
-            }
-            if (!localStorage.getItem(STORAGE_KEYS.imageModel) && data.models.image_model) {
-              prefs.imageModel = data.models.image_model;
-            }
-            if (!localStorage.getItem(STORAGE_KEYS.videoModel) && data.models.video_model) {
-              prefs.videoModel = data.models.video_model;
-            }
-            applyPreferences({ rerender: false });
-            if (
-              data.models.model !== prefs.model ||
-              data.models.image_model !== prefs.imageModel ||
-              data.models.video_model !== prefs.videoModel
-            ) {
-              await pushModelsToServer();
-            }
-          }
+          // The server's global selection is the source of truth on load for
+          // everyone. Admins only push changes from the settings UI; a stale
+          // localStorage value must never silently flip the models for all users.
+          if (data.models.model) prefs.model = data.models.model;
+          if (data.models.image_model) prefs.imageModel = data.models.image_model;
+          if (data.models.video_model) prefs.videoModel = data.models.video_model;
+          applyPreferences({ rerender: false });
         }
 
         await loadUserSessions();
@@ -613,11 +655,17 @@
 
   logoutBtn.addEventListener("click", async () => {
     userMenu.classList.add("hidden");
-    await fetch("/auth/logout", { method: "POST" });
-    activeSession = null;
-    sessions = [];
-    canvasSurfaces = [];
-    await checkAuthStatus();
+    try {
+      const resp = await fetch("/auth/logout", { method: "POST" });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      activeSession = null;
+      sessions = [];
+      canvasSurfaces = [];
+    } catch (err) {
+      showError(`Could not sign out: ${err.message || err}`);
+    } finally {
+      await checkAuthStatus();
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -702,9 +750,17 @@
     return createSessionPromise;
   };
 
+  // Monotonic token so overlapping `loadSession` calls (quick <select> changes,
+  // refresh racing an OAuth completion) cannot apply a stale response.
+  let loadSeq = 0;
+
   const loadSession = async (sessionId) => {
     if (!currentUser || !sessionId) return;
+    const seq = ++loadSeq;
     const isSessionSwitch = !activeSession || activeSession.id !== sessionId;
+    // Switching away from a streaming session: stop the run so its SSE loop
+    // cannot keep appending the old session's events into the new one.
+    if (isSessionSwitch && isRunning && abortController) abortController.abort();
     try {
       const resp = await fetch(
         apiUrl(
@@ -714,7 +770,9 @@
         )
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      activeSession = await resp.json();
+      const data = await resp.json();
+      if (seq !== loadSeq) return; // stale: a newer load has started
+      activeSession = data;
       syncSettingsAvailability();
       $("menu-session-id").textContent = activeSession.id;
       if (isSessionSwitch) {
@@ -726,6 +784,7 @@
         suppressOverlays: true,
       });
     } catch (err) {
+      if (seq !== loadSeq) return;
       showError(`Could not load session: ${err.message || err}`);
     }
   };
@@ -746,7 +805,7 @@
     userMenu.classList.add("hidden");
     if (!currentUser || !activeSession) return;
     try {
-      await fetch(
+      const resp = await fetch(
         apiUrl(
           `/apps/${encodeURIComponent(APP_NAME)}/users/${encodeURIComponent(
             currentUser.id
@@ -754,12 +813,14 @@
         ),
         { method: "DELETE" }
       );
-      activeSession = null;
-      syncSettingsAvailability();
-      await loadUserSessions();
-    } catch {
-      await createNewSession();
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    } catch (err) {
+      showError(`Could not delete session: ${err.message || err}`);
+      return;
     }
+    activeSession = null;
+    syncSettingsAvailability();
+    await loadUserSessions();
   });
 
   // ---------------------------------------------------------------------------
@@ -769,11 +830,25 @@
   const toNumber = (val) => {
     if (typeof val === "number" && Number.isFinite(val)) return val;
     if (typeof val === "string") {
-      const cleaned = val.replace(/[$,%\s,]/g, "");
+      const cleaned = val.replace(/[$,%\s]/g, "");
       const n = Number(cleaned);
       if (cleaned !== "" && Number.isFinite(n)) return n;
     }
     return NaN;
+  };
+
+  // Agent-controlled image sources are limited to web URLs (same-origin
+  // relative paths included) and inline images; anything else renders empty.
+  const safeImageSrc = (src) => {
+    const raw = String(src || "").trim();
+    if (!raw) return "";
+    if (/^data:image\//i.test(raw)) return raw;
+    try {
+      const u = new URL(raw, location.href);
+      return u.protocol === "https:" || u.protocol === "http:" ? u.href : "";
+    } catch {
+      return "";
+    }
   };
 
   const formatCompact = (n) => {
@@ -891,7 +966,8 @@
 
     let dismissed = false;
     let timerId = 0;
-    let remainingMs = Math.max(0, Number(comp.duration ?? 5000));
+    const requestedMs = Number(comp.duration);
+    let remainingMs = Number.isFinite(requestedMs) ? Math.max(0, requestedMs) : 5000;
     let startedAt = 0;
 
     const dismiss = () => {
@@ -902,7 +978,8 @@
       setTimeout(() => toast.remove(), 190);
     };
 
-    if (comp.dismissible !== false) {
+    // A toast that never auto-dismisses must always be closable by hand.
+    if (comp.dismissible !== false || remainingMs === 0) {
       const closeBtn = document.createElement("button");
       closeBtn.type = "button";
       closeBtn.className = "ui-toast-close";
@@ -936,6 +1013,11 @@
 
       toast.addEventListener("pointerenter", pauseTimer);
       toast.addEventListener("pointerleave", startTimer);
+      // Keyboard users tabbing onto the close button get the same grace period.
+      toast.addEventListener("focusin", pauseTimer);
+      toast.addEventListener("focusout", (ev) => {
+        if (!toast.contains(ev.relatedTarget)) startTimer();
+      });
       startTimer();
     }
 
@@ -943,6 +1025,19 @@
   };
 
   let activeModalCleanup = null;
+  // Unique id prefix for each rendered `tabs` component (tab ↔ panel wiring).
+  let uiTabsSeq = 0;
+
+  const FOCUSABLE_SELECTOR =
+    'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), ' +
+    'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  const focusableIn = (container) =>
+    container
+      ? Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
+          (el) => !el.closest(".hidden") && el.getClientRects().length > 0
+        )
+      : [];
 
   const closeModalOverlay = () => {
     const root = $("ui-modal-root");
@@ -1033,7 +1128,7 @@
     body.className = "ui-modal-body";
     const contentArr = Array.isArray(spec.content) ? spec.content : [];
     for (const child of contentArr) {
-      body.appendChild(renderInnerComponent(child, dialog, false));
+      body.appendChild(renderInnerComponent(child, dialog, { inModal: true }));
     }
 
     dialog.append(hdr, body);
@@ -1042,7 +1137,7 @@
       const ftr = document.createElement("footer");
       ftr.className = "ui-modal-footer";
       for (const child of spec.footer) {
-        ftr.appendChild(renderInnerComponent(child, dialog, false));
+        ftr.appendChild(renderInnerComponent(child, dialog, { inModal: true }));
       }
       dialog.appendChild(ftr);
     }
@@ -1050,13 +1145,57 @@
     const onKeyDown = (ev) => {
       if (ev.key === "Escape" && closable) {
         closeModalOverlay();
+        return;
+      }
+      // Keep Tab / Shift+Tab cycling inside the dialog.
+      if (ev.key === "Tab") {
+        const focusables = focusableIn(dialog);
+        if (!focusables.length) {
+          ev.preventDefault();
+          dialog.focus();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+        if (ev.shiftKey && (active === first || !dialog.contains(active))) {
+          ev.preventDefault();
+          last.focus();
+        } else if (!ev.shiftKey && (active === last || !dialog.contains(active))) {
+          ev.preventDefault();
+          first.focus();
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
-    activeModalCleanup = () => window.removeEventListener("keydown", onKeyDown);
+
+    // Focus management: remember the opener, make the workspace inert, move
+    // focus into the dialog, and restore it all in `closeModalOverlay`.
+    const previouslyFocused = document.activeElement;
+    titleEl.id = "ui-modal-title";
+    root.setAttribute("aria-labelledby", "ui-modal-title");
+    dialog.tabIndex = -1;
+    if (workspace) workspace.inert = true;
+    activeModalCleanup = () => {
+      window.removeEventListener("keydown", onKeyDown);
+      if (workspace) workspace.inert = false;
+      root.removeAttribute("aria-labelledby");
+      if (previouslyFocused && typeof previouslyFocused.focus === "function") {
+        try {
+          previouslyFocused.focus();
+        } catch {
+          /* ignore */
+        }
+      }
+    };
 
     root.replaceChildren(backdrop, dialog);
     root.classList.remove("hidden");
+    // Prefer the first form control; fall back to the close button, then the
+    // dialog itself, so keyboard users are never left on the inert page.
+    const initialFocus =
+      focusableIn(body)[0] || dialog.querySelector(".ui-modal-close") || dialog;
+    initialFocus.focus();
   };
 
   const alertVariantLabel = (variant) => {
@@ -1427,6 +1566,8 @@
       const groupW = groupStep * 0.72;
       const barW = Math.max(4, groupW / Math.max(1, yKeys.length) - 2);
       const zeroY = yToPx(Math.max(0, minVal));
+      // Show at most ~10 x-axis labels regardless of row count.
+      const stepEvery = Math.max(1, Math.ceil(n / 10));
 
       data.forEach((row, i) => {
         const gx = padL + i * groupStep + (groupStep - groupW) / 2;
@@ -1465,7 +1606,6 @@
           }
         });
 
-        const stepEvery = Math.max(1, Math.ceil(n / 10));
         if (i % stepEvery === 0) {
           const rawLbl = String(row[xKey] ?? "");
           const shortLbl = rawLbl.length > 13 ? `${rawLbl.slice(0, 12)}…` : rawLbl;
@@ -1618,7 +1758,7 @@
     const toolbar = document.createElement("div");
     style(toolbar, { display: "flex", alignItems: "center", gap: "10px" });
     const countChip = document.createElement("span");
-    countChip.textContent = `${rawRows.length} rows`;
+    countChip.setAttribute("aria-live", "polite");
     style(countChip, {
       fontSize: "12.5px",
       fontWeight: "450",
@@ -1630,6 +1770,7 @@
       const search = document.createElement("input");
       search.type = "search";
       search.placeholder = "Filter…";
+      search.setAttribute("aria-label", "Filter table rows");
       style(search, {
         padding: "6px 14px",
         borderRadius: "999px",
@@ -1672,23 +1813,41 @@
       headRow.replaceChildren();
       for (const col of columns) {
         const th = document.createElement("th");
+        th.scope = "col";
         const canSort = comp.sortable !== false && col.sortable !== false;
-        const indicator =
-          sortKey === col.accessor_key ? (sortAsc ? " ↑" : " ↓") : canSort ? " ↕" : "";
-        th.textContent = `${col.header}${indicator}`;
+        const isSorted = sortKey === col.accessor_key;
+        const indicator = isSorted ? (sortAsc ? " ↑" : " ↓") : canSort ? " ↕" : "";
+        th.setAttribute("aria-sort", isSorted ? (sortAsc ? "ascending" : "descending") : "none");
         style(th, {
           textAlign: "left",
-          padding: "12px 18px",
+          padding: canSort ? "0" : "12px 18px",
           fontWeight: "500",
           fontSize: "13px",
           letterSpacing: "0.005em",
           color: "var(--dm-text-primary)",
           whiteSpace: "nowrap",
-          cursor: canSort ? "pointer" : "default",
           userSelect: "none",
         });
         if (canSort) {
-          th.addEventListener("click", () => {
+          // A real button so the sort is reachable and operable from the keyboard.
+          const sortBtn = document.createElement("button");
+          sortBtn.type = "button";
+          sortBtn.textContent = `${col.header}${indicator}`;
+          sortBtn.setAttribute(
+            "aria-label",
+            `Sort by ${col.header}${isSorted ? (sortAsc ? ", descending" : ", ascending") : ""}`
+          );
+          style(sortBtn, {
+            all: "unset",
+            display: "block",
+            width: "100%",
+            boxSizing: "border-box",
+            padding: "12px 18px",
+            font: "inherit",
+            color: "inherit",
+            cursor: "pointer",
+          });
+          sortBtn.addEventListener("click", () => {
             if (sortKey === col.accessor_key) sortAsc = !sortAsc;
             else {
               sortKey = col.accessor_key;
@@ -1696,7 +1855,12 @@
             }
             rebuildHeader();
             rebuildBody();
+            // The header was rebuilt; keep keyboard focus on the same column.
+            headRow.children[columns.indexOf(col)]?.querySelector("button")?.focus();
           });
+          th.appendChild(sortBtn);
+        } else {
+          th.textContent = `${col.header}${indicator}`;
         }
         headRow.appendChild(th);
       }
@@ -1728,6 +1892,10 @@
       }
 
       const totalRows = rows.length;
+      countChip.textContent =
+        filterQuery && totalRows !== rawRows.length
+          ? `${totalRows} of ${rawRows.length} rows`
+          : `${totalRows} rows`;
       if (pageSize > 0) {
         const start = page * pageSize;
         rows = rows.slice(start, start + pageSize);
@@ -1822,8 +1990,13 @@
     return { element: wrap, toolbar };
   };
 
-  const renderInnerComponent = (comp, surfaceRoot, inGrid = false) => {
+  // `ctx` is the render context: `inGrid` (KPI tile inside a grid) and
+  // `inModal` (anywhere inside the modal overlay). It is threaded explicitly
+  // because children are rendered while their parents are still detached, so
+  // DOM-based `closest()` sniffing cannot see the modal.
+  const renderInnerComponent = (comp, surfaceRoot, ctx = {}) => {
     if (!comp || typeof comp !== "object") return document.createTextNode("");
+    const { inGrid = false, inModal = false } = ctx || {};
     const type = String(comp.type || "").toLowerCase();
 
     switch (type) {
@@ -1865,9 +2038,6 @@
         } else {
           appendInlineMarkdown(el, raw);
         }
-        const inModal =
-          Boolean(surfaceRoot?.hasAttribute?.("data-ui-modal")) ||
-          Boolean(surfaceRoot?.closest?.('[data-ui-modal="true"]'));
         const map = {
           h1: {
             fontSize: "22px",
@@ -1961,7 +2131,7 @@
           gap: `${gapPx}px`,
         });
         for (const child of comp.children || []) {
-          div.appendChild(renderInnerComponent(child, surfaceRoot, inGrid));
+          div.appendChild(renderInnerComponent(child, surfaceRoot, ctx));
         }
         return div;
       }
@@ -1976,7 +2146,7 @@
           alignItems: "stretch",
         });
         for (const child of comp.children || []) {
-          div.appendChild(renderInnerComponent(child, surfaceRoot, true));
+          div.appendChild(renderInnerComponent(child, surfaceRoot, { inGrid: true, inModal }));
         }
         return div;
       }
@@ -1985,7 +2155,7 @@
         const div = document.createElement("div");
         style(div, { display: "flex", flexDirection: "column", gap: "12px" });
         for (const child of comp.children || []) {
-          div.appendChild(renderInnerComponent(child, surfaceRoot, inGrid));
+          div.appendChild(renderInnerComponent(child, surfaceRoot, ctx));
         }
         return div;
       }
@@ -2037,7 +2207,7 @@
           const body = document.createElement("div");
           style(body, { display: "flex", flexDirection: "column", gap: "8px" });
           for (const child of comp.content) {
-            body.appendChild(renderInnerComponent(child, tile, inGrid));
+            body.appendChild(renderInnerComponent(child, tile, ctx));
           }
           tile.appendChild(body);
         }
@@ -2051,7 +2221,7 @@
             paddingTop: "10px",
           });
           for (const child of comp.footer) {
-            ftr.appendChild(renderInnerComponent(child, tile, false));
+            ftr.appendChild(renderInnerComponent(child, tile, { inModal }));
           }
           tile.appendChild(ftr);
         }
@@ -2062,6 +2232,8 @@
         const wrap = document.createElement("div");
         style(wrap, { display: "flex", flexDirection: "column", gap: "14px" });
         const bar = document.createElement("div");
+        bar.setAttribute("role", "tablist");
+        if (comp.label) bar.setAttribute("aria-label", String(comp.label));
         style(bar, {
           display: "flex",
           gap: "4px",
@@ -2069,28 +2241,38 @@
           paddingBottom: "0",
         });
         const panel = document.createElement("div");
+        panel.setAttribute("role", "tabpanel");
+        panel.tabIndex = 0;
         const tabs = Array.isArray(comp.tabs) ? comp.tabs : [];
+        const tabsId = `ui-tabs-${++uiTabsSeq}`;
         let activeIdx = 0;
 
-        const selectTab = (idx) => {
+        const selectTab = (idx, { focus = false } = {}) => {
           activeIdx = idx;
           Array.from(bar.children).forEach((btn, i) => {
+            const selected = i === activeIdx;
+            btn.setAttribute("aria-selected", selected ? "true" : "false");
+            btn.tabIndex = selected ? 0 : -1;
             style(btn, {
               background: "transparent",
-              color: i === activeIdx ? "var(--dm-text-primary)" : "var(--dm-text-secondary)",
-              borderBottom:
-                i === activeIdx ? "2px solid var(--dm-text-primary)" : "2px solid transparent",
+              color: selected ? "var(--dm-text-primary)" : "var(--dm-text-secondary)",
+              borderBottom: selected ? "2px solid var(--dm-text-primary)" : "2px solid transparent",
             });
+            if (selected && focus) btn.focus();
           });
+          panel.setAttribute("aria-labelledby", `${tabsId}-tab-${idx}`);
           panel.replaceChildren();
           for (const child of tabs[idx]?.content || []) {
-            panel.appendChild(renderInnerComponent(child, surfaceRoot, false));
+            panel.appendChild(renderInnerComponent(child, surfaceRoot, { inModal }));
           }
         };
 
         tabs.forEach((tab, idx) => {
           const b = document.createElement("button");
           b.type = "button";
+          b.id = `${tabsId}-tab-${idx}`;
+          b.setAttribute("role", "tab");
+          b.setAttribute("aria-controls", `${tabsId}-panel`);
           b.textContent = tab.label || `Tab ${idx + 1}`;
           style(b, {
             border: "0",
@@ -2103,8 +2285,21 @@
             cursor: "pointer",
           });
           b.addEventListener("click", () => selectTab(idx));
+          // Roving tabindex: arrows move between tabs, Home/End jump to the ends.
+          b.addEventListener("keydown", (ev) => {
+            const n = tabs.length;
+            let next = null;
+            if (ev.key === "ArrowRight" || ev.key === "ArrowDown") next = (idx + 1) % n;
+            else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") next = (idx - 1 + n) % n;
+            else if (ev.key === "Home") next = 0;
+            else if (ev.key === "End") next = n - 1;
+            if (next === null) return;
+            ev.preventDefault();
+            selectTab(next, { focus: true });
+          });
           bar.appendChild(b);
         });
+        panel.id = `${tabsId}-panel`;
         wrap.append(bar, panel);
         if (tabs.length) selectTab(0);
         return wrap;
@@ -2291,12 +2486,25 @@
           }
           for (const opt of comp.options || []) {
             const o = document.createElement("option");
-            o.value = opt.value;
-            o.textContent = opt.label;
+            if (opt && typeof opt === "object") {
+              o.value = String(opt.value ?? opt.label ?? "");
+              o.textContent = String(opt.label ?? opt.value ?? "");
+            } else {
+              // Plain-string options: the string is both value and label.
+              o.value = String(opt ?? "");
+              o.textContent = o.value;
+            }
             control.appendChild(o);
           }
           if (hasDefault) {
-            control.value = String(comp.default_value);
+            if (control.multiple) {
+              const defaults = (
+                Array.isArray(comp.default_value) ? comp.default_value : [comp.default_value]
+              ).map((d) => String(d));
+              for (const o of control.options) o.selected = defaults.includes(o.value);
+            } else {
+              control.value = String(comp.default_value);
+            }
           }
         } else if (type === "switch") {
           const row = document.createElement("div");
@@ -2395,9 +2603,6 @@
         btn.textContent = comp.label || "Submit";
         btn.disabled = !!comp.disabled;
         const v = String(comp.variant || "primary").toLowerCase();
-        const inModal =
-          Boolean(surfaceRoot?.hasAttribute?.("data-ui-modal")) ||
-          Boolean(surfaceRoot?.closest?.('[data-ui-modal="true"]'));
         if (v === "primary" || v === "danger") {
           btn.setAttribute("data-ui-primary", "true");
         }
@@ -2446,6 +2651,13 @@
         });
 
         btn.addEventListener("click", () => {
+          // Programmatic sends must never double as the composer's stop toggle:
+          // while a run is streaming, refuse instead of aborting it and dropping
+          // the form payload.
+          if (isRunning) {
+            showToast({ variant: "warning", message: "Wait for the agent to finish." });
+            return;
+          }
           const scope = btn.closest('[data-ui-scope="true"]') || surfaceRoot;
           const inputs = scope ? Array.from(scope.querySelectorAll("[data-ui-field]")) : [];
           const actionId = comp.action_id || comp.label || "click";
@@ -2551,7 +2763,7 @@
 
       case "image": {
         const img = document.createElement("img");
-        img.src = comp.src || "";
+        img.src = safeImageSrc(comp.src);
         img.alt = comp.alt || "";
         style(img, {
           maxWidth: "100%",
@@ -2604,19 +2816,8 @@
     }
   };
 
-  const isInputComponent = (c) => {
-    const t = String(c?.type || "").toLowerCase();
-    return (
-      t === "text_input" ||
-      t === "number_input" ||
-      t === "date_input" ||
-      t === "textarea" ||
-      t === "select" ||
-      t === "multi_select" ||
-      t === "slider" ||
-      t === "switch"
-    );
-  };
+  // Lower-cased component type, matching how `renderInnerComponent` dispatches.
+  const compType = (c) => String(c?.type || "").toLowerCase();
 
   const isConfirmCard = (comp, toolName) => {
     if (toolName === "render_confirm") return true;
@@ -2663,8 +2864,8 @@
     const cards = [];
 
     if (
-      (comps.length === 2 && comps[0]?.type === "text" && comps[1]?.type === "table") ||
-      (comps.length === 1 && comps[0]?.type === "table")
+      (comps.length === 2 && compType(comps[0]) === "text" && compType(comps[1]) === "table") ||
+      (comps.length === 1 && compType(comps[0]) === "table")
     ) {
       const title = comps.length === 2 ? comps[0].content : comps[0].title || "Data Table";
       const tableComp = comps.length === 2 ? comps[1] : comps[0];
@@ -2679,11 +2880,11 @@
       return { title, cards };
     }
 
-    if (comps.length === 1 && comps[0]?.type === "chart") {
+    if (comps.length === 1 && compType(comps[0]) === "chart") {
       const chartComp = comps[0];
       const title = chartComp.title || "Chart";
       const { card, body } = createStandaloneCard({ title });
-      body.appendChild(renderChartInner({ ...chartComp, title: null }));
+      body.appendChild(renderChartInner(chartComp));
       cards.push(card);
       return { title, cards };
     }
@@ -2717,8 +2918,8 @@
         t === "stack" &&
         Array.isArray(comp.children) &&
         comp.children.length === 2 &&
-        comp.children[0]?.type === "text" &&
-        comp.children[1]?.type === "grid"
+        compType(comp.children[0]) === "text" &&
+        compType(comp.children[1]) === "grid"
       ) {
         const secTitle = comp.children[0].content;
         if (!surfaceTitle) surfaceTitle = secTitle;
@@ -2730,24 +2931,24 @@
         });
         pendingTitle = null;
         pendingSubtitle = null;
-        body.appendChild(renderInnerComponent(comp.children[1], card, true));
+        body.appendChild(renderInnerComponent(comp.children[1], card, { inGrid: true }));
         cards.push(card);
         continue;
       }
 
       if (t === "card" || t === "modal") {
         let contentArr = Array.isArray(comp.content) ? [...comp.content] : [];
-        const singleTable = contentArr.length === 1 && contentArr[0]?.type === "table";
-        const singleChart = contentArr.length === 1 && contentArr[0]?.type === "chart";
+        const singleTable = contentArr.length === 1 && compType(contentArr[0]) === "table";
+        const singleChart = contentArr.length === 1 && compType(contentArr[0]) === "chart";
         const isProgress =
           toolName === "render_progress" ||
           (!comp.title && contentArr.some((c) => String(c?.type || "").toLowerCase() === "progress"));
 
         let liftedTitle = null;
         let liftedDesc = null;
-        if (isProgress && !comp.title && contentArr[0]?.type === "text") {
+        if (isProgress && !comp.title && compType(contentArr[0]) === "text") {
           liftedTitle = contentArr.shift().content;
-          if (contentArr[0]?.type === "text" && String(contentArr[0].variant || "").toLowerCase() === "caption") {
+          if (compType(contentArr[0]) === "text" && String(contentArr[0].variant || "").toLowerCase() === "caption") {
             liftedDesc = contentArr.shift().content;
           }
         }
@@ -2778,10 +2979,10 @@
         if (singleTable && tableElement) {
           body.appendChild(tableElement);
         } else if (singleChart) {
-          body.appendChild(renderChartInner({ ...contentArr[0], title: null }));
+          body.appendChild(renderChartInner(contentArr[0]));
         } else {
           for (const child of contentArr) {
-            body.appendChild(renderInnerComponent(child, card, false));
+            body.appendChild(renderInnerComponent(child, card));
           }
         }
 
@@ -2796,7 +2997,7 @@
             background: "transparent",
           });
           for (const child of comp.footer) {
-            ftr.appendChild(renderInnerComponent(child, card, false));
+            ftr.appendChild(renderInnerComponent(child, card));
           }
           card.appendChild(ftr);
         }
@@ -2822,7 +3023,7 @@
       });
       pendingTitle = null;
       pendingSubtitle = null;
-      body.appendChild(renderInnerComponent(comp, card, false));
+      body.appendChild(renderInnerComponent(comp, card));
       cards.push(card);
     }
 

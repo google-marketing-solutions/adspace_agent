@@ -1471,7 +1471,7 @@ mod tests {
 
         // 1a. The studio client is served as ES modules under `/app/<path>`;
         // `/app/app.css` keeps its own route and unknown paths are 404.
-        for path in ["/app/app.js", "/app/stage.js"] {
+        for path in ["/app/app.js", "/app/state.js", "/app/adk-ui/charts.js"] {
             let js = app
                 .clone()
                 .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())

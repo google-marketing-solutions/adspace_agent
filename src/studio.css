@@ -23,7 +23,6 @@
   --bg-primary: #eff2f7;
   --bg-secondary: rgba(255, 255, 255, 0.88);
   --surface-card: #ffffff;
-  --surface-glass: rgba(255, 255, 255, 0.96);
   --text-primary: #121317;
   --text-secondary: #45474d;
   --text-muted: #5f6368;
@@ -31,9 +30,6 @@
   --border-default: rgba(33, 34, 38, 0.08);
   --border-strong: rgba(33, 34, 38, 0.14);
   --accent-primary: #1a73e8;
-  --accent-indigo: #5b6cf9;
-  --accent-violet: #9b72cb;
-  --accent-coral: #d96570;
   /* #137333 (Google green 700) clears WCAG AA at 12px on --bg-primary; #188038 did not. */
   --accent-success: #137333;
   --accent-warning: #d97706;
@@ -51,20 +47,10 @@
   --tint-warn-ring: rgba(249, 171, 0, 0.38);
   --tint-warn-spin: #e37400;
   --ring: rgba(18, 19, 23, 0.14);
-  --gemini-gradient: linear-gradient(
-    135deg,
-    #1a73e8 0%,
-    #5b6cf9 38%,
-    #9b72cb 72%,
-    #d96570 100%
-  );
-  --gemini-gradient-subtle: #eff2f7;
-  --ambient-aura: none;
   --shadow-sm: 0 2px 8px rgba(18, 19, 23, 0.04), 0 1px 2px rgba(18, 19, 23, 0.02);
   --shadow-md: 0 12px 32px -12px rgba(18, 19, 23, 0.08), 0 2px 8px -2px rgba(18, 19, 23, 0.04);
   --shadow-lg: 0 24px 52px -12px rgba(18, 19, 23, 0.16), 0 6px 18px -4px rgba(18, 19, 23, 0.08),
     0 1px 3px rgba(18, 19, 23, 0.05);
-  --protected-btn-bg: rgba(255, 255, 255, 0.65);
   --protected-btn-outline: rgba(33, 34, 38, 0.12);
   --protected-btn-hover: rgba(33, 34, 38, 0.04);
   --protected-btn-focus: rgba(33, 34, 38, 0.12);
@@ -99,13 +85,16 @@
   --z-toast: 2200;
 }
 
+/* MIRROR: the dark token values below are duplicated verbatim in the
+   `:root[data-theme="dark"]` block that follows (JS sets data-theme only for
+   an explicit light/dark choice; "system" relies on this media query).
+   Keep both in sync — `scripts/check-dark-tokens.sh` diffs them. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg-canvas: #121317;
     --bg-primary: #18191d;
     --bg-secondary: rgba(18, 19, 23, 0.88);
     --surface-card: #18191d;
-    --surface-glass: rgba(24, 25, 29, 0.96);
     --text-primary: #f8f9fc;
     --text-secondary: #b2bbc5;
     --text-muted: #8a94a0;
@@ -113,9 +102,6 @@
     --border-default: rgba(230, 234, 240, 0.09);
     --border-strong: rgba(230, 234, 240, 0.16);
     --accent-primary: #8ab4f8;
-    --accent-indigo: #8c9eff;
-    --accent-violet: #b39ddb;
-    --accent-coral: #e57373;
     --accent-success: #81c995;
     --accent-warning: #fdd663;
     --accent-error: #f28b82;
@@ -129,20 +115,10 @@
     --tint-warn-ring: rgba(253, 214, 99, 0.4);
     --tint-warn-spin: #fdd663;
     --ring: rgba(248, 249, 252, 0.16);
-    --gemini-gradient: linear-gradient(
-      135deg,
-      #8ab4f8 0%,
-      #8c9eff 38%,
-      #b39ddb 72%,
-      #e57373 100%
-    );
-    --gemini-gradient-subtle: #212226;
-    --ambient-aura: none;
     --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.28);
     --shadow-md: 0 16px 40px -12px rgba(0, 0, 0, 0.5), 0 2px 10px rgba(0, 0, 0, 0.3);
     --shadow-lg: 0 28px 60px -12px rgba(0, 0, 0, 0.65), 0 8px 22px -4px rgba(0, 0, 0, 0.42),
       0 1px 4px rgba(0, 0, 0, 0.32);
-    --protected-btn-bg: rgba(24, 25, 29, 0.65);
     --protected-btn-outline: rgba(230, 234, 240, 0.12);
     --protected-btn-hover: rgba(230, 234, 240, 0.06);
     --protected-btn-focus: rgba(230, 234, 240, 0.14);
@@ -166,12 +142,13 @@
   }
 }
 
+/* MIRROR: keep in sync with the `@media (prefers-color-scheme: dark)` block
+   above (see scripts/check-dark-tokens.sh). */
 :root[data-theme="dark"] {
   --bg-canvas: #121317;
   --bg-primary: #18191d;
   --bg-secondary: rgba(18, 19, 23, 0.88);
   --surface-card: #18191d;
-  --surface-glass: rgba(24, 25, 29, 0.96);
   --text-primary: #f8f9fc;
   --text-secondary: #b2bbc5;
   --text-muted: #8a94a0;
@@ -179,9 +156,6 @@
   --border-default: rgba(230, 234, 240, 0.09);
   --border-strong: rgba(230, 234, 240, 0.16);
   --accent-primary: #8ab4f8;
-  --accent-indigo: #8c9eff;
-  --accent-violet: #b39ddb;
-  --accent-coral: #e57373;
   --accent-success: #81c995;
   --accent-warning: #fdd663;
   --accent-error: #f28b82;
@@ -195,20 +169,10 @@
   --tint-warn-ring: rgba(253, 214, 99, 0.4);
   --tint-warn-spin: #fdd663;
   --ring: rgba(248, 249, 252, 0.16);
-  --gemini-gradient: linear-gradient(
-    135deg,
-    #8ab4f8 0%,
-    #8c9eff 38%,
-    #b39ddb 72%,
-    #e57373 100%
-  );
-  --gemini-gradient-subtle: #212226;
-  --ambient-aura: none;
   --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.28);
   --shadow-md: 0 16px 40px -12px rgba(0, 0, 0, 0.5), 0 2px 10px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 28px 60px -12px rgba(0, 0, 0, 0.65), 0 8px 22px -4px rgba(0, 0, 0, 0.42),
     0 1px 4px rgba(0, 0, 0, 0.32);
-  --protected-btn-bg: rgba(24, 25, 29, 0.65);
   --protected-btn-outline: rgba(230, 234, 240, 0.12);
   --protected-btn-hover: rgba(230, 234, 240, 0.06);
   --protected-btn-focus: rgba(230, 234, 240, 0.14);
@@ -297,7 +261,7 @@ select {
 select:not([multiple]) {
   -webkit-appearance: none;
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='%2345474d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 11px center;
   background-size: 13px 13px;
@@ -641,10 +605,6 @@ summary:focus-visible,
   font-size: 12.5px;
 }
 
-.black-action-button .google-symbols {
-  color: var(--primary-btn-fg);
-}
-
 .black-action-button:hover {
   background: color-mix(in srgb, var(--primary-btn-bg) 88%, var(--primary-btn-fg));
   color: var(--primary-btn-fg);
@@ -666,7 +626,9 @@ summary:focus-visible,
 
 .danger-button:hover {
   background: var(--accent-error);
-  color: #ffffff;
+  /* --primary-btn-fg flips with the theme: white on light-mode red,
+     near-black on dark-mode salmon. */
+  color: var(--primary-btn-fg);
 }
 
 .full-width {
@@ -1195,13 +1157,6 @@ summary:focus-visible,
   background: var(--text-muted);
 }
 
-.eyebrow {
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: -0.002em;
-}
-
 /* Session Token Telemetry Pill & Popover */
 .usage-pill {
   height: 32px;
@@ -1368,10 +1323,6 @@ summary:focus-visible,
   color: var(--text-primary);
 }
 
-.usage-kpi-card strong.usage-kpi-cost {
-  color: var(--text-primary);
-}
-
 .usage-kpi-sub {
   font-size: 10.5px;
   font-family: var(--mono);
@@ -1458,13 +1409,16 @@ summary:focus-visible,
   pointer-events: auto;
 }
 
-.chat-floating-actions .quiet-button {
+.chat-floating-actions .quiet-button,
+.canvas-floating-actions .quiet-button {
   height: 32px;
   padding: 0 13px;
 }
 
+/* Shared glass treatment for both panes' floating controls. */
 .chat-floating-actions .usage-pill,
-.chat-floating-actions .quiet-button {
+.chat-floating-actions .quiet-button,
+.canvas-floating-actions .quiet-button {
   background: var(--bg-secondary);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -1472,7 +1426,8 @@ summary:focus-visible,
 }
 
 .chat-floating-actions .usage-pill:hover,
-.chat-floating-actions .quiet-button:hover {
+.chat-floating-actions .quiet-button:hover,
+.canvas-floating-actions .quiet-button:hover {
   border-color: var(--border-strong);
   color: var(--text-primary);
   background: var(--dm-surface-gray-subtle);
@@ -1901,11 +1856,6 @@ summary:focus-visible,
   white-space: nowrap;
 }
 
-.canvas-jump-eyebrow {
-  color: var(--text-secondary);
-  font-weight: 500;
-}
-
 .canvas-jump-cta {
   position: relative;
   z-index: 1;
@@ -2138,18 +2088,6 @@ button.message-usage {
 
 .canvas-floating-actions .quiet-button {
   pointer-events: auto;
-  height: 32px;
-  padding: 0 13px;
-  background: var(--bg-secondary);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: var(--shadow-sm);
-}
-
-.canvas-floating-actions .quiet-button:hover {
-  border-color: var(--border-strong);
-  color: var(--text-primary);
-  background: var(--dm-surface-gray-subtle);
 }
 
 .canvas-body {
@@ -2662,8 +2600,7 @@ button.message-usage {
   border-radius: 24px;
   background: var(--surface-card);
   border: 1px solid var(--dm-outline);
-  box-shadow: 0 12px 32px -12px rgba(18, 19, 23, 0.08),
-    0 2px 8px -2px rgba(18, 19, 23, 0.04);
+  box-shadow: var(--shadow-md);
 }
 
 .dm-alert-inline {
@@ -2744,6 +2681,7 @@ button.message-usage {
 .ui-modal-dialog select:focus-visible,
 .ui-modal-dialog textarea:focus-visible {
   outline: none;
+  /* !important: adk-ui components set border-color inline from studio.js. */
   border-color: var(--dm-text-primary) !important;
   box-shadow: 0 0 0 1px var(--dm-text-primary);
 }
@@ -2763,6 +2701,7 @@ button.message-usage {
 }
 
 .adk-ui-surface tbody tr:hover {
+  /* !important: table rows get an inline background from studio.js. */
   background-color: color-mix(in srgb, var(--dm-surface-gray) 65%, transparent) !important;
 }
 

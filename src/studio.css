@@ -238,6 +238,10 @@
 html,
 body {
   height: 100%;
+  /* 100vh/100dvh so mobile Safari's collapsing toolbar does not clip the
+     composer; 100% is the fallback for engines without dvh. */
+  height: 100vh;
+  height: 100dvh;
   margin: 0;
 }
 
@@ -748,7 +752,9 @@ summary:focus-visible,
 
 .settings-popover {
   width: 340px;
+  max-width: calc(100vw - 24px);
   max-height: calc(100vh - 68px);
+  max-height: calc(100dvh - 68px);
   overflow-y: auto;
 }
 
@@ -1329,6 +1335,7 @@ summary:focus-visible,
 
 .usage-popover {
   width: 345px;
+  max-width: calc(100vw - 24px);
 }
 
 .usage-kpi-grid {
@@ -1661,7 +1668,10 @@ summary:focus-visible,
 
 .message-text table {
   width: 100%;
-  border-collapse: collapse;
+  /* separate + 0 spacing: border-radius/overflow:hidden are ignored on a
+     border-collapse:collapse table, so cell borders carry the row rules. */
+  border-collapse: separate;
+  border-spacing: 0;
   margin: 10px 0;
   font-size: 13px;
   border: 1px solid var(--border-default);
@@ -2549,6 +2559,7 @@ button.message-usage {
   z-index: 1;
   width: 100%;
   max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
   display: flex;
   flex-direction: column;
   border-radius: 28px;
@@ -2762,13 +2773,37 @@ button.message-usage {
 @media (max-width: 920px) {
   .studio-workspace {
     grid-template-columns: 1fr;
-    grid-template-rows: 1fr 1fr;
+    grid-template-rows: minmax(0, 3fr) minmax(0, 2fr);
   }
   .pane-resizer {
     display: none;
   }
   .session-picker label {
     display: none;
+  }
+  .session-picker select {
+    min-width: 120px;
+  }
+  /* Icon-only "New Session" and avatar-only user pill keep the bar on one line. */
+  #new-session-btn .button__label,
+  .user-pill-name {
+    display: none;
+  }
+  /* Take the Export/Clear buttons out of the flow so they stop overlapping
+     the empty-state title. */
+  .canvas-floating-actions {
+    position: static;
+    justify-content: flex-end;
+    padding: 10px 18px 0;
+  }
+}
+
+@media (max-width: 600px) {
+  .topbar {
+    height: auto;
+    min-height: 56px;
+    flex-wrap: wrap;
+    padding: 8px 12px;
   }
 }
 

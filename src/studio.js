@@ -5178,7 +5178,7 @@
   // other popovers opening) stays consistent without threading a helper
   // through all of them. Focus moves into the popover on open and returns to
   // the trigger on close (including Escape).
-  const FOCUSABLE_SELECTOR =
+  const POPOVER_FOCUSABLE_SELECTOR =
     'button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
   const isPopoverOpen = (popover) => Boolean(popover && !popover.classList.contains("hidden"));
@@ -5186,7 +5186,7 @@
   const openPopover = (trigger, popover) => {
     if (!popover || isPopoverOpen(popover)) return;
     popover.classList.remove("hidden");
-    const first = popover.querySelector(FOCUSABLE_SELECTOR);
+    const first = popover.querySelector(POPOVER_FOCUSABLE_SELECTOR);
     if (first) {
       first.focus();
     } else {

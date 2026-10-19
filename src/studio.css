@@ -401,11 +401,17 @@ select:focus-visible {
   color: var(--accent-success);
 }
 
-.status-running,
-.status-authorizing {
+.status-running {
   color: #0b3d91;
   border-color: rgba(26, 115, 232, 0.28);
   background: rgb(214, 237, 255);
+}
+
+/* Waiting for Google authorization: amber, matching the canvas wave. */
+.status-authorizing {
+  color: #7a3e00;
+  border-color: rgba(249, 171, 0, 0.38);
+  background: rgb(254, 243, 205);
 }
 
 .status-failed {
@@ -420,6 +426,11 @@ select:focus-visible {
   border: 1.75px solid rgba(11, 87, 208, 0.24);
   border-top-color: #0b57d0;
   animation: status-spin 0.65s linear infinite;
+}
+
+.status-authorizing i {
+  border-color: rgba(227, 116, 0, 0.26);
+  border-top-color: #e37400;
 }
 
 @keyframes status-spin {

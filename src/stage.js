@@ -36,9 +36,25 @@
       dotCore: [248 / 255, 249 / 255, 252 / 255],
       restAlpha: 0.22,
       hoverAlpha: 0.88,
-      // Streaming wave tint (Google blue 300 reads well on dark surfaces).
-      streamColor: [138 / 255, 180 / 255, 248 / 255],
-      streamBgGain: 0.1,
+      // Wave accents per activity. `tint` colours the field and the crest,
+      // `hover` / `core` replace the grey hover palette while the wave is
+      // up so the cursor bloom stays in the same hue family.
+      accents: {
+        // Google blue 300 / 400 / 100.
+        streaming: {
+          tint: [138 / 255, 180 / 255, 248 / 255],
+          hover: [102 / 255, 157 / 255, 246 / 255],
+          core: [211 / 255, 227 / 255, 253 / 255],
+          bgGain: 0.1,
+        },
+        // Google yellow 300 / 400 / 100.
+        authorizing: {
+          tint: [253 / 255, 214 / 255, 99 / 255],
+          hover: [252 / 255, 201 / 255, 52 / 255],
+          core: [254 / 255, 239 / 255, 195 / 255],
+          bgGain: 0.1,
+        },
+      },
     },
     "argon-light": {
       id: "argon-light",
@@ -54,11 +70,27 @@
       dotCore: [18 / 255, 19 / 255, 23 / 255],
       restAlpha: 0.2,
       hoverAlpha: 0.85,
-      // Streaming wave tint (--accent-primary, #1a73e8).
-      streamColor: [26 / 255, 115 / 255, 232 / 255],
-      streamBgGain: 0.06,
+      accents: {
+        // --accent-primary (#1a73e8), then Google blue 700 / 800.
+        streaming: {
+          tint: [26 / 255, 115 / 255, 232 / 255],
+          hover: [11 / 255, 87 / 255, 208 / 255],
+          core: [8 / 255, 66 / 255, 160 / 255],
+          bgGain: 0.06,
+        },
+        // Google yellow 600 / 700 / 800.
+        authorizing: {
+          tint: [249 / 255, 171 / 255, 0 / 255],
+          hover: [227 / 255, 116 / 255, 0 / 255],
+          core: [176 / 255, 96 / 255, 0 / 255],
+          bgGain: 0.07,
+        },
+      },
     },
   };
+
+  /** Activities that put the wave up, in the order `update()` accepts them. */
+  const WAVE_ACTIVITIES = ["streaming", "authorizing"];
 
   const DEFAULTS = {
     gridStep: 24,
@@ -291,6 +323,8 @@ uniform float u_hoverAlpha;
 uniform float u_stream;
 uniform float u_streamTime;
 uniform vec3 u_streamColor;
+uniform vec3 u_streamHover;
+uniform vec3 u_streamCore;
 uniform float u_streamWavelength;
 uniform float u_streamAmplitude;
 
@@ -381,11 +415,15 @@ void main() {
   // Color & alpha blending using Argon palette
   float paletteMix = clamp(normUv.x * 0.65 + (1.0 - normUv.y) * 0.35, 0.0, 1.0);
   vec3 restCol = mix(u_dotRestA, u_dotRestB, paletteMix);
-  // Streaming tint: a soft base hue everywhere, deepening on the crest.
+  // Streaming tint: a soft base hue everywhere, deepening on the crest. The
+  // cursor bloom follows the accent too (deeper shade for the hover ring,
+  // the accent's core shade at the centre) instead of the grey rest palette.
   restCol = mix(restCol, u_streamColor, u_stream * 0.25 + streamCrest * 0.55);
+  vec3 hoverCol = mix(u_dotHover, u_streamHover, u_stream);
+  vec3 coreCol = mix(u_dotCore, u_streamCore, u_stream);
   float activeMix = clamp(hoverBell + tapBoost * 0.7, 0.0, 1.0);
-  vec3 dotColor = mix(restCol, u_dotHover, activeMix);
-  dotColor = mix(dotColor, u_dotCore, clamp(hoverCore * 0.85 + tapBoost * 0.35, 0.0, 1.0));
+  vec3 dotColor = mix(restCol, hoverCol, activeMix);
+  dotColor = mix(dotColor, coreCol, clamp(hoverCore * 0.85 + tapBoost * 0.35, 0.0, 1.0));
 
   float alpha = mix(
     u_restAlpha * (0.9 + 0.14 * ambientWave) + streamCrest * 0.42 + u_stream * 0.06,
@@ -577,6 +615,8 @@ void main() {
           "u_stream",
           "u_streamTime",
           "u_streamColor",
+          "u_streamHover",
+          "u_streamCore",
           "u_streamWavelength",
           "u_streamAmplitude",
         ]);
@@ -627,15 +667,35 @@ void main() {
       let rafId = 0;
       let running = false;
 
-      // Streaming wave state. `streamTarget` is what the host asked for,
-      // `stream` eases towards it (so the hue fades in and, when streaming
-      // ends, the grid settles back to rest instead of snapping), and
-      // `streamTime` only advances while the wave is visible.
+      // Wave state. `activity` is what the host asked for ("idle" or one of
+      // WAVE_ACTIVITIES); `stream` eases towards 1 while an activity is set
+      // (so the hue fades in and, when it ends, the grid settles back to rest
+      // instead of snapping) and `streamTime` only advances while the wave is
+      // visible. The accent colours ease too, so switching from streaming to
+      // authorizing cross-fades blue -> amber without the wave stopping.
+      let activity = "idle";
       let streamTarget = 0;
       let stream = 0;
       let streamTime = 0;
+      const accentFor = (name) =>
+        preset.accents[name] || preset.accents[WAVE_ACTIVITIES[0]];
+      const accent = {
+        tint: accentFor(WAVE_ACTIVITIES[0]).tint.slice(),
+        hover: accentFor(WAVE_ACTIVITIES[0]).hover.slice(),
+        core: accentFor(WAVE_ACTIVITIES[0]).core.slice(),
+        bgGain: accentFor(WAVE_ACTIVITIES[0]).bgGain,
+      };
+      let accentTargetName = WAVE_ACTIVITIES[0];
 
       const streamActive = () => streamTarget > 0 || stream > 0.002;
+
+      const snapAccent = () => {
+        const target = accentFor(accentTargetName);
+        accent.tint = target.tint.slice();
+        accent.hover = target.hover.slice();
+        accent.core = target.core.slice();
+        accent.bgGain = target.bgGain;
+      };
 
       const stepStream = (dt) => {
         if (dt <= 0) return;
@@ -650,6 +710,15 @@ void main() {
         if (stream > 0) {
           streamTime = (streamTime + dt / DEFAULTS.streamWaveSeconds) % 1;
         }
+        // Cross-fade the accent palette towards the active activity's.
+        const target = accentFor(accentTargetName);
+        const colorEase = 1 - Math.exp((-dt * 3) / DEFAULTS.streamFadeIn);
+        for (const key of ["tint", "hover", "core"]) {
+          for (let i = 0; i < 3; i += 1) {
+            accent[key][i] += (target[key][i] - accent[key][i]) * colorEase;
+          }
+        }
+        accent.bgGain += (target.bgGain - accent.bgGain) * colorEase;
       };
 
       const renderFrame = (dt, now) => {
@@ -680,8 +749,8 @@ void main() {
         gl.uniform1f(bgU.u_isLight, isLight);
         gl.uniform1f(bgU.u_stream, stream);
         gl.uniform1f(bgU.u_streamTime, streamTime);
-        gl.uniform3fv(bgU.u_streamColor, preset.streamColor);
-        gl.uniform1f(bgU.u_streamBgGain, preset.streamBgGain);
+        gl.uniform3fv(bgU.u_streamColor, accent.tint);
+        gl.uniform1f(bgU.u_streamBgGain, accent.bgGain);
         gl.uniform2f(bgU.u_cssSize, cssWidth, cssHeight);
         gl.uniform1f(bgU.u_streamWavelength, streamWavelength);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -714,7 +783,9 @@ void main() {
         gl.uniform1f(dotU.u_hoverAlpha, preset.hoverAlpha);
         gl.uniform1f(dotU.u_stream, stream);
         gl.uniform1f(dotU.u_streamTime, streamTime);
-        gl.uniform3fv(dotU.u_streamColor, preset.streamColor);
+        gl.uniform3fv(dotU.u_streamColor, accent.tint);
+        gl.uniform3fv(dotU.u_streamHover, accent.hover);
+        gl.uniform3fv(dotU.u_streamCore, accent.core);
         gl.uniform1f(dotU.u_streamWavelength, streamWavelength);
         gl.uniform1f(dotU.u_streamAmplitude, streamAmplitude);
         gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, cols * rows);
@@ -819,22 +890,44 @@ void main() {
             currentMode = next.colorMode === "dark" ? "dark" : "light";
             preset = selectPreset(currentMode, config.dark_mode_preset, config.light_mode_preset);
             canvas.style.background = preset.background;
+            // The accent palette belongs to the preset: jump to the new
+            // theme's colours rather than fading from the old theme's.
+            snapAccent();
             if (!rafId) renderFrame(0, performance.now());
           }
-          if (typeof next.streaming === "boolean") {
-            streamTarget = next.streaming ? 1 : 0;
+          // `activity` ("idle" | "streaming" | "authorizing") or the older
+          // `streaming` boolean (true == "streaming").
+          let nextActivity = null;
+          if (typeof next.activity === "string") {
+            nextActivity = WAVE_ACTIVITIES.includes(next.activity) ? next.activity : "idle";
+          } else if (typeof next.streaming === "boolean") {
+            nextActivity = next.streaming ? "streaming" : "idle";
+          }
+          if (nextActivity !== null && nextActivity !== activity) {
+            activity = nextActivity;
+            streamTarget = activity === "idle" ? 0 : 1;
+            if (activity !== "idle") {
+              // Keep the last accent as the fade-out colour when going idle.
+              accentTargetName = activity;
+              if (stream <= 0.002) snapAccent();
+            }
             if (!rafId) {
               // Paused (hidden pane or reduced motion): no wave, but still
               // show / clear the resting tint in a single static frame.
               stream = streamTarget;
               streamTime = 0;
+              snapAccent();
               renderFrame(0, performance.now());
             }
           }
         },
-        /** Whether the streaming wave is currently requested. */
+        /** Whether the wave is currently requested (any activity). */
         get streaming() {
-          return streamTarget > 0;
+          return activity !== "idle";
+        },
+        /** The current activity: "idle", "streaming" or "authorizing". */
+        get activity() {
+          return activity;
         },
         destroy,
       };

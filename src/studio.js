@@ -5258,15 +5258,22 @@
     }
   }
 
-  // Streaming wave on the canvas stage while the agent is running. Driven
-  // off the status pill so every path that flips it (send, stop, errors,
-  // reconnect after login) keeps the stage in sync; re-applied when the
-  // stage is (re)mounted since mounting may finish after a run started.
-  function syncStageStreaming(kind = isRunning ? "running" : "ready") {
-    const streaming = kind === "running";
+  // Wave on the canvas stage while the agent is busy: blue while streaming,
+  // amber while waiting for Google authorization (matching the status pill).
+  // Driven off the status pill so every path that flips it (send, stop,
+  // errors, popup consent, reconnect after login) keeps the stage in sync;
+  // re-applied when the stage is (re)mounted since mounting may finish after
+  // a run started.
+  const STAGE_ACTIVITY_BY_STATUS = { running: "streaming", authorizing: "authorizing" };
+  const currentStatusKind = () => {
+    const match = /\bstatus-([a-z]+)/.exec(statusPill.className || "");
+    return match ? match[1] : "ready";
+  };
+  function syncStageStreaming(kind = currentStatusKind()) {
+    const activity = STAGE_ACTIVITY_BY_STATUS[kind] || "idle";
     if (canvasStageInstance && typeof canvasStageInstance.update === "function") {
-      if (canvasStageInstance.streaming !== streaming) {
-        canvasStageInstance.update({ streaming });
+      if (canvasStageInstance.activity !== activity) {
+        canvasStageInstance.update({ activity });
       }
     }
   }

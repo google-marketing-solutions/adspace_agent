@@ -60,10 +60,15 @@ export const renderTableParts = (comp) => {
       fontSize: "13px",
       width: "180px",
     });
+    // Debounced: filtering re-sorts and rebuilds the whole body.
+    let filterTimer = 0;
     search.addEventListener("input", () => {
-      filterQuery = search.value.trim().toLowerCase();
-      page = 0;
-      rebuildBody();
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => {
+        filterQuery = search.value.trim().toLowerCase();
+        page = 0;
+        rebuildBody();
+      }, 100);
     });
     toolbar.appendChild(search);
   }
@@ -97,7 +102,10 @@ export const renderTableParts = (comp) => {
       const canSort = comp.sortable !== false && col.sortable !== false;
       const isSorted = sortKey === col.accessor_key;
       const indicator = isSorted ? (sortAsc ? " ↑" : " ↓") : canSort ? " ↕" : "";
-      th.setAttribute("aria-sort", isSorted ? (sortAsc ? "ascending" : "descending") : "none");
+      // `aria-sort` only belongs on headers that can actually be sorted.
+      if (canSort) {
+        th.setAttribute("aria-sort", isSorted ? (sortAsc ? "ascending" : "descending") : "none");
+      }
       style(th, {
         textAlign: "left",
         padding: canSort ? "0" : "12px 18px",

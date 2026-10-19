@@ -42,6 +42,8 @@ export const renderChartInner = (comp) => {
         : [];
   const colors = Array.isArray(comp.colors) && comp.colors.length ? comp.colors : PALETTE;
   const kind = String(comp.kind || "bar").toLowerCase();
+  // Accessible name for the `<svg>` (the visible title lives in the card header).
+  const chartLabel = comp.title ? String(comp.title) : `${kind} chart`;
 
   if (!data.length || !yKeys.length) {
     const empty = document.createElement("div");
@@ -71,7 +73,7 @@ export const renderChartInner = (comp) => {
       padding: "4px 0",
     });
 
-    const svg = svgEl("svg", { viewBox: "0 0 210 210" });
+    const svg = svgEl("svg", { viewBox: "0 0 210 210", role: "img", "aria-label": chartLabel });
     style(svg, {
       width: "185px",
       height: "185px",
@@ -232,7 +234,7 @@ export const renderChartInner = (comp) => {
   const span = maxVal - minVal;
   const yToPx = (v) => padT + plotH - ((v - minVal) / span) * plotH;
 
-  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}` });
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": chartLabel });
   style(svg, {
     width: "100%",
     height: "auto",

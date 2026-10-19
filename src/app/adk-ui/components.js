@@ -26,6 +26,10 @@ import { closeModalOverlay } from "./modal.js";
 
 let uiTabsSeq = 0;
 
+// `input_type` values a `text_input` component may request; anything else
+// (it comes from tool output) falls back to "text".
+const SAFE_INPUT_TYPES = ["text", "email", "url", "tel", "password", "search", "number"];
+
 // Late binding: `sendMessage` (sse.js) sits above this module (sse.js renders
 // through transcript.js → adk-ui), so app.js injects it via `bindSendMessage`.
 // `isBusy` is the host's "a run is in flight" predicate (the studio passes
@@ -333,6 +337,9 @@ export const renderInnerComponent = (comp, surfaceRoot, ctx = {}) => {
         Array.from(bar.children).forEach((btn, i) => {
           const selected = i === activeIdx;
           btn.setAttribute("aria-selected", selected ? "true" : "false");
+          // `data-active` lets a host stylesheet style the active tab (the
+          // `/ui/` helper needs `!important` to beat the host's button rules).
+          btn.dataset.active = selected ? "true" : "false";
           btn.tabIndex = selected ? 0 : -1;
           style(btn, {
             background: "transparent",
@@ -351,6 +358,7 @@ export const renderInnerComponent = (comp, surfaceRoot, ctx = {}) => {
       tabs.forEach((tab, idx) => {
         const b = document.createElement("button");
         b.type = "button";
+        b.className = "adk-ui-tab";
         b.id = `${tabsId}-tab-${idx}`;
         b.setAttribute("role", "tab");
         b.setAttribute("aria-controls", `${tabsId}-panel`);
@@ -597,6 +605,7 @@ export const renderInnerComponent = (comp, surfaceRoot, ctx = {}) => {
         field.replaceChildren(row);
       } else {
         control = document.createElement("input");
+        const requested = String(comp.input_type || "text").toLowerCase();
         control.type =
           type === "number_input"
             ? "number"
@@ -604,7 +613,9 @@ export const renderInnerComponent = (comp, surfaceRoot, ctx = {}) => {
               ? "date"
               : type === "slider"
                 ? "range"
-                : comp.input_type || "text";
+                : SAFE_INPUT_TYPES.includes(requested)
+                  ? requested
+                  : "text";
         if (comp.placeholder) control.placeholder = comp.placeholder;
         if (comp.min !== undefined && comp.min !== null) control.min = String(comp.min);
         if (comp.max !== undefined && comp.max !== null) control.max = String(comp.max);

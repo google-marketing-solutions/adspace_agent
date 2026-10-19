@@ -182,7 +182,11 @@ export const buildStandaloneCards = (uiResp, toolName = "") => {
       if (singleTable && tableElement) {
         body.appendChild(tableElement);
       } else if (singleChart) {
-        body.appendChild(renderChartInner(contentArr[0]));
+        // The card header shows the title; the chart only uses it for the
+        // SVG's accessible name, so fall back to the card's.
+        body.appendChild(
+          renderChartInner({ ...contentArr[0], title: contentArr[0].title || comp.title })
+        );
       } else {
         for (const child of contentArr) {
           body.appendChild(renderInnerComponent(child, card));

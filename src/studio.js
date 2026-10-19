@@ -5252,6 +5252,13 @@
         });
       }
 
+      // Encoding large attachments can take a while; if the user switched
+      // sessions (or hit stop) meanwhile, bail before the optimistic bubble
+      // lands in the wrong session's transcript.
+      if (abortController.signal.aborted || activeSession?.id !== runSession.id) {
+        throw new DOMException("Run superseded before send", "AbortError");
+      }
+
       // Optimistically append user message
       const userEvent = {
         id: `local-user-${Date.now()}`,

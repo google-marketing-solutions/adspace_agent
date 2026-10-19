@@ -2724,10 +2724,13 @@ button.message-usage {
   .user-pill-name {
     display: none;
   }
-  /* Take the Export/Clear buttons out of the flow so they stop overlapping
-     the empty-state title. */
+  /* Take the Export/Clear buttons out of the overlay flow so they stop
+     overlapping the empty-state title. Stay positioned (relative, not static)
+     so z-index:10 still paints them above the absolute #canvas-stage. */
   .canvas-floating-actions {
-    position: static;
+    position: relative;
+    top: auto;
+    right: auto;
     justify-content: flex-end;
     padding: 10px 18px 0;
   }

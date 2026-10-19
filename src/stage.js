@@ -128,6 +128,10 @@
       this.amount = 0;
       this.tap = [0, 0];
       this.tapTime = -10000;
+      // Canvas rect in viewport coords, cached so pointermove does not force
+      // layout; the host refreshes it from syncSize() and it is dropped on
+      // scroll. `null` means "recompute on next use".
+      this.rect = null;
       this.controller = new AbortController();
       this.sampled = {
         pointer: [0, 0],
@@ -140,7 +144,7 @@
       const { signal } = this.controller;
       const updateTarget = (ev) => {
         if (ev.pointerType === "touch") return;
-        const rect = this.canvas.getBoundingClientRect();
+        const rect = this.getRect();
         if (!rect.width || !rect.height) return;
         const x = ev.clientX - rect.left;
         const y = ev.clientY - rect.top;
@@ -156,7 +160,7 @@
         this.inside = false;
       };
       const onDown = (ev) => {
-        const rect = this.canvas.getBoundingClientRect();
+        const rect = this.getRect();
         if (!rect.width || !rect.height) return;
         this.tap[0] = ev.clientX - rect.left;
         this.tap[1] = ev.clientY - rect.top;
@@ -165,6 +169,9 @@
       const onBlur = () => {
         this.reset();
       };
+      const onScroll = () => {
+        this.rect = null;
+      };
 
       listenEl.addEventListener("pointermove", updateTarget, { signal, passive: true });
       listenEl.addEventListener("pointerenter", updateTarget, { signal, passive: true });
@@ -172,6 +179,20 @@
       listenEl.addEventListener("pointercancel", onLeave, { signal, passive: true });
       listenEl.addEventListener("pointerdown", onDown, { signal, passive: true });
       window.addEventListener("blur", onBlur, { signal });
+      // Capture phase so scrolls of any ancestor (not just the document)
+      // invalidate the cached rect.
+      window.addEventListener("scroll", onScroll, { signal, passive: true, capture: true });
+    }
+
+    /** Cached canvas bounding rect; recomputed only after syncRect(null) / scroll. */
+    getRect() {
+      if (!this.rect) this.rect = this.canvas.getBoundingClientRect();
+      return this.rect;
+    }
+
+    /** Refresh (or, with `null`, drop) the cached canvas rect. */
+    syncRect(rect = this.canvas.getBoundingClientRect()) {
+      this.rect = rect;
     }
 
     isActive(now) {
@@ -299,7 +320,6 @@ out float v_alpha;
 out float v_hoverMix;
 
 uniform vec2 u_cssSize;
-uniform float u_dpr;
 uniform int u_cols;
 uniform vec2 u_gridOrigin;
 uniform float u_gridStep;
@@ -445,7 +465,7 @@ void main() {
   gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
 
   v_localCoord = corner * quadHalfCss;
-  // Pass radius in local CSS pixels in v_hoverMix's companion or normalize localCoord by radius
+  // Normalise by radius so the fragment shader sees the dot edge at dist == 1
   v_localCoord /= max(radiusCss, 0.1);
   v_color = dotColor;
   v_alpha = clamp(alpha, 0.0, 1.0);
@@ -536,7 +556,9 @@ void main() {
 
       const gl = canvas.getContext("webgl2", {
         alpha: false,
-        antialias: true,
+        // Dots are analytically anti-aliased in DOT_FRAG (fwidth) and the
+        // background is a single full-screen triangle, so MSAA buys nothing.
+        antialias: false,
         depth: false,
         stencil: false,
         powerPreference: "low-power",
@@ -561,12 +583,53 @@ void main() {
         Number(config.stream_amplitude ?? DEFAULTS.streamAmplitude)
       );
 
+      let preset = selectPreset(
+        colorMode === "dark" ? "dark" : "light",
+        config.dark_mode_preset,
+        config.light_mode_preset
+      );
+
       let bgProg = null;
       let dotProg = null;
       let bgU = {};
       let dotU = {};
       let emptyVao = null;
       let contextLost = false;
+
+      // Uniforms that only change with the preset (theme) or never: uploaded
+      // once per program (setupGpu) and again on update({ colorMode }).
+      // Uniform values live with the program object, so they survive between
+      // frames. Everything that eases per frame (pointer, hover, tap, phase,
+      // stream, the accent colours and the size) stays in renderFrame.
+      const uploadStaticUniforms = () => {
+        const isLight = preset.colorMode === "light" ? 1 : 0;
+
+        gl.useProgram(bgProg);
+        gl.uniform3fv(bgU.u_bgTopLeft, preset.bgTopLeft);
+        gl.uniform3fv(bgU.u_bgTopRight, preset.bgTopRight);
+        gl.uniform3fv(bgU.u_bgBottomLeft, preset.bgBottomLeft);
+        gl.uniform3fv(bgU.u_bgBottomRight, preset.bgBottomRight);
+        gl.uniform3fv(bgU.u_glowColor, preset.dotRestB);
+        gl.uniform1f(bgU.u_isLight, isLight);
+        gl.uniform1f(bgU.u_streamWavelength, streamWavelength);
+
+        gl.useProgram(dotProg);
+        gl.uniform1f(dotU.u_gridStep, gridStep);
+        gl.uniform1f(dotU.u_dotRadius, dotRadius);
+        gl.uniform1f(dotU.u_hoverReach, hoverReach);
+        gl.uniform1f(dotU.u_hoverPush, hoverPush);
+        gl.uniform1f(dotU.u_hoverSwirl, hoverSwirl);
+        gl.uniform1f(dotU.u_hoverScale, hoverScale);
+        gl.uniform3fv(dotU.u_dotRestA, preset.dotRestA);
+        gl.uniform3fv(dotU.u_dotRestB, preset.dotRestB);
+        gl.uniform3fv(dotU.u_dotHover, preset.dotHover);
+        gl.uniform3fv(dotU.u_dotCore, preset.dotCore);
+        gl.uniform1f(dotU.u_restAlpha, preset.restAlpha);
+        gl.uniform1f(dotU.u_hoverAlpha, preset.hoverAlpha);
+        gl.uniform1f(dotU.u_streamWavelength, streamWavelength);
+        gl.uniform1f(dotU.u_streamAmplitude, streamAmplitude);
+        gl.useProgram(null);
+      };
 
       const setupGpu = () => {
         bgProg = createProgram(gl, BG_VERT, BG_FRAG);
@@ -591,7 +654,6 @@ void main() {
         ]);
         dotU = getUniforms(gl, dotProg, [
           "u_cssSize",
-          "u_dpr",
           "u_cols",
           "u_gridOrigin",
           "u_gridStep",
@@ -620,6 +682,7 @@ void main() {
           "u_streamWavelength",
           "u_streamAmplitude",
         ]);
+        uploadStaticUniforms();
       };
 
       try {
@@ -629,8 +692,6 @@ void main() {
         throw err;
       }
 
-      let currentMode = colorMode === "dark" ? "dark" : "light";
-      let preset = selectPreset(currentMode, config.dark_mode_preset, config.light_mode_preset);
       canvas.style.background = preset.background;
 
       const tracker = new PointerTracker(canvas, root.parentElement || root);
@@ -659,6 +720,9 @@ void main() {
         const spanH = (rows - 1) * gridStep;
         originX = (cssWidth - spanW) * 0.5;
         originY = (cssHeight - spanH) * 0.5;
+        // Layout just changed (ResizeObserver runs post-layout), so this is a
+        // cheap moment to refresh the rect that pointer events map against.
+        tracker.syncRect();
         return resized;
       };
 
@@ -679,12 +743,7 @@ void main() {
       let streamTime = 0;
       const accentFor = (name) =>
         preset.accents[name] || preset.accents[WAVE_ACTIVITIES[0]];
-      const accent = {
-        tint: accentFor(WAVE_ACTIVITIES[0]).tint.slice(),
-        hover: accentFor(WAVE_ACTIVITIES[0]).hover.slice(),
-        core: accentFor(WAVE_ACTIVITIES[0]).core.slice(),
-        bgGain: accentFor(WAVE_ACTIVITIES[0]).bgGain,
-      };
+      const accent = { tint: [], hover: [], core: [], bgGain: 0 };
       let accentTargetName = WAVE_ACTIVITIES[0];
 
       const streamActive = () => streamTarget > 0 || stream > 0.002;
@@ -696,6 +755,7 @@ void main() {
         accent.core = target.core.slice();
         accent.bgGain = target.bgGain;
       };
+      snapAccent();
 
       const stepStream = (dt) => {
         if (dt <= 0) return;
@@ -726,7 +786,6 @@ void main() {
         if (canvas.width <= 0 || canvas.height <= 0) return;
 
         const s = tracker.sample(dt, now, cssWidth, cssHeight);
-        const isLight = preset.colorMode === "light" ? 1 : 0;
 
         gl.viewport(0, 0, canvas.width, canvas.height);
         gl.bindVertexArray(emptyVao);
@@ -741,18 +800,11 @@ void main() {
           cssHeight > 0 ? s.hover[1] / cssHeight : 0.5
         );
         gl.uniform1f(bgU.u_hoverAmount, s.hoverAmount);
-        gl.uniform3fv(bgU.u_bgTopLeft, preset.bgTopLeft);
-        gl.uniform3fv(bgU.u_bgTopRight, preset.bgTopRight);
-        gl.uniform3fv(bgU.u_bgBottomLeft, preset.bgBottomLeft);
-        gl.uniform3fv(bgU.u_bgBottomRight, preset.bgBottomRight);
-        gl.uniform3fv(bgU.u_glowColor, preset.dotRestB);
-        gl.uniform1f(bgU.u_isLight, isLight);
         gl.uniform1f(bgU.u_stream, stream);
         gl.uniform1f(bgU.u_streamTime, streamTime);
         gl.uniform3fv(bgU.u_streamColor, accent.tint);
         gl.uniform1f(bgU.u_streamBgGain, accent.bgGain);
         gl.uniform2f(bgU.u_cssSize, cssWidth, cssHeight);
-        gl.uniform1f(bgU.u_streamWavelength, streamWavelength);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
 
         // 2. Dotted grid with mouseover repulsion, bloom, and tap ripple
@@ -760,34 +812,19 @@ void main() {
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.useProgram(dotProg);
         gl.uniform2f(dotU.u_cssSize, cssWidth, cssHeight);
-        gl.uniform1f(dotU.u_dpr, dpr);
         gl.uniform1i(dotU.u_cols, cols);
         gl.uniform2f(dotU.u_gridOrigin, originX, originY);
-        gl.uniform1f(dotU.u_gridStep, gridStep);
-        gl.uniform1f(dotU.u_dotRadius, dotRadius);
         gl.uniform2f(dotU.u_pointer, s.pointer[0], s.pointer[1]);
         gl.uniform2f(dotU.u_hoverPos, s.hover[0], s.hover[1]);
         gl.uniform1f(dotU.u_hoverAmount, s.hoverAmount);
-        gl.uniform1f(dotU.u_hoverReach, hoverReach);
-        gl.uniform1f(dotU.u_hoverPush, hoverPush);
-        gl.uniform1f(dotU.u_hoverSwirl, hoverSwirl);
-        gl.uniform1f(dotU.u_hoverScale, hoverScale);
         gl.uniform2f(dotU.u_tapPos, s.tap[0], s.tap[1]);
         gl.uniform1f(dotU.u_tapAge, s.tapAge);
         gl.uniform1f(dotU.u_phase, phase);
-        gl.uniform3fv(dotU.u_dotRestA, preset.dotRestA);
-        gl.uniform3fv(dotU.u_dotRestB, preset.dotRestB);
-        gl.uniform3fv(dotU.u_dotHover, preset.dotHover);
-        gl.uniform3fv(dotU.u_dotCore, preset.dotCore);
-        gl.uniform1f(dotU.u_restAlpha, preset.restAlpha);
-        gl.uniform1f(dotU.u_hoverAlpha, preset.hoverAlpha);
         gl.uniform1f(dotU.u_stream, stream);
         gl.uniform1f(dotU.u_streamTime, streamTime);
         gl.uniform3fv(dotU.u_streamColor, accent.tint);
         gl.uniform3fv(dotU.u_streamHover, accent.hover);
         gl.uniform3fv(dotU.u_streamCore, accent.core);
-        gl.uniform1f(dotU.u_streamWavelength, streamWavelength);
-        gl.uniform1f(dotU.u_streamAmplitude, streamAmplitude);
         gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, cols * rows);
 
         gl.disable(gl.BLEND);
@@ -811,6 +848,11 @@ void main() {
           rafId = requestAnimationFrame(tick);
           return;
         }
+        // Moving the window to a monitor with a different DPR does not change
+        // clientWidth/Height, so the ResizeObserver never fires; re-sync the
+        // backing store here (right before a render, so the cleared canvas is
+        // repainted in the same frame).
+        if (Math.min(window.devicePixelRatio || 1, 2) !== dpr) syncSize();
         const dt = lastNow ? Math.min(Math.max(elapsedMs, 0), 100) / 1000 : 0;
         lastNow = now;
         phase = (phase + dt / DEFAULTS.loopSeconds) % 1;
@@ -892,16 +934,27 @@ void main() {
           running = false;
           tracker.reset();
           syncLoop();
+          // Settle the wave instead of freezing it mid-fade; mirrors the
+          // paused branch of update().
+          stream = streamTarget;
+          streamTime = 0;
+          snapAccent();
           renderFrame(0, performance.now());
         },
         update(next = {}) {
           if (next.colorMode) {
-            currentMode = next.colorMode === "dark" ? "dark" : "light";
-            preset = selectPreset(currentMode, config.dark_mode_preset, config.light_mode_preset);
+            preset = selectPreset(
+              next.colorMode === "dark" ? "dark" : "light",
+              config.dark_mode_preset,
+              config.light_mode_preset
+            );
             canvas.style.background = preset.background;
             // The accent palette belongs to the preset: jump to the new
             // theme's colours rather than fading from the old theme's.
             snapAccent();
+            // While the context is lost there is nothing to upload to;
+            // setupGpu() re-uploads from the current preset on restore.
+            if (!contextLost && !gl.isContextLost()) uploadStaticUniforms();
             if (!rafId) renderFrame(0, performance.now());
           }
           // `activity` ("idle" | "streaming" | "authorizing") or the older

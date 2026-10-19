@@ -326,10 +326,14 @@
     localStorage.setItem(STORAGE_KEYS.modelPricing, JSON.stringify(prefs.modelPricing || {}));
 
     document.querySelectorAll("#theme-segmented button").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.themeChoice === prefs.theme);
+      const on = btn.dataset.themeChoice === prefs.theme;
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
     });
     document.querySelectorAll("#canvas-mode-segmented button").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.canvasMode === prefs.canvasMode);
+      const on = btn.dataset.canvasMode === prefs.canvasMode;
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
     });
     $("setting-show-tools").checked = prefs.showTools;
     if ($("setting-show-session-usage")) {
@@ -965,6 +969,11 @@
 
       toast.addEventListener("pointerenter", pauseTimer);
       toast.addEventListener("pointerleave", startTimer);
+      // Keyboard users tabbing onto the close button get the same grace period.
+      toast.addEventListener("focusin", pauseTimer);
+      toast.addEventListener("focusout", (ev) => {
+        if (!toast.contains(ev.relatedTarget)) startTimer();
+      });
       startTimer();
     }
 
@@ -972,6 +981,19 @@
   };
 
   let activeModalCleanup = null;
+  // Unique id prefix for each rendered `tabs` component (tab ↔ panel wiring).
+  let uiTabsSeq = 0;
+
+  const FOCUSABLE_SELECTOR =
+    'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), ' +
+    'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  const focusableIn = (container) =>
+    container
+      ? Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
+          (el) => !el.closest(".hidden") && el.getClientRects().length > 0
+        )
+      : [];
 
   const closeModalOverlay = () => {
     const root = $("ui-modal-root");
@@ -1079,13 +1101,57 @@
     const onKeyDown = (ev) => {
       if (ev.key === "Escape" && closable) {
         closeModalOverlay();
+        return;
+      }
+      // Keep Tab / Shift+Tab cycling inside the dialog.
+      if (ev.key === "Tab") {
+        const focusables = focusableIn(dialog);
+        if (!focusables.length) {
+          ev.preventDefault();
+          dialog.focus();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+        if (ev.shiftKey && (active === first || !dialog.contains(active))) {
+          ev.preventDefault();
+          last.focus();
+        } else if (!ev.shiftKey && (active === last || !dialog.contains(active))) {
+          ev.preventDefault();
+          first.focus();
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
-    activeModalCleanup = () => window.removeEventListener("keydown", onKeyDown);
+
+    // Focus management: remember the opener, make the workspace inert, move
+    // focus into the dialog, and restore it all in `closeModalOverlay`.
+    const previouslyFocused = document.activeElement;
+    titleEl.id = "ui-modal-title";
+    root.setAttribute("aria-labelledby", "ui-modal-title");
+    dialog.tabIndex = -1;
+    if (workspace) workspace.inert = true;
+    activeModalCleanup = () => {
+      window.removeEventListener("keydown", onKeyDown);
+      if (workspace) workspace.inert = false;
+      root.removeAttribute("aria-labelledby");
+      if (previouslyFocused && typeof previouslyFocused.focus === "function") {
+        try {
+          previouslyFocused.focus();
+        } catch {
+          /* ignore */
+        }
+      }
+    };
 
     root.replaceChildren(backdrop, dialog);
     root.classList.remove("hidden");
+    // Prefer the first form control; fall back to the close button, then the
+    // dialog itself, so keyboard users are never left on the inert page.
+    const initialFocus =
+      focusableIn(body)[0] || dialog.querySelector(".ui-modal-close") || dialog;
+    initialFocus.focus();
   };
 
   const alertVariantLabel = (variant) => {
@@ -1659,6 +1725,7 @@
       const search = document.createElement("input");
       search.type = "search";
       search.placeholder = "Filter…";
+      search.setAttribute("aria-label", "Filter table rows");
       style(search, {
         padding: "6px 14px",
         borderRadius: "999px",
@@ -1701,23 +1768,41 @@
       headRow.replaceChildren();
       for (const col of columns) {
         const th = document.createElement("th");
+        th.scope = "col";
         const canSort = comp.sortable !== false && col.sortable !== false;
-        const indicator =
-          sortKey === col.accessor_key ? (sortAsc ? " ↑" : " ↓") : canSort ? " ↕" : "";
-        th.textContent = `${col.header}${indicator}`;
+        const isSorted = sortKey === col.accessor_key;
+        const indicator = isSorted ? (sortAsc ? " ↑" : " ↓") : canSort ? " ↕" : "";
+        th.setAttribute("aria-sort", isSorted ? (sortAsc ? "ascending" : "descending") : "none");
         style(th, {
           textAlign: "left",
-          padding: "12px 18px",
+          padding: canSort ? "0" : "12px 18px",
           fontWeight: "500",
           fontSize: "13px",
           letterSpacing: "0.005em",
           color: "var(--dm-text-primary)",
           whiteSpace: "nowrap",
-          cursor: canSort ? "pointer" : "default",
           userSelect: "none",
         });
         if (canSort) {
-          th.addEventListener("click", () => {
+          // A real button so the sort is reachable and operable from the keyboard.
+          const sortBtn = document.createElement("button");
+          sortBtn.type = "button";
+          sortBtn.textContent = `${col.header}${indicator}`;
+          sortBtn.setAttribute(
+            "aria-label",
+            `Sort by ${col.header}${isSorted ? (sortAsc ? ", descending" : ", ascending") : ""}`
+          );
+          style(sortBtn, {
+            all: "unset",
+            display: "block",
+            width: "100%",
+            boxSizing: "border-box",
+            padding: "12px 18px",
+            font: "inherit",
+            color: "inherit",
+            cursor: "pointer",
+          });
+          sortBtn.addEventListener("click", () => {
             if (sortKey === col.accessor_key) sortAsc = !sortAsc;
             else {
               sortKey = col.accessor_key;
@@ -1725,7 +1810,12 @@
             }
             rebuildHeader();
             rebuildBody();
+            // The header was rebuilt; keep keyboard focus on the same column.
+            headRow.children[columns.indexOf(col)]?.querySelector("button")?.focus();
           });
+          th.appendChild(sortBtn);
+        } else {
+          th.textContent = `${col.header}${indicator}`;
         }
         headRow.appendChild(th);
       }
@@ -2097,6 +2187,8 @@
         const wrap = document.createElement("div");
         style(wrap, { display: "flex", flexDirection: "column", gap: "14px" });
         const bar = document.createElement("div");
+        bar.setAttribute("role", "tablist");
+        if (comp.label) bar.setAttribute("aria-label", String(comp.label));
         style(bar, {
           display: "flex",
           gap: "4px",
@@ -2104,19 +2196,26 @@
           paddingBottom: "0",
         });
         const panel = document.createElement("div");
+        panel.setAttribute("role", "tabpanel");
+        panel.tabIndex = 0;
         const tabs = Array.isArray(comp.tabs) ? comp.tabs : [];
+        const tabsId = `ui-tabs-${++uiTabsSeq}`;
         let activeIdx = 0;
 
-        const selectTab = (idx) => {
+        const selectTab = (idx, { focus = false } = {}) => {
           activeIdx = idx;
           Array.from(bar.children).forEach((btn, i) => {
+            const selected = i === activeIdx;
+            btn.setAttribute("aria-selected", selected ? "true" : "false");
+            btn.tabIndex = selected ? 0 : -1;
             style(btn, {
               background: "transparent",
-              color: i === activeIdx ? "var(--dm-text-primary)" : "var(--dm-text-secondary)",
-              borderBottom:
-                i === activeIdx ? "2px solid var(--dm-text-primary)" : "2px solid transparent",
+              color: selected ? "var(--dm-text-primary)" : "var(--dm-text-secondary)",
+              borderBottom: selected ? "2px solid var(--dm-text-primary)" : "2px solid transparent",
             });
+            if (selected && focus) btn.focus();
           });
+          panel.setAttribute("aria-labelledby", `${tabsId}-tab-${idx}`);
           panel.replaceChildren();
           for (const child of tabs[idx]?.content || []) {
             panel.appendChild(renderInnerComponent(child, surfaceRoot, { inModal }));
@@ -2126,6 +2225,9 @@
         tabs.forEach((tab, idx) => {
           const b = document.createElement("button");
           b.type = "button";
+          b.id = `${tabsId}-tab-${idx}`;
+          b.setAttribute("role", "tab");
+          b.setAttribute("aria-controls", `${tabsId}-panel`);
           b.textContent = tab.label || `Tab ${idx + 1}`;
           style(b, {
             border: "0",
@@ -2138,8 +2240,21 @@
             cursor: "pointer",
           });
           b.addEventListener("click", () => selectTab(idx));
+          // Roving tabindex: arrows move between tabs, Home/End jump to the ends.
+          b.addEventListener("keydown", (ev) => {
+            const n = tabs.length;
+            let next = null;
+            if (ev.key === "ArrowRight" || ev.key === "ArrowDown") next = (idx + 1) % n;
+            else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") next = (idx - 1 + n) % n;
+            else if (ev.key === "Home") next = 0;
+            else if (ev.key === "End") next = n - 1;
+            if (next === null) return;
+            ev.preventDefault();
+            selectTab(next, { focus: true });
+          });
           bar.appendChild(b);
         });
+        panel.id = `${tabsId}-panel`;
         wrap.append(bar, panel);
         if (tabs.length) selectTab(0);
         return wrap;

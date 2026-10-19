@@ -3446,6 +3446,9 @@
     digitEl.className = "odometer-digit";
     const ribbon = document.createElement("span");
     ribbon.className = "odometer-ribbon";
+    // The 23-cell reel is purely visual; the counter's accessible value is
+    // the `aria-label` set by `applySlotMachineText`.
+    ribbon.setAttribute("aria-hidden", "true");
     for (const ch of SLOT_REEL_CELLS) {
       const cell = document.createElement("span");
       cell.className = "odometer-cell";
@@ -3503,6 +3506,9 @@
   };
 
   const applySlotMachineText = (el, formattedStr, animate) => {
+    // `role="img"` makes the label authoritative so assistive tech reads the
+    // formatted value once instead of every reel cell / static glyph.
+    el.setAttribute("role", "img");
     el.setAttribute("aria-label", formattedStr);
     if (prefersReducedMotion()) {
       el.classList.remove("odometer");
@@ -4348,15 +4354,18 @@
     let usageEl = parentEl.querySelector(":scope > .message-usage");
     if (usageSig && usage) {
       if (!usageEl) {
-        usageEl = document.createElement("div");
+        usageEl = document.createElement("button");
+        usageEl.type = "button";
         usageEl.className = "message-usage";
+        usageEl.setAttribute("aria-haspopup", "dialog");
+        if (sessionUsagePopover?.id) usageEl.setAttribute("aria-controls", sessionUsagePopover.id);
         usageEl.addEventListener("click", (e) => {
           e.stopPropagation();
           if (sessionUsagePopover && prefs.showSessionUsage) {
-            settingsMenu.classList.add("hidden");
-            userMenu.classList.add("hidden");
+            closePopover(settingsBtn, settingsMenu);
+            closePopover(userBtn, userMenu);
             updateSessionUsageUi();
-            sessionUsagePopover.classList.remove("hidden");
+            openPopover(sessionUsageBtn, sessionUsagePopover);
           }
         });
         parentEl.appendChild(usageEl);
@@ -4743,7 +4752,13 @@
     }
   };
 
+  const canvasTabIdFor = (surfaceId) => `canvas-tab-${surfaceId}`;
+  const canvasPanelIdFor = (surfaceId) => `canvas-panel-${surfaceId}`;
+
   const renderCanvas = () => {
+    // Rebuilding the tablist destroys the focused tab; remember whether focus
+    // was inside so it can be restored on the newly active tab afterwards.
+    const hadTabFocus = canvasTabs.contains(document.activeElement);
     canvasSurfacesEl.replaceChildren();
     canvasTabs.replaceChildren();
 
@@ -4765,10 +4780,27 @@
     canvasEmpty.classList.add("hidden");
     canvasTabs.classList.remove("hidden");
 
-    const allBtn = document.createElement("button");
-    allBtn.type = "button";
-    allBtn.className = `canvas-tab ${prefs.canvasMode === "stacked" ? "active" : ""}`;
-    allBtn.textContent = `All Cards (${canvasSurfaces.length})`;
+    const makeTab = (id, label, isActive, controlsId) => {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.id = canvasTabIdFor(id);
+      tab.className = `canvas-tab ${isActive ? "active" : ""}`;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", String(isActive));
+      tab.setAttribute("aria-controls", controlsId);
+      // Roving tabindex: only the selected tab is in the Tab order.
+      tab.tabIndex = isActive ? 0 : -1;
+      tab.textContent = label;
+      return tab;
+    };
+
+    const allActive = prefs.canvasMode === "stacked";
+    const allBtn = makeTab(
+      "all",
+      `All Cards (${canvasSurfaces.length})`,
+      allActive,
+      canvasSurfacesEl.id || "canvas-surfaces"
+    );
     allBtn.addEventListener("click", () => {
       activeSurfaceId = "all";
       prefs.canvasMode = "stacked";
@@ -4778,10 +4810,8 @@
     canvasTabs.appendChild(allBtn);
 
     canvasSurfaces.forEach((surf) => {
-      const tab = document.createElement("button");
-      tab.type = "button";
-      tab.className = `canvas-tab ${prefs.canvasMode === "focused" && activeSurfaceId === surf.id ? "active" : ""}`;
-      tab.textContent = surf.title;
+      const isActive = prefs.canvasMode === "focused" && activeSurfaceId === surf.id;
+      const tab = makeTab(surf.id, surf.title, isActive, canvasPanelIdFor(surf.id));
       tab.addEventListener("click", () => {
         focusSurfaceOnCanvas(surf.id);
       });
@@ -4796,13 +4826,38 @@
     for (const surf of visibleSurfaces) {
       const group = document.createElement("div");
       group.setAttribute("data-surface-id", surf.id);
+      group.id = canvasPanelIdFor(surf.id);
+      group.setAttribute("role", "tabpanel");
+      group.setAttribute("aria-labelledby", canvasTabIdFor(allActive ? "all" : surf.id));
       style(group, { display: "flex", flexDirection: "column", gap: "14px" });
       for (const card of surf.cards) {
         group.appendChild(card);
       }
       canvasSurfacesEl.appendChild(group);
     }
+
+    if (hadTabFocus) {
+      const selected = canvasTabs.querySelector('[role="tab"][aria-selected="true"]');
+      if (selected) selected.focus();
+    }
   };
+
+  // Arrow / Home / End move between canvas tabs and activate the target
+  // (activation re-renders, which re-focuses the selected tab above).
+  canvasTabs.addEventListener("keydown", (e) => {
+    const tabs = Array.from(canvasTabs.querySelectorAll('[role="tab"]'));
+    if (!tabs.length) return;
+    const idx = tabs.indexOf(document.activeElement);
+    let next;
+    if (e.key === "ArrowRight") next = idx < 0 ? 0 : (idx + 1) % tabs.length;
+    else if (e.key === "ArrowLeft") next = idx < 0 ? tabs.length - 1 : (idx - 1 + tabs.length) % tabs.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = tabs.length - 1;
+    else return;
+    e.preventDefault();
+    tabs[next].focus();
+    tabs[next].click();
+  });
 
   exportUiBtn.addEventListener("click", () => {
     if (!canvasSurfaces.length) return;
@@ -4929,6 +4984,21 @@
     }
   };
 
+  // Polite screen-reader announcement via the visually hidden `#sr-announcer`
+  // live region (null-guarded: the element lives in studio.html). Clearing
+  // first makes a repeated identical message re-announce.
+  let announceTimer = null;
+  const announce = (text) => {
+    const el = $("sr-announcer");
+    if (!el) return;
+    if (announceTimer) clearTimeout(announceTimer);
+    el.textContent = "";
+    announceTimer = setTimeout(() => {
+      announceTimer = null;
+      el.textContent = text;
+    }, 50);
+  };
+
   const sendMessage = async (overrideText) => {
     if (isRunning) return;
     if (!currentUser || !activeSession) return;
@@ -5051,7 +5121,12 @@
         // Flush whatever the last frame did not get to before reloading.
         flushStreamRender();
       }
-      if (activeSession?.id === runSession.id) await loadSession(runSession.id);
+      if (activeSession?.id === runSession.id) {
+        // Single polite announcement per completed turn (the transcript
+        // itself is no longer a live region).
+        announce("Agent replied");
+        await loadSession(runSession.id);
+      }
     } catch (err) {
       if (err.name !== "AbortError") {
         failed = true;
@@ -5093,36 +5168,98 @@
   // Popovers, Settings Controls & Split-Pane Resizer
   // ---------------------------------------------------------------------------
 
+  // Popovers are plain `.hidden`-toggled cards. `aria-expanded` on each
+  // trigger is kept in sync by observing the popover's class attribute, so
+  // every code path that hides a popover (outside click, settings toggles,
+  // other popovers opening) stays consistent without threading a helper
+  // through all of them. Focus moves into the popover on open and returns to
+  // the trigger on close (including Escape).
+  const FOCUSABLE_SELECTOR =
+    'button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  const isPopoverOpen = (popover) => Boolean(popover && !popover.classList.contains("hidden"));
+
+  const openPopover = (trigger, popover) => {
+    if (!popover || isPopoverOpen(popover)) return;
+    popover.classList.remove("hidden");
+    const first = popover.querySelector(FOCUSABLE_SELECTOR);
+    if (first) {
+      first.focus();
+    } else {
+      if (!popover.hasAttribute("tabindex")) popover.setAttribute("tabindex", "-1");
+      popover.focus();
+    }
+  };
+
+  const closePopover = (trigger, popover) => {
+    if (!popover || !isPopoverOpen(popover)) return;
+    const hadFocus = popover.contains(document.activeElement);
+    popover.classList.add("hidden");
+    if (hadFocus && trigger && typeof trigger.focus === "function") trigger.focus();
+  };
+
+  const bindPopoverTrigger = (trigger, popover) => {
+    if (!trigger || !popover) return;
+    if (popover.id && !trigger.hasAttribute("aria-controls")) {
+      trigger.setAttribute("aria-controls", popover.id);
+    }
+    const syncExpanded = () =>
+      trigger.setAttribute("aria-expanded", String(isPopoverOpen(popover)));
+    syncExpanded();
+    if (typeof MutationObserver === "function") {
+      new MutationObserver(syncExpanded).observe(popover, {
+        attributes: true,
+        attributeFilter: ["class"],
+      });
+    }
+  };
+
+  bindPopoverTrigger(settingsBtn, settingsMenu);
+  bindPopoverTrigger(userBtn, userMenu);
+  bindPopoverTrigger(sessionUsageBtn, sessionUsagePopover);
+
   settingsBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    userMenu.classList.add("hidden");
-    if (sessionUsagePopover) sessionUsagePopover.classList.add("hidden");
-    settingsMenu.classList.toggle("hidden");
+    closePopover(userBtn, userMenu);
+    closePopover(sessionUsageBtn, sessionUsagePopover);
+    if (isPopoverOpen(settingsMenu)) {
+      closePopover(settingsBtn, settingsMenu);
+    } else {
+      openPopover(settingsBtn, settingsMenu);
+    }
   });
 
   userBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    settingsMenu.classList.add("hidden");
-    if (sessionUsagePopover) sessionUsagePopover.classList.add("hidden");
-    userMenu.classList.toggle("hidden");
+    closePopover(settingsBtn, settingsMenu);
+    closePopover(sessionUsageBtn, sessionUsagePopover);
+    if (isPopoverOpen(userMenu)) {
+      closePopover(userBtn, userMenu);
+    } else {
+      openPopover(userBtn, userMenu);
+    }
   });
 
   if (sessionUsageBtn && sessionUsagePopover) {
     sessionUsageBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      settingsMenu.classList.add("hidden");
-      userMenu.classList.add("hidden");
+      closePopover(settingsBtn, settingsMenu);
+      closePopover(userBtn, userMenu);
       updateSessionUsageUi();
-      sessionUsagePopover.classList.toggle("hidden");
+      if (isPopoverOpen(sessionUsagePopover)) {
+        closePopover(sessionUsageBtn, sessionUsagePopover);
+      } else {
+        openPopover(sessionUsageBtn, sessionUsagePopover);
+      }
     });
   }
 
   document.addEventListener("click", (e) => {
     if (!settingsMenu.contains(e.target) && e.target !== settingsBtn) {
-      settingsMenu.classList.add("hidden");
+      closePopover(settingsBtn, settingsMenu);
     }
     if (!userMenu.contains(e.target) && e.target !== userBtn) {
-      userMenu.classList.add("hidden");
+      closePopover(userBtn, userMenu);
     }
     if (
       sessionUsagePopover &&
@@ -5130,7 +5267,22 @@
       !sessionUsagePopover.contains(e.target) &&
       !sessionUsageBtn.contains(e.target)
     ) {
-      sessionUsagePopover.classList.add("hidden");
+      closePopover(sessionUsageBtn, sessionUsagePopover);
+    }
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const pairs = [
+      [settingsBtn, settingsMenu],
+      [userBtn, userMenu],
+      [sessionUsageBtn, sessionUsagePopover],
+    ];
+    for (const [trigger, popover] of pairs) {
+      if (isPopoverOpen(popover)) {
+        closePopover(trigger, popover);
+        e.preventDefault();
+      }
     }
   });
 
@@ -5307,26 +5459,73 @@
     });
   }
 
-  // Split-Pane Resizer
-  let isResizing = false;
-  paneResizer.addEventListener("mousedown", (e) => {
-    e.preventDefault();
-    isResizing = true;
-    paneResizer.classList.add("dragging");
-  });
-  window.addEventListener("mousemove", (e) => {
-    if (!isResizing) return;
-    const pct = Math.min(68, Math.max(28, (e.clientX / window.innerWidth) * 100));
-    const val = `${pct.toFixed(1)}%`;
+  // Split-Pane Resizer (pointer + keyboard; persisted once per gesture)
+  const LEFT_PANE_MIN_PCT = 28;
+  const LEFT_PANE_MAX_PCT = 68;
+  const clampLeftPanePct = (pct) =>
+    Math.min(LEFT_PANE_MAX_PCT, Math.max(LEFT_PANE_MIN_PCT, pct));
+  const readLeftPanePct = () => {
+    const raw = getComputedStyle(document.documentElement).getPropertyValue("--left-pane-width");
+    const n = parseFloat(raw);
+    return Number.isFinite(n) ? clampLeftPanePct(n) : 44;
+  };
+  let leftPanePct = readLeftPanePct();
+  const currentLeftPanePct = () => leftPanePct;
+  const setLeftPanePct = (pct, { persist = false } = {}) => {
+    const clamped = clampLeftPanePct(pct);
+    leftPanePct = clamped;
+    const val = `${clamped.toFixed(1)}%`;
     document.documentElement.style.setProperty("--left-pane-width", val);
-    localStorage.setItem(STORAGE_KEYS.leftWidth, val);
-  });
-  window.addEventListener("mouseup", () => {
-    if (isResizing) {
-      isResizing = false;
+    if (paneResizer) paneResizer.setAttribute("aria-valuenow", String(Math.round(clamped)));
+    if (persist) localStorage.setItem(STORAGE_KEYS.leftWidth, val);
+    return clamped;
+  };
+  if (paneResizer) {
+    paneResizer.setAttribute("aria-valuemin", String(LEFT_PANE_MIN_PCT));
+    paneResizer.setAttribute("aria-valuemax", String(LEFT_PANE_MAX_PCT));
+    paneResizer.setAttribute("aria-valuenow", String(Math.round(currentLeftPanePct())));
+
+    let resizePointerId = null;
+    paneResizer.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 && e.pointerType === "mouse") return;
+      e.preventDefault();
+      resizePointerId = e.pointerId;
+      paneResizer.classList.add("dragging");
+      try {
+        paneResizer.setPointerCapture(e.pointerId);
+      } catch {
+        /* capture is best-effort (e.g. pointer already released) */
+      }
+    });
+    paneResizer.addEventListener("pointermove", (e) => {
+      if (resizePointerId === null || e.pointerId !== resizePointerId) return;
+      setLeftPanePct((e.clientX / window.innerWidth) * 100);
+    });
+    const endResize = (e) => {
+      if (resizePointerId === null || e.pointerId !== resizePointerId) return;
+      resizePointerId = null;
       paneResizer.classList.remove("dragging");
-    }
-  });
+      try {
+        paneResizer.releasePointerCapture(e.pointerId);
+      } catch {
+        /* already released */
+      }
+      setLeftPanePct(currentLeftPanePct(), { persist: true });
+    };
+    paneResizer.addEventListener("pointerup", endResize);
+    paneResizer.addEventListener("pointercancel", endResize);
+
+    paneResizer.addEventListener("keydown", (e) => {
+      let delta;
+      if (e.key === "ArrowLeft") delta = -(e.shiftKey ? 10 : 2);
+      else if (e.key === "ArrowRight") delta = e.shiftKey ? 10 : 2;
+      else if (e.key === "Home") delta = LEFT_PANE_MIN_PCT - currentLeftPanePct();
+      else if (e.key === "End") delta = LEFT_PANE_MAX_PCT - currentLeftPanePct();
+      else return;
+      e.preventDefault();
+      setLeftPanePct(currentLeftPanePct() + delta, { persist: true });
+    });
+  }
 
   // ---------------------------------------------------------------------------
   // Interactive Canvas Stage (Argon Dotted Grid WebGL Stage)
@@ -5442,6 +5641,12 @@
       darkMq.addEventListener("change", () => {
         if (prefs.theme === "system") syncCanvasStageTheme();
       });
+    }
+    // Pause/resume the stages live when the OS reduced-motion setting flips;
+    // `syncActiveStage` re-reads `prefersReducedMotion()`.
+    const motionMq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (typeof motionMq.addEventListener === "function") {
+      motionMq.addEventListener("change", () => syncActiveStage());
     }
   }
 

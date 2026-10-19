@@ -5085,9 +5085,9 @@
 
       if (resp.body) {
         for await (const dataStr of parseSseStream(resp.body)) {
-          if (activeSession?.id !== runSession.id) {
+          if (abortController.signal.aborted || activeSession?.id !== runSession.id) {
             // The user switched sessions; stop streaming into the wrong one.
-            abortController?.abort();
+            abortController.abort();
             break;
           }
           if (!dataStr || dataStr === "[DONE]") continue;
@@ -5121,7 +5121,11 @@
         // Flush whatever the last frame did not get to before reloading.
         flushStreamRender();
       }
-      if (activeSession?.id === runSession.id) {
+      // Reload only if nobody switched away meanwhile. `loadSession` aborts the
+      // controller on an explicit switch before `activeSession` changes, so the
+      // signal is checked too; otherwise this reload would supersede the
+      // user's pending switch.
+      if (!abortController.signal.aborted && activeSession?.id === runSession.id) {
         // Single polite announcement per completed turn (the transcript
         // itself is no longer a live region).
         announce("Agent replied");

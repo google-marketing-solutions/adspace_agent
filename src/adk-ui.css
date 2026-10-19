@@ -140,6 +140,12 @@
 /* Markdown bodies (markdown.js): chat bubbles in the studio and multi-line
    `text` components in adk-ui cards. Named `adk-ui-md` rather than
    `message-text` because the ADK web UI already styles `.message-text`. */
+.adk-ui-md {
+  /* Card bodies used to inherit this from `.message-text`; keep long
+     unbroken tokens (URLs, ids) wrapping inside narrow cards. */
+  overflow-wrap: anywhere;
+}
+
 .adk-ui-md > :first-child {
   margin-top: 0;
 }

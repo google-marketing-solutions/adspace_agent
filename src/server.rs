@@ -1386,7 +1386,9 @@ mod tests {
         // served from `/oauth2/`, so the imports must be absolute `/app/` URLs.
         assert!(helper.contains("from \"/app/adk-ui/index.js\""));
         assert!(helper.contains("extractUiResponse"));
-        assert!(helper.contains("href = SHARED_CSS_PATH") && helper.contains("\"/app/adk-ui.css\""));
+        assert!(
+            helper.contains("href = SHARED_CSS_PATH") && helper.contains("\"/app/adk-ui.css\"")
+        );
         assert!(!helper.contains("const renderInnerComponent"));
         assert!(helper.contains("Element.prototype.scrollTo"));
         // Must match the text `resume_message` produces.

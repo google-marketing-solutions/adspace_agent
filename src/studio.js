@@ -5137,7 +5137,13 @@
         showError(`Agent request failed: ${err.message || err}`);
       }
     } finally {
-      cancelStreamRender();
+      // Paint whatever the last frame did not get to (e.g. after stopRun(),
+      // which skips the post-loop flush); drop it if the user switched away.
+      if (activeSession?.id === runSession.id) {
+        flushStreamRender();
+      } else {
+        cancelStreamRender();
+      }
       isRunning = false;
       abortController = null;
       sendBtn.classList.remove("stop-button");

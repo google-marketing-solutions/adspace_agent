@@ -31,6 +31,8 @@
   const ACK_PATH = "/oauth2/ack";
   const RESUME_MARKER = "Google access has been granted for this chat";
   const SVG_NS = "http://www.w3.org/2000/svg";
+  // `input_type` values a `text_input` component may request (anything else → "text").
+  const SAFE_INPUT_TYPES = ["text", "email", "url", "tel", "password", "search", "number"];
 
   // Series palette harmonized with ADK Web UI's `--accent-primary` (#0f8a8a / #4fd1c5).
   const PALETTE = [
@@ -49,6 +51,8 @@
   // `request_id`s of `auth_required` events already handled (the event carries
   // only the consent URL and this opaque id, never the signed OAuth state).
   const handledRequests = new Set();
+  // Upper bound on `handledRequests` (oldest ids are evicted first).
+  const MAX_HANDLED_REQUESTS = 200;
   let popup = null;
   let modal = null;
 
@@ -57,12 +61,73 @@
     for (const [k, v] of Object.entries(props)) el.style[k] = v;
   };
 
+  // Adds/removes a class only when it actually changes (keeps `class` attribute
+  // churn on React-owned nodes to a minimum).
+  const toggleClass = (el, cls, on) => {
+    if (!el || !el.classList) return;
+    if (on) {
+      if (!el.classList.contains(cls)) el.classList.add(cls);
+    } else if (el.classList.contains(cls)) {
+      el.classList.remove(cls);
+    }
+  };
+
+  // Inline `<style>` text is also blocked by CSP, but `CSSStyleSheet.insertRule`
+  // (CSSOM) is not: rules that must target React-owned nodes by class live here.
+  const helperSheet = (() => {
+    try {
+      const el = document.createElement("style");
+      el.setAttribute("data-adspace-helper", "");
+      (document.head || document.documentElement).appendChild(el);
+      return el.sheet;
+    } catch {
+      return null;
+    }
+  })();
+  const addRules = (rules) => {
+    if (!helperSheet) return;
+    for (const rule of rules) {
+      try {
+        helperSheet.insertRule(rule, helperSheet.cssRules.length);
+      } catch {
+        /* selector unsupported by this browser: skip the rule */
+      }
+    }
+  };
+
+  // Layout for `<article class="message">` blocks that hold `render_*` UI cards.
+  // React owns the article's children, so they are never re-parented: the
+  // article gets one state class and each run of visible non-card children is
+  // tagged `adk-ui-seg[-start|-end]` so the chat-bubble chrome is drawn by CSS.
+  const BUBBLE_BORDER = "1px solid var(--border-default)";
+  addRules([
+    ".adk-ui-hidden { display: none !important; }",
+    "article.message.adk-ui-unboxed, article.message.adk-ui-split { display: flex; flex-direction: column; background: transparent; border: 0; box-shadow: none; border-radius: 0; min-height: 0; overflow: visible; }",
+    "article.message.adk-ui-unboxed { gap: 14px; }",
+    "article.message.adk-ui-unboxed > header { display: none; }",
+    `article.message.adk-ui-split > .adk-ui-seg { background: var(--surface-card); border-left: ${BUBBLE_BORDER}; border-right: ${BUBBLE_BORDER}; }`,
+    `article.message.adk-ui-split > .adk-ui-seg-start { border-top: ${BUBBLE_BORDER}; border-top-left-radius: 10px; border-top-right-radius: 10px; }`,
+    `article.message.adk-ui-split > .adk-ui-seg-end { border-bottom: ${BUBBLE_BORDER}; border-bottom-left-radius: 10px; border-bottom-right-radius: 10px; }`,
+    "article.message.adk-ui-split > .adk-ui-card ~ .adk-ui-seg-start, article.message.adk-ui-split > .adk-ui-seg ~ .adk-ui-card, article.message.adk-ui-split > .adk-ui-card ~ .adk-ui-card { margin-top: 14px; }",
+  ]);
+
   // Prevent `/ui/`'s 4-second session poll (`useEffect([events])`) from yanking
   // `.transcript` to the bottom via `C.current.scrollTo({ top: scrollHeight })`.
+  // Only swallowed while the user has scrolled up to read (> 80px from the
+  // bottom); when they are already at the bottom the call is harmless and
+  // keeps new messages in view. Trade-off: a *deliberate* scroll-to-bottom
+  // (e.g. on a new message) is also suppressed while the user is scrolled up,
+  // which is what a reader expects anyway.
+  const SCROLL_PIN_SLACK_PX = 80;
   const origScrollTo = Element.prototype.scrollTo;
   if (typeof origScrollTo === "function") {
     Element.prototype.scrollTo = function (...args) {
-      if (this && this.classList && this.classList.contains("transcript")) {
+      if (
+        this &&
+        this.classList &&
+        this.classList.contains("transcript") &&
+        this.scrollHeight - this.scrollTop - this.clientHeight > SCROLL_PIN_SLACK_PX
+      ) {
         return;
       }
       return origScrollTo.apply(this, args);
@@ -194,11 +259,26 @@
 
   const handleAuthRequired = async (data) => {
     if (!data || !data.auth_url || !data.request_id) return;
+    // Only ever open Google's consent screen, whatever the event says.
+    if (!String(data.auth_url).startsWith(AUTH_PREFIX)) return;
     if (handledRequests.has(data.request_id)) return;
     handledRequests.add(data.request_id);
+    while (handledRequests.size > MAX_HANDLED_REQUESTS) {
+      handledRequests.delete(handledRequests.values().next().value);
+    }
 
     const win = openPopup(data.auth_url);
     const opened = !!win;
+    if (win) {
+      // Some popup blockers hand back a window and close it right away;
+      // re-check after a tick and fall back to the modal in that case
+      // (`popup !== win` means the flow already completed and closed it).
+      setTimeout(() => {
+        if (win.closed && popup === win) {
+          showFallbackModal(data.auth_url, data.scopes);
+        }
+      }, 500);
+    }
     try {
       const resp = await fetch(ACK_PATH, {
         method: "POST",
@@ -1616,6 +1696,8 @@
           field.replaceChildren(row);
         } else {
           control = document.createElement("input");
+          // `input_type` comes from tool output: only allow plain text-like types.
+          const requested = String(comp.input_type || "text").toLowerCase();
           control.type =
             type === "number_input"
               ? "number"
@@ -1623,7 +1705,9 @@
                 ? "date"
                 : type === "slider"
                   ? "range"
-                  : comp.input_type || "text";
+                  : SAFE_INPUT_TYPES.includes(requested)
+                    ? requested
+                    : "text";
           if (comp.placeholder) control.placeholder = comp.placeholder;
           if (comp.min !== undefined && comp.min !== null) control.min = String(comp.min);
           if (comp.max !== undefined && comp.max !== null) control.max = String(comp.max);
@@ -1958,7 +2042,7 @@
     if (comp.dismissible !== false) {
       const closeBtn = document.createElement("button");
       closeBtn.type = "button";
-      closeBtn.innerHTML = "&times;";
+      closeBtn.textContent = "\u00d7";
       style(closeBtn, {
         border: "0",
         background: "transparent",
@@ -2015,74 +2099,90 @@
   // Promotes an `<article class="message">` into a clean unboxed slot when it
   // only holds `render_*` calls/results, so UI cards sit directly in `.transcript`
   // as their own standalone cards instead of inside a chat bubble.
+  const ARTICLE_STATES = ["adk-ui-hidden", "adk-ui-unboxed", "adk-ui-split"];
+  const SEGMENT_CLASSES = ["adk-ui-seg", "adk-ui-seg-start", "adk-ui-seg-end"];
+
+  const setArticleState = (article, state) => {
+    for (const cls of ARTICLE_STATES) toggleClass(article, cls, cls === state);
+  };
+
+  // Tags each run of visible, non-card children as a bubble segment (see the
+  // `adk-ui-split` rules). Only classes are touched; children stay in place.
+  const markSegments = (article, enabled) => {
+    let runStart = true;
+    let last = null;
+    for (const ch of Array.from(article.children)) {
+      if (ch.classList.contains("adk-ui-card")) {
+        if (last) toggleClass(last, "adk-ui-seg-end", true);
+        last = null;
+        runStart = true;
+        continue;
+      }
+      if (!enabled || ch.classList.contains("adk-ui-hidden")) {
+        for (const cls of SEGMENT_CLASSES) toggleClass(ch, cls, false);
+        continue;
+      }
+      toggleClass(ch, "adk-ui-seg", true);
+      toggleClass(ch, "adk-ui-seg-start", runStart);
+      toggleClass(ch, "adk-ui-seg-end", false);
+      runStart = false;
+      last = ch;
+    }
+    if (last) toggleClass(last, "adk-ui-seg-end", true);
+  };
+
   const promoteArticleIfPureUi = (article) => {
     if (!article) return;
     const hasText = !!article.querySelector(".message-text");
     const visibleTools = Array.from(article.querySelectorAll("details.tool-call")).filter(
-      (d) => d.style.display !== "none"
+      (d) => !d.classList.contains("adk-ui-hidden")
     );
     const uiCards = article.querySelectorAll(".adk-ui-card");
 
     if (!hasText && visibleTools.length === 0) {
       if (uiCards.length === 0) {
         // Pure `Tool · render_*` call message with no text and no rendered cards: hide completely.
-        style(article, { display: "none" });
+        setArticleState(article, "adk-ui-hidden");
       } else {
         // Pure `render_*` result message: strip outer chat bubble chrome so cards are standalone.
-        const hdr = article.querySelector(":scope > header");
-        if (hdr) style(hdr, { display: "none" });
-        style(article, {
-          display: "flex",
-          flexDirection: "column",
-          gap: "14px",
-          background: "transparent",
-          border: "0",
-          boxShadow: "none",
-          borderRadius: "0",
-          minHeight: "0",
-          overflow: "visible",
-        });
+        setArticleState(article, "adk-ui-unboxed");
       }
+      markSegments(article, false);
       return;
     }
 
     // Article has text or non-UI tool calls.
     if (uiCards.length === 0) {
-      style(article, { display: "" });
+      setArticleState(article, null);
+      markSegments(article, false);
       return;
     }
 
     // Article has both chat content AND UI cards: separate the chat bubble from standalone UI cards.
-    const hdr = article.querySelector("header");
-    if (hdr) style(hdr, { display: "" });
-    let bubble = article.querySelector(":scope > .adk-ui-chat-bubble");
-    if (!bubble) {
-      bubble = document.createElement("div");
-      bubble.className = "adk-ui-chat-bubble";
-      style(bubble, {
-        border: "1px solid var(--border-default)",
-        borderRadius: "10px",
-        background: "var(--surface-card)",
-        boxShadow: "var(--shadow-sm)",
-        overflow: "hidden",
-      });
-      article.insertBefore(bubble, article.firstChild);
+    setArticleState(article, "adk-ui-split");
+    markSegments(article, true);
+  };
+
+  // Articles whose layout must be re-evaluated, processed once per frame.
+  const dirtyArticles = new Set();
+  let flushScheduled = false;
+  const flushDirtyArticles = () => {
+    flushScheduled = false;
+    const batch = Array.from(dirtyArticles);
+    dirtyArticles.clear();
+    for (const article of batch) {
+      if (article.isConnected && article.querySelector(".adk-ui-card, details.tool-call")) {
+        promoteArticleIfPureUi(article);
+      }
     }
-    const toMove = Array.from(article.children).filter(
-      (ch) => ch !== bubble && !ch.classList.contains("adk-ui-card")
-    );
-    for (const ch of toMove) bubble.appendChild(ch);
-    style(article, {
-      display: "flex",
-      flexDirection: "column",
-      gap: "14px",
-      background: "transparent",
-      border: "0",
-      boxShadow: "none",
-      borderRadius: "0",
-      minHeight: "0",
-      overflow: "visible",
-    });
+  };
+  const markArticleDirty = (article) => {
+    if (!article) return;
+    dirtyArticles.add(article);
+    if (!flushScheduled) {
+      flushScheduled = true;
+      requestAnimationFrame(flushDirtyArticles);
+    }
   };
 
   const wireToolDetails = (details) => {
@@ -2100,25 +2200,28 @@
 
     const article = details.closest("article.message");
 
+    // A `render_*` *result* (`{ components }`, possibly wrapped in `response` /
+    // `result`) is rendered as cards. Checked before the call-hiding branch
+    // because such a block may also carry `name: "render_*"`.
+    const uiResp = extractUiResponse(parsed);
+    if (uiResp) {
+      toggleClass(details, "adk-ui-hidden", true);
+      const cards = buildStandaloneCards(uiResp);
+      const parent = details.parentNode;
+      for (const card of cards) {
+        parent?.insertBefore(card, details);
+      }
+      markArticleDirty(article);
+      return;
+    }
+
     // Hide `Tool · render_*` functionCall blocks so only the rendered UI cards appear.
     const callName =
       parsed?.name || parsed?.functionCall?.name || parsed?.function_call?.name || "";
     if (typeof callName === "string" && callName.startsWith("render_")) {
-      style(details, { display: "none" });
-      promoteArticleIfPureUi(article);
-      return;
+      toggleClass(details, "adk-ui-hidden", true);
+      markArticleDirty(article);
     }
-
-    const uiResp = extractUiResponse(parsed);
-    if (!uiResp) return;
-
-    style(details, { display: "none" });
-    const cards = buildStandaloneCards(uiResp);
-    const parent = article || details.parentNode;
-    for (const card of cards) {
-      parent?.insertBefore(card, details);
-    }
-    promoteArticleIfPureUi(article);
   };
 
   // If an OAuth link is ever clicked directly in the chat transcript, open it
@@ -2148,13 +2251,17 @@
       root.querySelectorAll("details.tool-call").forEach(wireToolDetails);
     }
     const parentArticle = root.closest ? root.closest("article.message") : null;
-    if (parentArticle && parentArticle.querySelector(".adk-ui-card, details.tool-call")) {
-      promoteArticleIfPureUi(parentArticle);
-    }
+    if (parentArticle) markArticleDirty(parentArticle);
   };
 
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
+      if (mutation.type === "characterData") {
+        // A tool `<pre>` whose JSON was still streaming: retry once the text changes.
+        const details = mutation.target.parentElement?.closest("details.tool-call");
+        if (details) wireToolDetails(details);
+        continue;
+      }
       for (const node of mutation.addedNodes) {
         if (node.nodeType !== Node.ELEMENT_NODE) continue;
         scan(node);
@@ -2164,6 +2271,6 @@
       }
     }
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
   scan(document.body);
 })();

@@ -26,12 +26,14 @@
 import { onStatusChange } from "./status.js";
 import { applyPreferences, bindPreferenceRenderers, syncSettingsAvailability } from "./prefs.js";
 import { initCanvasStage, syncStageStreaming } from "./stage-bridge.js";
-import { bindModalComponentRenderer } from "./adk-ui/modal.js";
+import { bindModalComponentRenderer, bindModalHost } from "./adk-ui/modal.js";
 import { bindSendMessage, renderInnerComponent } from "./adk-ui/components.js";
 import { updateSessionUsageUi } from "./usage/session-usage.js";
 import { renderCanvas, renderTranscript } from "./transcript.js";
 import { checkAuthStatus } from "./auth.js";
 import { sendMessage } from "./sse.js";
+import { $ } from "./dom.js";
+import { els, state } from "./state.js";
 // Side-effect-only modules (they register their own listeners at load time).
 import "./oauth-popup.js";
 import "./settings-ui.js";
@@ -41,7 +43,11 @@ import "./settings-ui.js";
 onStatusChange(syncStageStreaming);
 bindPreferenceRenderers({ renderTranscript, renderCanvas, updateSessionUsageUi });
 bindModalComponentRenderer(renderInnerComponent);
-bindSendMessage(sendMessage);
+// Host adapter for the shared `adk-ui` renderer (the `/ui/` helper supplies
+// its own in ui-helper.js): where the modal mounts / what it makes inert, how
+// a UI button sends, and when sending must be refused.
+bindModalHost({ root: $("ui-modal-root"), inertTarget: els.workspace });
+bindSendMessage(sendMessage, { isBusy: () => state.isRunning });
 
 // Initialize
 applyPreferences();

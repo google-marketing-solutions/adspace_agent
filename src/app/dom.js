@@ -90,9 +90,44 @@ export const focusableIn = (container) =>
       )
     : [];
 
+// Icons are Google Symbols ligatures by default. A host whose CSP cannot load
+// the icon font (`/ui/`) swaps in its own renderer via `bindIconRenderer`;
+// returning a falsy value from it falls back to the ligature span.
+let iconRenderer = null;
+export const bindIconRenderer = (fn) => {
+  iconRenderer = fn;
+};
+
+export const createIcon = (name, { filled = false, size = null } = {}) => {
+  const custom = iconRenderer ? iconRenderer(name, { filled, size }) : null;
+  if (custom) return custom;
+  const span = document.createElement("span");
+  span.className = filled ? "google-symbols filled" : "google-symbols";
+  span.setAttribute("aria-hidden", "true");
+  span.textContent = name;
+  if (size) style(span, { fontSize: `${size}px` });
+  return span;
+};
+
+// The toast stack is `#toast-stack` in studio.html; a host page that does not
+// ship one (`/ui/`) gets an identical element appended to `<body>` on first use.
+const toastStack = () => {
+  let stack = $("toast-stack");
+  if (!stack && document.body) {
+    stack = document.createElement("div");
+    stack.id = "toast-stack";
+    stack.className = "toast-stack";
+    stack.setAttribute("aria-live", "polite");
+    stack.setAttribute("aria-atomic", "false");
+    document.body.appendChild(stack);
+  }
+  return stack;
+};
+
 export const showToast = (comp) => {
-  const stack = $("toast-stack");
-  if (!stack || !comp) return;
+  if (!comp) return;
+  const stack = toastStack();
+  if (!stack) return;
   const vc = variantColors(comp.variant);
   const toast = document.createElement("div");
   toast.className = "ui-toast";
@@ -101,11 +136,7 @@ export const showToast = (comp) => {
   const iconWrap = document.createElement("span");
   iconWrap.className = "ui-toast-icon";
   style(iconWrap, { color: vc.fg });
-  const icon = document.createElement("span");
-  icon.className = "google-symbols filled";
-  icon.setAttribute("aria-hidden", "true");
-  icon.textContent = variantIconName(comp.variant);
-  iconWrap.appendChild(icon);
+  iconWrap.appendChild(createIcon(variantIconName(comp.variant), { filled: true }));
 
   const body = document.createElement("div");
   body.className = "ui-toast-body";

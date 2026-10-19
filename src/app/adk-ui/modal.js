@@ -12,12 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// `adk-ui` modal overlay (dialog / confirm cards) with focus trap and inert workspace.
+// `adk-ui` modal overlay (dialog / confirm cards) with focus trap and inert host content.
 
-import { $, focusableIn, style } from "../dom.js";
-import { els } from "../state.js";
+import { $, createIcon, focusableIn, style } from "../dom.js";
 
 let activeModalCleanup = null;
+
+// Host binding: where the overlay mounts and what becomes `inert` while it is
+// open. Defaults suit a page that ships `#ui-modal-root` (studio.html); the
+// studio passes its workspace as `inertTarget`, `/ui/` passes the React root.
+let modalHost = { root: null, inertTarget: null };
+export const bindModalHost = ({ root = null, inertTarget = null } = {}) => {
+  modalHost = { root, inertTarget };
+};
+const modalRoot = () => modalHost.root || $("ui-modal-root");
 
 // Late binding: `renderInnerComponent` (adk-ui/components.js) sits above this
 // module and itself calls `closeModalOverlay`, so app.js injects it via
@@ -28,7 +36,7 @@ export const bindModalComponentRenderer = (fn) => {
 };
 
 export const closeModalOverlay = () => {
-  const root = $("ui-modal-root");
+  const root = modalRoot();
   if (activeModalCleanup) {
     activeModalCleanup();
     activeModalCleanup = null;
@@ -40,7 +48,7 @@ export const closeModalOverlay = () => {
 };
 
 export const showModalOverlay = (spec, { isConfirm = false } = {}) => {
-  const root = $("ui-modal-root");
+  const root = modalRoot();
   if (!root || !spec) return;
   closeModalOverlay();
 
@@ -82,12 +90,7 @@ export const showModalOverlay = (spec, { isConfirm = false } = {}) => {
       justifyContent: "center",
       flexShrink: "0",
     });
-    const warnIcon = document.createElement("span");
-    warnIcon.className = "google-symbols filled";
-    warnIcon.setAttribute("aria-hidden", "true");
-    warnIcon.textContent = "warning";
-    style(warnIcon, { fontSize: "19px" });
-    warnChip.appendChild(warnIcon);
+    warnChip.appendChild(createIcon("warning", { filled: true, size: 19 }));
     titleWrap.appendChild(warnChip);
   }
 
@@ -102,12 +105,7 @@ export const showModalOverlay = (spec, { isConfirm = false } = {}) => {
     closeBtn.type = "button";
     closeBtn.className = "ui-modal-close";
     closeBtn.setAttribute("aria-label", "Close dialog");
-    const closeSym = document.createElement("span");
-    closeSym.className = "google-symbols";
-    closeSym.setAttribute("aria-hidden", "true");
-    closeSym.textContent = "close";
-    style(closeSym, { fontSize: "18px" });
-    closeBtn.appendChild(closeSym);
+    closeBtn.appendChild(createIcon("close", { size: 18 }));
     closeBtn.addEventListener("click", closeModalOverlay);
     hdr.appendChild(closeBtn);
   }
@@ -157,16 +155,17 @@ export const showModalOverlay = (spec, { isConfirm = false } = {}) => {
   };
   window.addEventListener("keydown", onKeyDown);
 
-  // Focus management: remember the opener, make the workspace inert, move
+  // Focus management: remember the opener, make the host content inert, move
   // focus into the dialog, and restore it all in `closeModalOverlay`.
   const previouslyFocused = document.activeElement;
+  const { inertTarget } = modalHost;
   titleEl.id = "ui-modal-title";
   root.setAttribute("aria-labelledby", "ui-modal-title");
   dialog.tabIndex = -1;
-  if (els.workspace) els.workspace.inert = true;
+  if (inertTarget) inertTarget.inert = true;
   activeModalCleanup = () => {
     window.removeEventListener("keydown", onKeyDown);
-    if (els.workspace) els.workspace.inert = false;
+    if (inertTarget) inertTarget.inert = false;
     root.removeAttribute("aria-labelledby");
     if (previouslyFocused && typeof previouslyFocused.focus === "function") {
       try {

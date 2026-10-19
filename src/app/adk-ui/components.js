@@ -17,9 +17,8 @@
 // ---------------------------------------------------------------------------
 
 // Unique id prefix for each rendered `tabs` component (tab ↔ panel wiring).
-import { showToast, style } from "../dom.js";
+import { createIcon, showToast, style } from "../dom.js";
 import { safeImageSrc, variantColors } from "../format.js";
-import { state } from "../state.js";
 import { appendInlineMarkdown, parseMarkdownBlocksInto } from "../markdown.js";
 import { renderChartInner } from "./charts.js";
 import { renderTableParts } from "./tables.js";
@@ -29,9 +28,13 @@ let uiTabsSeq = 0;
 
 // Late binding: `sendMessage` (sse.js) sits above this module (sse.js renders
 // through transcript.js → adk-ui), so app.js injects it via `bindSendMessage`.
+// `isBusy` is the host's "a run is in flight" predicate (the studio passes
+// `() => state.isRunning`); hosts without one leave the default.
 let sendMessage = null;
-export const bindSendMessage = (fn) => {
+let isBusy = () => false;
+export const bindSendMessage = (fn, { isBusy: busyFn = null } = {}) => {
   sendMessage = fn;
+  isBusy = typeof busyFn === "function" ? busyFn : () => false;
 };
 
 export const alertVariantLabel = (variant) => {
@@ -732,7 +735,7 @@ export const renderInnerComponent = (comp, surfaceRoot, ctx = {}) => {
         // Programmatic sends must never double as the composer's stop toggle:
         // while a run is streaming, refuse instead of aborting it and dropping
         // the form payload.
-        if (state.isRunning) {
+        if (isBusy()) {
           showToast({ variant: "warning", message: "Wait for the agent to finish." });
           return;
         }
@@ -821,9 +824,6 @@ export const renderInnerComponent = (comp, surfaceRoot, ctx = {}) => {
     }
 
     case "icon": {
-      const span = document.createElement("span");
-      span.className = "google-symbols";
-      span.setAttribute("aria-hidden", "true");
       const rawName = String(comp.name || "info").toLowerCase().replace(/-/g, "_");
       const iconMap = {
         check: "check_circle",
@@ -831,11 +831,10 @@ export const renderInnerComponent = (comp, surfaceRoot, ctx = {}) => {
         alert_circle: "error",
         x: "close",
       };
-      span.textContent = iconMap[rawName] || rawName;
-      style(span, {
-        fontSize: `${Math.max(14, Number(comp.size) || 18)}px`,
-        color: "var(--accent-primary)",
+      const span = createIcon(iconMap[rawName] || rawName, {
+        size: Math.max(14, Number(comp.size) || 18),
       });
+      style(span, { color: "var(--accent-primary)" });
       return span;
     }
 

@@ -109,7 +109,12 @@
     `article.message.adk-ui-split > .adk-ui-seg-start { border-top: ${BUBBLE_BORDER}; border-top-left-radius: 10px; border-top-right-radius: 10px; }`,
     `article.message.adk-ui-split > .adk-ui-seg-end { border-bottom: ${BUBBLE_BORDER}; border-bottom-left-radius: 10px; border-bottom-right-radius: 10px; }`,
     "article.message.adk-ui-split > .adk-ui-card ~ .adk-ui-seg-start, article.message.adk-ui-split > .adk-ui-seg ~ .adk-ui-card, article.message.adk-ui-split > .adk-ui-card ~ .adk-ui-card { margin-top: 14px; }",
+    // `tabs` component: active state is a `data-active` attribute, not re-styling
+    // every button on select. `!important` because the host page styles `button`.
+    "button.adk-ui-tab { border: 0 !important; border-bottom: 2px solid transparent !important; background: transparent !important; color: var(--dm-text-secondary, var(--text-secondary)) !important; }",
+    'button.adk-ui-tab[data-active="true"] { color: var(--dm-text-primary, var(--text-primary)) !important; border-bottom-color: var(--dm-text-primary, var(--text-primary)) !important; }',
   ]);
+  let tabsUid = 0;
 
   // Prevent `/ui/`'s 4-second session poll (`useEffect([events])`) from yanking
   // `.transcript` to the bottom via `C.current.scrollTo({ top: scrollHeight })`.
@@ -145,9 +150,21 @@
     return el;
   };
 
+  // Element that had focus before the fallback dialog opened (restored on close).
+  let modalReturnFocus = null;
+
   const hideModal = () => {
     if (modal) modal.remove();
     modal = null;
+    const target = modalReturnFocus;
+    modalReturnFocus = null;
+    if (target && typeof target.focus === "function" && target.isConnected) {
+      try {
+        target.focus();
+      } catch {
+        /* ignore */
+      }
+    }
   };
 
   const openPopup = (url) => {
@@ -254,7 +271,31 @@
     row.append(cancel, button);
     box.append(title, detail, row);
     modal.appendChild(box);
+
+    // Focus management: remember the opener, focus the primary action, keep
+    // Tab inside the dialog, and let Escape dismiss it.
+    modalReturnFocus = document.activeElement;
+    modal.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        hideModal();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusables = [cancel, button];
+      const idx = focusables.indexOf(document.activeElement);
+      if (event.shiftKey) {
+        if (idx <= 0) {
+          event.preventDefault();
+          focusables[focusables.length - 1].focus();
+        }
+      } else if (idx === -1 || idx === focusables.length - 1) {
+        event.preventDefault();
+        focusables[0].focus();
+      }
+    });
     document.body.appendChild(modal);
+    button.focus();
   };
 
   const handleAuthRequired = async (data) => {
@@ -631,6 +672,8 @@
           : [];
     const colors = Array.isArray(comp.colors) && comp.colors.length ? comp.colors : PALETTE;
     const kind = String(comp.kind || "bar").toLowerCase();
+    // Accessible name for the `<svg>` (the visible title lives in the card header).
+    const chartLabel = comp.title ? String(comp.title) : `${kind} chart`;
 
     if (!data.length || !yKeys.length) {
       const empty = document.createElement("div");
@@ -660,7 +703,7 @@
         padding: "4px 0",
       });
 
-      const svg = svgEl("svg", { viewBox: "0 0 210 210" });
+      const svg = svgEl("svg", { viewBox: "0 0 210 210", role: "img", "aria-label": chartLabel });
       // Override global `svg { width:17px; height:17px; stroke:currentColor }`
       style(svg, {
         width: "180px",
@@ -823,7 +866,7 @@
     const span = maxVal - minVal;
     const yToPx = (v) => padT + plotH - ((v - minVal) / span) * plotH;
 
-    const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}` });
+    const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": chartLabel });
     style(svg, {
       width: "100%",
       height: "auto",
@@ -1112,10 +1155,10 @@
       headRow.replaceChildren();
       for (const col of columns) {
         const th = document.createElement("th");
+        th.scope = "col";
         const canSort = comp.sortable !== false && col.sortable !== false;
-        const indicator =
-          sortKey === col.accessor_key ? (sortAsc ? " ↑" : " ↓") : canSort ? " ↕" : "";
-        th.textContent = `${col.header}${indicator}`;
+        const isActive = sortKey === col.accessor_key;
+        const indicator = isActive ? (sortAsc ? " ↑" : " ↓") : canSort ? " ↕" : "";
         style(th, {
           textAlign: "left",
           padding: "12px 18px",
@@ -1124,11 +1167,26 @@
           letterSpacing: "0.005em",
           color: "var(--dm-text-primary, var(--text-secondary))",
           whiteSpace: "nowrap",
-          cursor: canSort ? "pointer" : "default",
           userSelect: "none",
         });
         if (canSort) {
-          th.addEventListener("click", () => {
+          // Keyboard-reachable sort control; `aria-sort` reflects the active column.
+          th.setAttribute("aria-sort", isActive ? (sortAsc ? "ascending" : "descending") : "none");
+          const sortBtn = document.createElement("button");
+          sortBtn.type = "button";
+          sortBtn.textContent = `${col.header}${indicator}`;
+          style(sortBtn, {
+            border: "0",
+            background: "transparent",
+            padding: "0",
+            margin: "0",
+            cursor: "pointer",
+            font: "inherit",
+            color: "inherit",
+            letterSpacing: "inherit",
+            whiteSpace: "inherit",
+          });
+          sortBtn.addEventListener("click", () => {
             if (sortKey === col.accessor_key) sortAsc = !sortAsc;
             else {
               sortKey = col.accessor_key;
@@ -1136,7 +1194,12 @@
             }
             rebuildHeader();
             rebuildBody();
+            // Keep focus on the (rebuilt) control for keyboard users.
+            headRow.querySelector(`th[aria-sort="${sortAsc ? "ascending" : "descending"}"] > button`)?.focus();
           });
+          th.appendChild(sortBtn);
+        } else {
+          th.textContent = `${col.header}${indicator}`;
         }
         headRow.appendChild(th);
       }
@@ -1480,6 +1543,7 @@
         const wrap = document.createElement("div");
         style(wrap, { display: "flex", flexDirection: "column", gap: "14px" });
         const bar = document.createElement("div");
+        bar.setAttribute("role", "tablist");
         style(bar, {
           display: "flex",
           gap: "4px",
@@ -1487,23 +1551,25 @@
           paddingBottom: "0",
         });
         const panel = document.createElement("div");
+        panel.setAttribute("role", "tabpanel");
+        panel.tabIndex = 0;
         const tabs = Array.isArray(comp.tabs) ? comp.tabs : [];
+        const uid = `adk-ui-tabs-${++tabsUid}`;
+        panel.id = `${uid}-panel`;
         let activeIdx = 0;
 
-        const selectTab = (idx) => {
+        // Active look comes from the `.adk-ui-tab[data-active]` stylesheet rule.
+        const selectTab = (idx, focus = false) => {
           activeIdx = idx;
           Array.from(bar.children).forEach((btn, i) => {
-            style(btn, {
-              background: "transparent",
-              color:
-                i === activeIdx
-                  ? "var(--dm-text-primary, var(--text-primary))"
-                  : "var(--dm-text-secondary, var(--text-secondary))",
-              borderBottom:
-                i === activeIdx
-                  ? "2px solid var(--dm-text-primary, var(--text-primary))"
-                  : "2px solid transparent",
-            });
+            const active = i === activeIdx;
+            btn.dataset.active = active ? "true" : "false";
+            btn.setAttribute("aria-selected", active ? "true" : "false");
+            btn.tabIndex = active ? 0 : -1;
+            if (active) {
+              panel.setAttribute("aria-labelledby", btn.id);
+              if (focus) btn.focus();
+            }
           });
           panel.replaceChildren();
           for (const child of tabs[idx]?.content || []) {
@@ -1514,10 +1580,12 @@
         tabs.forEach((tab, idx) => {
           const b = document.createElement("button");
           b.type = "button";
+          b.className = "adk-ui-tab";
+          b.id = `${uid}-tab-${idx}`;
+          b.setAttribute("role", "tab");
+          b.setAttribute("aria-controls", panel.id);
           b.textContent = tab.label || `Tab ${idx + 1}`;
           style(b, {
-            border: "0",
-            borderBottom: "2px solid transparent",
             borderRadius: "0",
             padding: "10px 16px",
             marginBottom: "-1px",
@@ -1526,6 +1594,16 @@
             cursor: "pointer",
           });
           b.addEventListener("click", () => selectTab(idx));
+          b.addEventListener("keydown", (event) => {
+            let next = null;
+            if (event.key === "ArrowRight") next = (idx + 1) % tabs.length;
+            else if (event.key === "ArrowLeft") next = (idx - 1 + tabs.length) % tabs.length;
+            else if (event.key === "Home") next = 0;
+            else if (event.key === "End") next = tabs.length - 1;
+            if (next === null) return;
+            event.preventDefault();
+            selectTab(next, true);
+          });
           bar.appendChild(b);
         });
         wrap.append(bar, panel);
@@ -1852,8 +1930,8 @@
       const { card, body } = createStandaloneCard({
         title: chartComp.title || "Chart",
       });
-      const chartClone = { ...chartComp, title: null };
-      body.appendChild(renderChartInner(chartClone));
+      // `renderChartInner` only uses `title` for the SVG's accessible name.
+      body.appendChild(renderChartInner(chartComp));
       cards.push(card);
       return cards;
     }
@@ -1923,7 +2001,7 @@
         if (singleTable && tableElement) {
           body.appendChild(tableElement);
         } else if (singleChart) {
-          body.appendChild(renderChartInner({ ...contentArr[0], title: null }));
+          body.appendChild(renderChartInner({ ...contentArr[0], title: contentArr[0].title || comp.title }));
         } else {
           for (const child of contentArr) {
             body.appendChild(renderInnerComponent(child, card, false));
@@ -1982,6 +2060,8 @@
     if (!comp || !document.body) return;
     if (!helperToastStack) {
       helperToastStack = document.createElement("div");
+      helperToastStack.setAttribute("role", "status");
+      helperToastStack.setAttribute("aria-live", "polite");
       style(helperToastStack, {
         position: "fixed",
         bottom: "24px",
@@ -2043,6 +2123,7 @@
       const closeBtn = document.createElement("button");
       closeBtn.type = "button";
       closeBtn.textContent = "\u00d7";
+      closeBtn.setAttribute("aria-label", "Dismiss");
       style(closeBtn, {
         border: "0",
         background: "transparent",

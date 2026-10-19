@@ -844,17 +844,22 @@ void main() {
         () => {
           contextLost = false;
           try {
-        setupGpu();
-      } catch (err) {
-        canvas.remove();
-        throw err;
-      }
+            setupGpu();
+          } catch (err) {
+            // Throwing from a listener would only reach window.onerror and
+            // leave the rAF loop, ResizeObserver and pointer tracker running
+            // against a dead canvas; tear everything down instead.
+            console.warn("[stage] GPU re-init failed after context restore", err);
+            destroy();
+            return;
+          }
           renderFrame(0, performance.now());
         },
         { signal: ctxAbort.signal }
       );
 
       const destroy = () => {
+        if (signal) signal.removeEventListener("abort", destroy);
         running = false;
         syncLoop();
         resizeObserver.disconnect();
@@ -864,7 +869,11 @@ void main() {
           if (emptyVao) gl.deleteVertexArray(emptyVao);
           if (bgProg) gl.deleteProgram(bgProg);
           if (dotProg) gl.deleteProgram(dotProg);
+          // Release the context eagerly; browsers cap live WebGL contexts and
+          // only reclaim them on GC otherwise.
+          gl.getExtension("WEBGL_lose_context")?.loseContext();
         }
+        emptyVao = bgProg = dotProg = null;
         canvas.width = 0;
         canvas.height = 0;
         canvas.remove();

@@ -4930,28 +4930,31 @@
       if (resp.body) {
         for await (const dataStr of parseSseStream(resp.body)) {
           if (!dataStr || dataStr === "[DONE]") continue;
+          // Only the parse is allowed to fail quietly (a frame may be split
+          // mid-JSON); renderer exceptions must surface, not be swallowed.
+          let parsed;
           try {
-            const parsed = JSON.parse(dataStr);
-            const ev = parsed.event ?? parsed;
-            if (ev && typeof ev === "object") {
-              if (ev.error_message || ev.errorMessage) {
-                showError(`Agent error: ${ev.error_message || ev.errorMessage}`);
-              }
-              const existingIdx = currentEvents.findIndex((e) => e.id && e.id === ev.id);
-              if (existingIdx !== -1) {
-                currentEvents[existingIdx] = mergeStreamedEvent(currentEvents[existingIdx], ev);
-              } else {
-                currentEvents.push({
-                  ...ev,
-                  content: ev.content
-                    ? { ...ev.content, parts: coalesceParts(ev.content.parts) }
-                    : ev.content,
-                });
-              }
-              rebuildFromSessionEvents(currentEvents);
-            }
+            parsed = JSON.parse(dataStr);
           } catch {
-            /* ignore partial JSON */
+            continue;
+          }
+          const ev = parsed.event ?? parsed;
+          if (ev && typeof ev === "object") {
+            if (ev.error_message || ev.errorMessage) {
+              showError(`Agent error: ${ev.error_message || ev.errorMessage}`);
+            }
+            const existingIdx = currentEvents.findIndex((e) => e.id && e.id === ev.id);
+            if (existingIdx !== -1) {
+              currentEvents[existingIdx] = mergeStreamedEvent(currentEvents[existingIdx], ev);
+            } else {
+              currentEvents.push({
+                ...ev,
+                content: ev.content
+                  ? { ...ev.content, parts: coalesceParts(ev.content.parts) }
+                  : ev.content,
+              });
+            }
+            rebuildFromSessionEvents(currentEvents);
           }
         }
       }
@@ -4981,6 +4984,9 @@
   chatInput.addEventListener("input", syncComposerHeight);
   sendBtn.addEventListener("click", () => sendMessage());
   chatInput.addEventListener("keydown", (e) => {
+    // Ignore the Enter that confirms an IME composition (CJK etc.); `keyCode
+    // 229` is the legacy signal some browsers still send for it.
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();

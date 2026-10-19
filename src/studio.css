@@ -34,10 +34,22 @@
   --accent-indigo: #5b6cf9;
   --accent-violet: #9b72cb;
   --accent-coral: #d96570;
-  --accent-success: #188038;
+  /* #137333 (Google green 700) clears WCAG AA at 12px on --bg-primary; #188038 did not. */
+  --accent-success: #137333;
   --accent-warning: #d97706;
   --accent-error: #d93025;
   --accent-wash: rgba(33, 34, 38, 0.05);
+  /* Tinted surfaces: "info" (streaming / user bubble) and "warn" (authorizing).
+     Each has a fill, a foreground, a ring and a spinner colour; the dark
+     theme overrides all of them so the pills and bubble invert with the rest. */
+  --tint-info-bg: #d6edff;
+  --tint-info-fg: #0b3d91;
+  --tint-info-ring: rgba(26, 115, 232, 0.28);
+  --tint-info-spin: #0b57d0;
+  --tint-warn-bg: #fef3cd;
+  --tint-warn-fg: #7a3e00;
+  --tint-warn-ring: rgba(249, 171, 0, 0.38);
+  --tint-warn-spin: #e37400;
   --ring: rgba(18, 19, 23, 0.14);
   --gemini-gradient: linear-gradient(
     135deg,
@@ -101,6 +113,14 @@
     --accent-warning: #fdd663;
     --accent-error: #f28b82;
     --accent-wash: rgba(230, 234, 240, 0.06);
+    --tint-info-bg: rgba(138, 180, 248, 0.16);
+    --tint-info-fg: #aecbfa;
+    --tint-info-ring: rgba(138, 180, 248, 0.4);
+    --tint-info-spin: #8ab4f8;
+    --tint-warn-bg: rgba(253, 214, 99, 0.14);
+    --tint-warn-fg: #fdd663;
+    --tint-warn-ring: rgba(253, 214, 99, 0.4);
+    --tint-warn-spin: #fdd663;
     --ring: rgba(248, 249, 252, 0.16);
     --gemini-gradient: linear-gradient(
       135deg,
@@ -159,6 +179,14 @@
   --accent-warning: #fdd663;
   --accent-error: #f28b82;
   --accent-wash: rgba(230, 234, 240, 0.06);
+  --tint-info-bg: rgba(138, 180, 248, 0.16);
+  --tint-info-fg: #aecbfa;
+  --tint-info-ring: rgba(138, 180, 248, 0.4);
+  --tint-info-spin: #8ab4f8;
+  --tint-warn-bg: rgba(253, 214, 99, 0.14);
+  --tint-warn-fg: #fdd663;
+  --tint-warn-ring: rgba(253, 214, 99, 0.4);
+  --tint-warn-spin: #fdd663;
   --ring: rgba(248, 249, 252, 0.16);
   --gemini-gradient: linear-gradient(
     135deg,
@@ -402,16 +430,16 @@ select:focus-visible {
 }
 
 .status-running {
-  color: #0b3d91;
-  border-color: rgba(26, 115, 232, 0.28);
-  background: rgb(214, 237, 255);
+  color: var(--tint-info-fg);
+  border-color: var(--tint-info-ring);
+  background: var(--tint-info-bg);
 }
 
 /* Waiting for Google authorization: amber, matching the canvas wave. */
 .status-authorizing {
-  color: #7a3e00;
-  border-color: rgba(249, 171, 0, 0.38);
-  background: rgb(254, 243, 205);
+  color: var(--tint-warn-fg);
+  border-color: var(--tint-warn-ring);
+  background: var(--tint-warn-bg);
 }
 
 .status-failed {
@@ -423,14 +451,14 @@ select:focus-visible {
   width: 10px;
   height: 10px;
   background: transparent;
-  border: 1.75px solid rgba(11, 87, 208, 0.24);
-  border-top-color: #0b57d0;
+  border: 1.75px solid color-mix(in srgb, var(--tint-info-spin) 26%, transparent);
+  border-top-color: var(--tint-info-spin);
   animation: status-spin 0.65s linear infinite;
 }
 
 .status-authorizing i {
-  border-color: rgba(227, 116, 0, 0.26);
-  border-top-color: #e37400;
+  border-color: color-mix(in srgb, var(--tint-warn-spin) 26%, transparent);
+  border-top-color: var(--tint-warn-spin);
 }
 
 @keyframes status-spin {
@@ -563,21 +591,21 @@ select:focus-visible {
 
 .black-action-button {
   height: 36px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: #121317;
-  color: #ffffff;
+  border: 1px solid var(--border-strong);
+  background: var(--primary-btn-bg);
+  color: var(--primary-btn-fg);
   padding: 0 14px;
   font-weight: 500;
   font-size: 12.5px;
 }
 
 .black-action-button .google-symbols {
-  color: #ffffff;
+  color: var(--primary-btn-fg);
 }
 
 .black-action-button:hover {
-  background: #212226;
-  color: #ffffff;
+  background: color-mix(in srgb, var(--primary-btn-bg) 88%, var(--primary-btn-fg));
+  color: var(--primary-btn-fg);
 }
 
 .black-action-button:active {
@@ -1449,9 +1477,9 @@ select:focus-visible {
 .message-user {
   max-width: min(88%, 540px);
   border-radius: 22px 22px 6px 22px;
-  background: rgb(214, 237, 255);
-  color: #121317;
-  border-color: rgba(18, 19, 23, 0.08);
+  background: var(--tint-info-bg);
+  color: var(--text-primary);
+  border-color: var(--border-default);
 }
 
 .message-user.message-ui-event {
@@ -1948,6 +1976,19 @@ select:focus-visible {
   margin: 0;
   padding: 0;
   border-radius: 50%;
+}
+
+/* While a run is in flight the send button becomes "stop": the glyph changes
+   in JS, and the red fill makes the destructive action legible at a glance. */
+.button.button--primary.send-button.stop-button {
+  background-color: var(--accent-error);
+  /* --primary-btn-fg flips with the theme: white on the light-mode red,
+     near-black on the dark-mode salmon. */
+  color: var(--primary-btn-fg);
+}
+
+.button.button--primary.send-button.stop-button:focus-visible {
+  box-shadow: 0 0 0 2px var(--surface-card), 0 0 0 4px var(--accent-error);
 }
 
 .send-button svg {
@@ -2655,5 +2696,26 @@ select:focus-visible {
   }
   .session-picker label {
     display: none;
+  }
+}
+
+/* Reduced motion: collapse every animation / transition to a single frame
+   (studio.js already skips the canvas wave and odometer when this matches).
+   The busy spinners lose their rotation but keep a solid ring so the state is
+   still visible. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .status-running i,
+  .status-authorizing i {
+    animation: none;
+    border-color: currentColor;
   }
 }

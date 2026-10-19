@@ -350,9 +350,13 @@
         }
       }
       popup = null;
-      const refresh = Array.from(document.querySelectorAll("button")).find((b) =>
-        /^\s*refresh\s*$/i.test(b.textContent || "")
-      );
+      // Couples to the ADK web UI's DOM: its session "Refresh" button has no
+      // stable id. Prefer an accessible label, fall back to the visible text.
+      const refresh =
+        document.querySelector('button[aria-label*="refresh" i]') ||
+        Array.from(document.querySelectorAll("button")).find((b) =>
+          /^\s*refresh\s*$/i.test(b.textContent || "")
+        );
       if (refresh) refresh.click();
     }
   };
@@ -550,9 +554,9 @@
       content.appendChild(descEl);
     }
 
-    const statusBtn = document.createElement("span");
-    statusBtn.textContent = variantLabel;
-    style(statusBtn, {
+    const statusChip = document.createElement("span");
+    statusChip.textContent = variantLabel;
+    style(statusChip, {
       display: "inline-flex",
       alignItems: "center",
       justifyContent: "center",
@@ -568,7 +572,7 @@
       userSelect: "none",
     });
 
-    card.append(content, statusBtn);
+    card.append(content, statusChip);
     return card;
   };
 
@@ -653,194 +657,166 @@
     return { card, body };
   };
 
-  // Renders SVG charts (`bar`, `line`, `area`, `pie`, `scatter`, `sparkline`).
-  const renderChartInner = (comp) => {
-    const wrap = document.createElement("div");
-    style(wrap, {
+  // Donut chart with a legend (`pie`). Returns the row holding the SVG and legend.
+  const renderPieChart = ({ data, xKey, yKeys, colors, chartLabel }) => {
+    const yKey = yKeys[0];
+    const slices = data
+      .map((row, idx) => ({
+        label: String(row[xKey] ?? `Item ${idx + 1}`),
+        value: Math.max(0, toNumber(row[yKey]) || 0),
+        color: colors[idx % colors.length],
+      }))
+      .filter((s) => s.value > 0);
+    const total = slices.reduce((acc, s) => acc + s.value, 0) || 1;
+
+    const rowWrap = document.createElement("div");
+    style(rowWrap, {
       display: "flex",
-      flexDirection: "column",
-      gap: "10px",
+      flexWrap: "wrap",
+      alignItems: "center",
+      gap: "24px",
+      padding: "4px 0",
     });
 
-    const data = Array.isArray(comp.data) ? comp.data : [];
-    const xKey = comp.x_key || (data[0] ? Object.keys(data[0])[0] : "x");
-    const yKeys =
-      Array.isArray(comp.y_keys) && comp.y_keys.length
-        ? comp.y_keys
-        : data[0]
-          ? Object.keys(data[0]).filter((k) => k !== xKey)
-          : [];
-    const colors = Array.isArray(comp.colors) && comp.colors.length ? comp.colors : PALETTE;
-    const kind = String(comp.kind || "bar").toLowerCase();
-    // Accessible name for the `<svg>` (the visible title lives in the card header).
-    const chartLabel = comp.title ? String(comp.title) : `${kind} chart`;
+    const svg = svgEl("svg", { viewBox: "0 0 210 210", role: "img", "aria-label": chartLabel });
+    // Override global `svg { width:17px; height:17px; stroke:currentColor }`
+    style(svg, {
+      width: "180px",
+      height: "180px",
+      flexShrink: "0",
+      fill: "none",
+      stroke: "none",
+    });
 
-    if (!data.length || !yKeys.length) {
-      const empty = document.createElement("div");
-      empty.textContent = "No chart data available.";
-      style(empty, { color: "var(--text-muted)", fontSize: "12px", padding: "8px 0" });
-      wrap.appendChild(empty);
-      return wrap;
+    const cx = 105;
+    const cy = 105;
+    const rOuter = 88;
+    const rInner = 52;
+    let angle = -Math.PI / 2;
+
+    for (const s of slices) {
+      const frac = s.value / total;
+      const sweep = frac * Math.PI * 2;
+      if (frac >= 0.9999) {
+        const c = svgEl("circle", {
+          cx,
+          cy,
+          r: (rOuter + rInner) / 2,
+          fill: "none",
+          stroke: s.color,
+          "stroke-width": rOuter - rInner,
+        });
+        const t = svgEl("title");
+        t.textContent = `${s.label}: ${formatCellValue(s.value)} (100%)`;
+        c.appendChild(t);
+        svg.appendChild(c);
+      } else {
+        const end = angle + sweep;
+        const large = sweep > Math.PI ? 1 : 0;
+        const x1 = cx + rOuter * Math.cos(angle);
+        const y1 = cy + rOuter * Math.sin(angle);
+        const x2 = cx + rOuter * Math.cos(end);
+        const y2 = cy + rOuter * Math.sin(end);
+        const x3 = cx + rInner * Math.cos(end);
+        const y3 = cy + rInner * Math.sin(end);
+        const x4 = cx + rInner * Math.cos(angle);
+        const y4 = cy + rInner * Math.sin(angle);
+        const d = [
+          `M ${x1} ${y1}`,
+          `A ${rOuter} ${rOuter} 0 ${large} 1 ${x2} ${y2}`,
+          `L ${x3} ${y3}`,
+          `A ${rInner} ${rInner} 0 ${large} 0 ${x4} ${y4}`,
+          "Z",
+        ].join(" ");
+        const path = svgEl("path", {
+          d,
+          fill: s.color,
+          stroke: "var(--surface-card)",
+          "stroke-width": "2",
+        });
+        const t = svgEl("title");
+        t.textContent = `${s.label}: ${formatCellValue(s.value)} (${(frac * 100).toFixed(1)}%)`;
+        path.appendChild(t);
+        svg.appendChild(path);
+        angle = end;
+      }
     }
 
-    if (kind === "pie") {
-      const yKey = yKeys[0];
-      const slices = data
-        .map((row, idx) => ({
-          label: String(row[xKey] ?? `Item ${idx + 1}`),
-          value: Math.max(0, toNumber(row[yKey]) || 0),
-          color: colors[idx % colors.length],
-        }))
-        .filter((s) => s.value > 0);
-      const total = slices.reduce((acc, s) => acc + s.value, 0) || 1;
+    const centerTop = svgEl("text", {
+      x: cx,
+      y: cy - 4,
+      "text-anchor": "middle",
+      fill: "var(--dm-text-secondary, var(--text-muted))",
+      "font-size": "10.5",
+    });
+    centerTop.textContent = yKey;
+    const centerVal = svgEl("text", {
+      x: cx,
+      y: cy + 14,
+      "text-anchor": "middle",
+      fill: "var(--dm-text-primary, var(--text-primary))",
+      "font-size": "16",
+      "font-weight": "500",
+    });
+    centerVal.textContent = formatCompact(total);
+    svg.append(centerTop, centerVal);
 
-      const rowWrap = document.createElement("div");
-      style(rowWrap, {
+    const legend = document.createElement("div");
+    style(legend, {
+      display: "flex",
+      flexDirection: "column",
+      gap: "8px",
+      flex: "1",
+      minWidth: "180px",
+    });
+    for (const s of slices) {
+      const item = document.createElement("div");
+      style(item, {
         display: "flex",
-        flexWrap: "wrap",
         alignItems: "center",
-        gap: "24px",
-        padding: "4px 0",
+        justifyContent: "space-between",
+        gap: "10px",
+        fontSize: "13px",
       });
-
-      const svg = svgEl("svg", { viewBox: "0 0 210 210", role: "img", "aria-label": chartLabel });
-      // Override global `svg { width:17px; height:17px; stroke:currentColor }`
-      style(svg, {
-        width: "180px",
-        height: "180px",
+      const left = document.createElement("div");
+      style(left, { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" });
+      const swatch = document.createElement("span");
+      style(swatch, {
+        width: "9px",
+        height: "9px",
+        borderRadius: "999px",
+        background: s.color,
         flexShrink: "0",
-        fill: "none",
-        stroke: "none",
       });
-
-      const cx = 105;
-      const cy = 105;
-      const rOuter = 88;
-      const rInner = 52;
-      let angle = -Math.PI / 2;
-
-      for (const s of slices) {
-        const frac = s.value / total;
-        const sweep = frac * Math.PI * 2;
-        if (frac >= 0.9999) {
-          const c = svgEl("circle", {
-            cx,
-            cy,
-            r: (rOuter + rInner) / 2,
-            fill: "none",
-            stroke: s.color,
-            "stroke-width": rOuter - rInner,
-          });
-          const t = svgEl("title");
-          t.textContent = `${s.label}: ${formatCellValue(s.value)} (100%)`;
-          c.appendChild(t);
-          svg.appendChild(c);
-        } else {
-          const end = angle + sweep;
-          const large = sweep > Math.PI ? 1 : 0;
-          const x1 = cx + rOuter * Math.cos(angle);
-          const y1 = cy + rOuter * Math.sin(angle);
-          const x2 = cx + rOuter * Math.cos(end);
-          const y2 = cy + rOuter * Math.sin(end);
-          const x3 = cx + rInner * Math.cos(end);
-          const y3 = cy + rInner * Math.sin(end);
-          const x4 = cx + rInner * Math.cos(angle);
-          const y4 = cy + rInner * Math.sin(angle);
-          const d = [
-            `M ${x1} ${y1}`,
-            `A ${rOuter} ${rOuter} 0 ${large} 1 ${x2} ${y2}`,
-            `L ${x3} ${y3}`,
-            `A ${rInner} ${rInner} 0 ${large} 0 ${x4} ${y4}`,
-            "Z",
-          ].join(" ");
-          const path = svgEl("path", {
-            d,
-            fill: s.color,
-            stroke: "var(--surface-card)",
-            "stroke-width": "2",
-          });
-          const t = svgEl("title");
-          t.textContent = `${s.label}: ${formatCellValue(s.value)} (${(frac * 100).toFixed(1)}%)`;
-          path.appendChild(t);
-          svg.appendChild(path);
-          angle = end;
-        }
-      }
-
-      const centerTop = svgEl("text", {
-        x: cx,
-        y: cy - 4,
-        "text-anchor": "middle",
-        fill: "var(--dm-text-secondary, var(--text-muted))",
-        "font-size": "10.5",
+      const lbl = document.createElement("span");
+      lbl.textContent = s.label;
+      style(lbl, {
+        color: "var(--dm-text-primary, var(--text-primary))",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
       });
-      centerTop.textContent = yKey;
-      const centerVal = svgEl("text", {
-        x: cx,
-        y: cy + 14,
-        "text-anchor": "middle",
-        fill: "var(--dm-text-primary, var(--text-primary))",
-        "font-size": "16",
-        "font-weight": "500",
+      left.append(swatch, lbl);
+
+      const right = document.createElement("span");
+      right.textContent = `${formatCompact(s.value)} (${((s.value / total) * 100).toFixed(1)}%)`;
+      style(right, {
+        color: "var(--dm-text-secondary, var(--text-secondary))",
+        fontFamily: "var(--mono)",
+        fontSize: "12px",
+        flexShrink: "0",
       });
-      centerVal.textContent = formatCompact(total);
-      svg.append(centerTop, centerVal);
-
-      const legend = document.createElement("div");
-      style(legend, {
-        display: "flex",
-        flexDirection: "column",
-        gap: "8px",
-        flex: "1",
-        minWidth: "180px",
-      });
-      for (const s of slices) {
-        const item = document.createElement("div");
-        style(item, {
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: "10px",
-          fontSize: "13px",
-        });
-        const left = document.createElement("div");
-        style(left, { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" });
-        const swatch = document.createElement("span");
-        style(swatch, {
-          width: "9px",
-          height: "9px",
-          borderRadius: "999px",
-          background: s.color,
-          flexShrink: "0",
-        });
-        const lbl = document.createElement("span");
-        lbl.textContent = s.label;
-        style(lbl, {
-          color: "var(--dm-text-primary, var(--text-primary))",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        });
-        left.append(swatch, lbl);
-
-        const right = document.createElement("span");
-        right.textContent = `${formatCompact(s.value)} (${((s.value / total) * 100).toFixed(1)}%)`;
-        style(right, {
-          color: "var(--dm-text-secondary, var(--text-secondary))",
-          fontFamily: "var(--mono)",
-          fontSize: "12px",
-          flexShrink: "0",
-        });
-        item.append(left, right);
-        legend.appendChild(item);
-      }
-
-      rowWrap.append(svg, legend);
-      wrap.appendChild(rowWrap);
-      return wrap;
+      item.append(left, right);
+      legend.appendChild(item);
     }
 
-    // Cartesian SVG chart (`bar`, `line`, `area`, `scatter`, `sparkline`)
+    rowWrap.append(svg, legend);
+    return rowWrap;
+  };
+
+  // Cartesian SVG chart (`bar`, `line`, `area`, `scatter`, `sparkline`).
+  // Appends the SVG (and legend) to `wrap`.
+  const appendCartesianChart = (wrap, comp, { data, xKey, yKeys, colors, kind, chartLabel }) => {
     const isSpark = kind === "sparkline";
     const W = 680;
     const H = isSpark ? 84 : 245;
@@ -1074,7 +1050,44 @@
       });
       wrap.appendChild(legend);
     }
+  };
 
+  // Renders SVG charts (`bar`, `line`, `area`, `pie`, `scatter`, `sparkline`).
+  const renderChartInner = (comp) => {
+    const wrap = document.createElement("div");
+    style(wrap, {
+      display: "flex",
+      flexDirection: "column",
+      gap: "10px",
+    });
+
+    const data = Array.isArray(comp.data) ? comp.data : [];
+    const xKey = comp.x_key || (data[0] ? Object.keys(data[0])[0] : "x");
+    const yKeys =
+      Array.isArray(comp.y_keys) && comp.y_keys.length
+        ? comp.y_keys
+        : data[0]
+          ? Object.keys(data[0]).filter((k) => k !== xKey)
+          : [];
+    const colors = Array.isArray(comp.colors) && comp.colors.length ? comp.colors : PALETTE;
+    const kind = String(comp.kind || "bar").toLowerCase();
+    // Accessible name for the `<svg>` (the visible title lives in the card header).
+    const chartLabel = comp.title ? String(comp.title) : `${kind} chart`;
+
+    if (!data.length || !yKeys.length) {
+      const empty = document.createElement("div");
+      empty.textContent = "No chart data available.";
+      style(empty, { color: "var(--text-muted)", fontSize: "12px", padding: "8px 0" });
+      wrap.appendChild(empty);
+      return wrap;
+    }
+
+    const ctx = { data, xKey, yKeys, colors, kind, chartLabel };
+    if (kind === "pie") {
+      wrap.appendChild(renderPieChart(ctx));
+    } else {
+      appendCartesianChart(wrap, comp, ctx);
+    }
     return wrap;
   };
 
@@ -1122,10 +1135,15 @@
         fontSize: "13px",
         width: "180px",
       });
+      // Debounced: filtering re-sorts and rebuilds the whole body.
+      let filterTimer = 0;
       search.addEventListener("input", () => {
-        filterQuery = search.value.trim().toLowerCase();
-        page = 0;
-        rebuildBody();
+        clearTimeout(filterTimer);
+        filterTimer = setTimeout(() => {
+          filterQuery = search.value.trim().toLowerCase();
+          page = 0;
+          rebuildBody();
+        }, 100);
       });
       toolbar.appendChild(search);
     }
@@ -1331,571 +1349,579 @@
     return { element: wrap, toolbar };
   };
 
+  // Renderers for inner `adk_ui::Component`s, keyed by `type`. Each receives
+  // `(comp, surfaceRoot, inGrid, type)`; see `renderInnerComponent`.
+  const RENDERERS = {
+    text(comp, surfaceRoot, inGrid) {
+      const v = String(comp.variant || "body").toLowerCase();
+      const el = document.createElement(v === "code" ? "code" : "div");
+      el.textContent = comp.content ?? "";
+      const map = {
+        h1: {
+          fontSize: "22px",
+          fontWeight: "450",
+          letterSpacing: "-0.012em",
+          lineHeight: "1.2",
+          color: "var(--dm-text-primary, var(--text-primary))",
+        },
+        h2: {
+          fontSize: inGrid ? "28px" : "19px",
+          fontWeight: "450",
+          letterSpacing: inGrid ? "-0.015em" : "-0.01em",
+          lineHeight: inGrid ? "1.12" : "1.22",
+          color: "var(--dm-text-primary, var(--text-primary))",
+        },
+        h3: {
+          fontSize: "16.5px",
+          fontWeight: "450",
+          letterSpacing: "-0.006em",
+          lineHeight: "1.32",
+          color: "var(--dm-text-primary, var(--text-primary))",
+        },
+        h4: {
+          fontSize: "14.5px",
+          fontWeight: "500",
+          lineHeight: "1.4",
+          color: "var(--dm-text-primary, var(--text-primary))",
+        },
+        caption: {
+          fontSize: "13px",
+          color: "var(--dm-text-secondary, var(--text-muted))",
+          lineHeight: "1.45",
+        },
+        code: {
+          fontFamily: "var(--mono)",
+          fontSize: "12.5px",
+          background: "var(--dm-surface-gray-subtle, var(--bg-primary))",
+          border: "1px solid var(--dm-outline, var(--border-default))",
+          padding: "1px 6px",
+          borderRadius: "6px",
+        },
+        body: {
+          fontSize: "14.5px",
+          lineHeight: "1.55",
+          color: "var(--dm-text-primary, var(--text-primary))",
+        },
+      };
+      style(el, map[v] || map.body);
+      return el;
+    },
+
+    badge(comp) {
+      const span = document.createElement("span");
+      span.textContent = comp.label ?? "";
+      const vc = variantColors(comp.variant);
+      style(span, {
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "4px 10px",
+        borderRadius: "999px",
+        fontSize: "12px",
+        fontWeight: "500",
+        background: vc.bg,
+        color: vc.fg,
+        border: "1px solid transparent",
+        alignSelf: "flex-start",
+      });
+      return span;
+    },
+
+    divider(comp) {
+      const hr = document.createElement("hr");
+      style(hr, {
+        border: "0",
+        borderTop: "1px solid var(--dm-outline, var(--border-default))",
+        margin: "6px 0",
+        width: "100%",
+      });
+      return hr;
+    },
+
+    stack(comp, surfaceRoot, inGrid) {
+      const div = document.createElement("div");
+      const horiz = String(comp.direction || "vertical").toLowerCase() === "horizontal";
+      const gapPx = Math.max(1, Number(comp.gap ?? 3)) * 4;
+      style(div, {
+        display: "flex",
+        flexDirection: horiz ? "row" : "column",
+        flexWrap: horiz ? "wrap" : "nowrap",
+        alignItems: horiz ? "center" : "stretch",
+        gap: `${gapPx}px`,
+      });
+      for (const child of comp.children || []) {
+        div.appendChild(renderInnerComponent(child, surfaceRoot, inGrid));
+      }
+      return div;
+    },
+
+    grid(comp, surfaceRoot) {
+      const div = document.createElement("div");
+      const cols = Math.max(1, Math.min(6, Number(comp.columns) || 2));
+      style(div, {
+        display: "grid",
+        gridTemplateColumns: `repeat(auto-fit, minmax(${cols >= 3 ? "165px" : "220px"}, 1fr))`,
+        gap: "14px",
+        alignItems: "stretch",
+      });
+      for (const child of comp.children || []) {
+        div.appendChild(renderInnerComponent(child, surfaceRoot, true));
+      }
+      return div;
+    },
+
+    container(comp, surfaceRoot, inGrid) {
+      const div = document.createElement("div");
+      style(div, {
+        display: "flex",
+        flexDirection: "column",
+        gap: "12px",
+      });
+      for (const child of comp.children || []) {
+        div.appendChild(renderInnerComponent(child, surfaceRoot, inGrid));
+      }
+      return div;
+    },
+
+    // Nested card (e.g. KPI stat tile inside a `Grid`); also `modal` (aliased below).
+    card(comp, surfaceRoot, inGrid) {
+      const tile = document.createElement("div");
+      tile.setAttribute("data-ui-scope", "true");
+      style(tile, {
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "space-between",
+        gap: "8px",
+        padding: inGrid ? "18px 20px" : "20px 22px",
+        borderRadius: "20px",
+        background: "var(--dm-surface-gray, var(--bg-primary))",
+        border: "1px solid var(--dm-outline, var(--border-default))",
+      });
+
+      if (comp.title) {
+        const t = document.createElement("div");
+        t.textContent = comp.title;
+        style(
+          t,
+          inGrid
+            ? {
+                fontSize: "13.5px",
+                fontWeight: "450",
+                letterSpacing: "0.005em",
+                color: "var(--dm-text-secondary, var(--text-muted))",
+              }
+            : {
+                fontSize: "16.5px",
+                fontWeight: "450",
+                letterSpacing: "-0.006em",
+                color: "var(--dm-text-primary, var(--text-primary))",
+              }
+        );
+        tile.appendChild(t);
+      }
+      if (comp.description) {
+        const d = document.createElement("div");
+        d.textContent = comp.description;
+        style(d, {
+          fontSize: "13.5px",
+          lineHeight: "1.45",
+          color: "var(--dm-text-secondary, var(--text-muted))",
+        });
+        tile.appendChild(d);
+      }
+      if (Array.isArray(comp.content) && comp.content.length) {
+        const body = document.createElement("div");
+        style(body, { display: "flex", flexDirection: "column", gap: "8px" });
+        for (const child of comp.content) {
+          body.appendChild(renderInnerComponent(child, tile, inGrid));
+        }
+        tile.appendChild(body);
+      }
+      if (Array.isArray(comp.footer) && comp.footer.length) {
+        const ftr = document.createElement("div");
+        style(ftr, {
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "8px",
+          justifyContent: "flex-end",
+          paddingTop: "10px",
+        });
+        for (const child of comp.footer) {
+          ftr.appendChild(renderInnerComponent(child, tile, false));
+        }
+        tile.appendChild(ftr);
+      }
+      return tile;
+    },
+
+    tabs(comp, surfaceRoot) {
+      const wrap = document.createElement("div");
+      style(wrap, { display: "flex", flexDirection: "column", gap: "14px" });
+      const bar = document.createElement("div");
+      bar.setAttribute("role", "tablist");
+      style(bar, {
+        display: "flex",
+        gap: "4px",
+        borderBottom: "1px solid var(--dm-outline, var(--border-default))",
+        paddingBottom: "0",
+      });
+      const panel = document.createElement("div");
+      panel.setAttribute("role", "tabpanel");
+      panel.tabIndex = 0;
+      const tabs = Array.isArray(comp.tabs) ? comp.tabs : [];
+      const uid = `adk-ui-tabs-${++tabsUid}`;
+      panel.id = `${uid}-panel`;
+      let activeIdx = 0;
+
+      // Active look comes from the `.adk-ui-tab[data-active]` stylesheet rule.
+      const selectTab = (idx, focus = false) => {
+        activeIdx = idx;
+        Array.from(bar.children).forEach((btn, i) => {
+          const active = i === activeIdx;
+          btn.dataset.active = active ? "true" : "false";
+          btn.setAttribute("aria-selected", active ? "true" : "false");
+          btn.tabIndex = active ? 0 : -1;
+          if (active) {
+            panel.setAttribute("aria-labelledby", btn.id);
+            if (focus) btn.focus();
+          }
+        });
+        panel.replaceChildren();
+        for (const child of tabs[idx]?.content || []) {
+          panel.appendChild(renderInnerComponent(child, surfaceRoot, false));
+        }
+      };
+
+      tabs.forEach((tab, idx) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "adk-ui-tab";
+        b.id = `${uid}-tab-${idx}`;
+        b.setAttribute("role", "tab");
+        b.setAttribute("aria-controls", panel.id);
+        b.textContent = tab.label || `Tab ${idx + 1}`;
+        style(b, {
+          borderRadius: "0",
+          padding: "10px 16px",
+          marginBottom: "-1px",
+          fontSize: "14px",
+          fontWeight: "500",
+          cursor: "pointer",
+        });
+        b.addEventListener("click", () => selectTab(idx));
+        b.addEventListener("keydown", (event) => {
+          let next = null;
+          if (event.key === "ArrowRight") next = (idx + 1) % tabs.length;
+          else if (event.key === "ArrowLeft") next = (idx - 1 + tabs.length) % tabs.length;
+          else if (event.key === "Home") next = 0;
+          else if (event.key === "End") next = tabs.length - 1;
+          if (next === null) return;
+          event.preventDefault();
+          selectTab(next, true);
+        });
+        bar.appendChild(b);
+      });
+      wrap.append(bar, panel);
+      if (tabs.length) selectTab(0);
+      return wrap;
+    },
+
+    chart(comp) {
+      return renderChartInner(comp);
+    },
+
+    table(comp) {
+      const { element, toolbar } = renderTableParts(comp);
+      const box = document.createElement("div");
+      style(box, {
+        border: "1px solid var(--dm-outline, var(--border-default))",
+        borderRadius: "18px",
+        overflow: "hidden",
+      });
+      const bar = document.createElement("div");
+      style(bar, {
+        display: "flex",
+        justifyContent: "flex-end",
+        padding: "10px 16px",
+        background: "transparent",
+        borderBottom: "1px solid var(--dm-outline, var(--border-default))",
+      });
+      bar.appendChild(toolbar);
+      box.append(bar, element);
+      return box;
+    },
+
+    key_value(comp) {
+      const dl = document.createElement("div");
+      style(dl, {
+        display: "grid",
+        gridTemplateColumns: "minmax(140px, auto) 1fr",
+        gap: "10px 20px",
+        padding: "16px 18px",
+        borderRadius: "18px",
+        background: "var(--dm-surface-gray, var(--bg-primary))",
+        border: "1px solid var(--dm-outline, var(--border-default))",
+        fontSize: "13.5px",
+      });
+      for (const pair of comp.pairs || []) {
+        const k = document.createElement("div");
+        k.textContent = pair.key;
+        style(k, { color: "var(--dm-text-secondary, var(--text-muted))", fontWeight: "450" });
+        const v = document.createElement("div");
+        v.textContent = pair.value;
+        style(v, { color: "var(--dm-text-primary, var(--text-primary))", fontWeight: "500" });
+        dl.append(k, v);
+      }
+      return dl;
+    },
+
+    list(comp) {
+      const list = document.createElement(comp.ordered ? "ol" : "ul");
+      style(list, {
+        margin: "0",
+        paddingLeft: "22px",
+        display: "flex",
+        flexDirection: "column",
+        gap: "6px",
+        fontSize: "14.5px",
+        lineHeight: "1.55",
+        color: "var(--dm-text-primary, var(--text-primary))",
+      });
+      for (const item of comp.items || []) {
+        const li = document.createElement("li");
+        li.textContent = item;
+        list.appendChild(li);
+      }
+      return list;
+    },
+
+    code_block(comp) {
+      const pre = document.createElement("pre");
+      pre.textContent = comp.code ?? "";
+      style(pre, {
+        margin: "0",
+        padding: "14px 16px",
+        borderRadius: "14px",
+        background: "var(--dm-surface-gray, var(--bg-primary))",
+        border: "1px solid var(--dm-outline, var(--border-default))",
+        color: "var(--dm-text-primary, var(--text-primary))",
+        fontSize: "12.5px",
+        overflowX: "auto",
+        fontFamily: "var(--mono)",
+      });
+      return pre;
+    },
+
+    // `alert` and `toast` (aliased below).
+    alert(comp) {
+      return createHelperAlert(comp, true);
+    },
+
+    progress(comp) {
+      const wrap = document.createElement("div");
+      style(wrap, { display: "flex", flexDirection: "column", gap: "8px" });
+      const pct = Math.max(0, Math.min(100, Number(comp.value) || 0));
+      const top = document.createElement("div");
+      style(top, { display: "flex", justifyContent: "space-between", fontSize: "13.5px" });
+      const lbl = document.createElement("span");
+      lbl.textContent = comp.label || "Progress";
+      style(lbl, { color: "var(--dm-text-primary, var(--text-primary))", fontWeight: "450" });
+      const val = document.createElement("span");
+      val.textContent = `${pct}%`;
+      style(val, { color: "var(--dm-text-secondary, var(--text-muted))", fontFamily: "var(--mono)" });
+      top.append(lbl, val);
+
+      const track = document.createElement("div");
+      style(track, {
+        height: "8px",
+        borderRadius: "999px",
+        background: "var(--dm-surface-gray, var(--bg-primary))",
+        overflow: "hidden",
+      });
+      const bar = document.createElement("div");
+      style(bar, {
+        width: `${pct}%`,
+        height: "100%",
+        borderRadius: "999px",
+        background: "var(--dm-text-primary, var(--accent-primary))",
+      });
+      track.appendChild(bar);
+      wrap.append(top, track);
+      return wrap;
+    },
+
+    // Form controls: `text_input`, `number_input`, `date_input`, `textarea`,
+    // `select`, `multi_select`, `slider`, `switch` (aliased below); `type` picks the control.
+    text_input(comp, surfaceRoot, inGrid, type) {
+      const field = document.createElement("label");
+      style(field, { display: "flex", flexDirection: "column", gap: "6px", fontSize: "13.5px" });
+      const lbl = document.createElement("span");
+      lbl.textContent = `${comp.label || comp.name}${comp.required ? " *" : ""}`;
+      style(lbl, { fontWeight: "450", color: "var(--dm-text-secondary, var(--text-secondary))" });
+      field.appendChild(lbl);
+
+      let control;
+      if (type === "textarea") {
+        control = document.createElement("textarea");
+        control.rows = Number(comp.rows) || 3;
+        control.placeholder = comp.placeholder || "";
+        control.value = comp.default_value || "";
+      } else if (type === "select" || type === "multi_select") {
+        control = document.createElement("select");
+        if (type === "multi_select") control.multiple = true;
+        for (const opt of comp.options || []) {
+          const o = document.createElement("option");
+          o.value = opt.value;
+          o.textContent = opt.label;
+          control.appendChild(o);
+        }
+      } else if (type === "switch") {
+        const row = document.createElement("div");
+        style(row, { display: "flex", alignItems: "center", gap: "10px", padding: "4px 0" });
+        control = document.createElement("input");
+        control.type = "checkbox";
+        control.checked = !!comp.default_checked;
+        row.append(control, lbl);
+        field.replaceChildren(row);
+      } else {
+        control = document.createElement("input");
+        // `input_type` comes from tool output: only allow plain text-like types.
+        const requested = String(comp.input_type || "text").toLowerCase();
+        control.type =
+          type === "number_input"
+            ? "number"
+            : type === "date_input"
+              ? "date"
+              : type === "slider"
+                ? "range"
+                : SAFE_INPUT_TYPES.includes(requested)
+                  ? requested
+                  : "text";
+        if (comp.placeholder) control.placeholder = comp.placeholder;
+        if (comp.min !== undefined && comp.min !== null) control.min = String(comp.min);
+        if (comp.max !== undefined && comp.max !== null) control.max = String(comp.max);
+        if (comp.step !== undefined && comp.step !== null) control.step = String(comp.step);
+        if (comp.default_value !== undefined && comp.default_value !== null) {
+          control.value = String(comp.default_value);
+        }
+      }
+
+      if (type !== "switch") {
+        style(control, {
+          padding: type === "select" ? "10px 34px 10px 14px" : "10px 14px",
+          borderRadius: "12px",
+          border: "1px solid var(--dm-outline, var(--border-default))",
+          background: "var(--dm-surface-gray, var(--bg-primary))",
+          color: "var(--dm-text-primary, var(--text-primary))",
+          fontSize: "14px",
+        });
+        field.appendChild(control);
+      }
+
+      control.setAttribute("data-ui-field", comp.name || comp.label || "field");
+      return field;
+    },
+
+    button(comp, surfaceRoot) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = comp.label || "Submit";
+      btn.disabled = !!comp.disabled;
+      const v = String(comp.variant || "primary").toLowerCase();
+      const btnStyles =
+        v === "primary"
+          ? {
+              background: "var(--primary-btn-bg, #121317)",
+              color: "var(--primary-btn-fg, #fff)",
+              border: "1px solid transparent",
+            }
+          : v === "danger"
+            ? {
+                background: "var(--accent-error)",
+                color: "#fff",
+                border: "1px solid var(--accent-error)",
+              }
+            : v === "outline"
+              ? {
+                  background: "transparent",
+                  color: "var(--dm-text-primary, var(--text-primary))",
+                  border: "1px solid var(--dm-outline, var(--border-default))",
+                  boxShadow: "0 0 0 1px var(--dm-outline, var(--border-default))",
+                }
+              : v === "ghost"
+                ? {
+                    background: "transparent",
+                    color: "var(--dm-text-secondary, var(--text-secondary))",
+                    border: "1px solid transparent",
+                  }
+                : {
+                    background: "var(--dm-surface-gray, var(--bg-primary))",
+                    color: "var(--dm-text-primary, var(--text-secondary))",
+                    border: "1px solid var(--dm-outline, var(--border-default))",
+                  };
+      style(btn, {
+        padding: "10px 22px",
+        borderRadius: "999px",
+        fontSize: "14px",
+        fontWeight: "500",
+        letterSpacing: "-0.004em",
+        cursor: btn.disabled ? "default" : "pointer",
+        opacity: btn.disabled ? "0.45" : "1",
+        alignSelf: "flex-start",
+        ...btnStyles,
+      });
+
+      btn.addEventListener("click", () => {
+        const scope = btn.closest('[data-ui-scope="true"]') || surfaceRoot;
+        const inputs = scope ? Array.from(scope.querySelectorAll("[data-ui-field]")) : [];
+        const actionId = comp.action_id || comp.label || "click";
+        let msg;
+        if (inputs.length > 0) {
+          const lines = inputs.map((inp) => {
+            const name = inp.getAttribute("data-ui-field");
+            const val =
+              inp.type === "checkbox"
+                ? String(inp.checked)
+                : inp.multiple
+                  ? Array.from(inp.selectedOptions)
+                      .map((o) => o.value)
+                      .join(", ")
+                  : inp.value;
+            return `  ${name}: ${val}`;
+          });
+          msg = `[UI Event: Form submitted]\nAction: ${actionId}\nData:\n${lines.join("\n")}`;
+        } else {
+          msg = `[UI Event: Button clicked]\nAction: ${actionId}`;
+        }
+        if (sendMessageToComposer(msg)) {
+          const orig = btn.textContent;
+          btn.textContent = `${orig} ✓`;
+          setTimeout(() => {
+            btn.textContent = orig;
+          }, 1800);
+        }
+      });
+      return btn;
+    },
+
+  };
+  RENDERERS.modal = RENDERERS.card;
+  RENDERERS.toast = RENDERERS.alert;
+  RENDERERS.number_input = RENDERERS.text_input;
+  RENDERERS.date_input = RENDERERS.text_input;
+  RENDERERS.textarea = RENDERERS.text_input;
+  RENDERERS.select = RENDERERS.text_input;
+  RENDERERS.multi_select = RENDERERS.text_input;
+  RENDERERS.slider = RENDERERS.text_input;
+  RENDERERS.switch = RENDERERS.text_input;
+
   // Recursively renders an inner `adk_ui::Component` inside a card body.
   const renderInnerComponent = (comp, surfaceRoot, inGrid = false) => {
     if (!comp || typeof comp !== "object") return document.createTextNode("");
     const type = String(comp.type || "").toLowerCase();
-
-    switch (type) {
-      case "text": {
-        const v = String(comp.variant || "body").toLowerCase();
-        const el = document.createElement(v === "code" ? "code" : "div");
-        el.textContent = comp.content ?? "";
-        const map = {
-          h1: {
-            fontSize: "22px",
-            fontWeight: "450",
-            letterSpacing: "-0.012em",
-            lineHeight: "1.2",
-            color: "var(--dm-text-primary, var(--text-primary))",
-          },
-          h2: {
-            fontSize: inGrid ? "28px" : "19px",
-            fontWeight: "450",
-            letterSpacing: inGrid ? "-0.015em" : "-0.01em",
-            lineHeight: inGrid ? "1.12" : "1.22",
-            color: "var(--dm-text-primary, var(--text-primary))",
-          },
-          h3: {
-            fontSize: "16.5px",
-            fontWeight: "450",
-            letterSpacing: "-0.006em",
-            lineHeight: "1.32",
-            color: "var(--dm-text-primary, var(--text-primary))",
-          },
-          h4: {
-            fontSize: "14.5px",
-            fontWeight: "500",
-            lineHeight: "1.4",
-            color: "var(--dm-text-primary, var(--text-primary))",
-          },
-          caption: {
-            fontSize: "13px",
-            color: "var(--dm-text-secondary, var(--text-muted))",
-            lineHeight: "1.45",
-          },
-          code: {
-            fontFamily: "var(--mono)",
-            fontSize: "12.5px",
-            background: "var(--dm-surface-gray-subtle, var(--bg-primary))",
-            border: "1px solid var(--dm-outline, var(--border-default))",
-            padding: "1px 6px",
-            borderRadius: "6px",
-          },
-          body: {
-            fontSize: "14.5px",
-            lineHeight: "1.55",
-            color: "var(--dm-text-primary, var(--text-primary))",
-          },
-        };
-        style(el, map[v] || map.body);
-        return el;
-      }
-
-      case "badge": {
-        const span = document.createElement("span");
-        span.textContent = comp.label ?? "";
-        const vc = variantColors(comp.variant);
-        style(span, {
-          display: "inline-flex",
-          alignItems: "center",
-          padding: "4px 10px",
-          borderRadius: "999px",
-          fontSize: "12px",
-          fontWeight: "500",
-          background: vc.bg,
-          color: vc.fg,
-          border: "1px solid transparent",
-          alignSelf: "flex-start",
-        });
-        return span;
-      }
-
-      case "divider": {
-        const hr = document.createElement("hr");
-        style(hr, {
-          border: "0",
-          borderTop: "1px solid var(--dm-outline, var(--border-default))",
-          margin: "6px 0",
-          width: "100%",
-        });
-        return hr;
-      }
-
-      case "stack": {
-        const div = document.createElement("div");
-        const horiz = String(comp.direction || "vertical").toLowerCase() === "horizontal";
-        const gapPx = Math.max(1, Number(comp.gap ?? 3)) * 4;
-        style(div, {
-          display: "flex",
-          flexDirection: horiz ? "row" : "column",
-          flexWrap: horiz ? "wrap" : "nowrap",
-          alignItems: horiz ? "center" : "stretch",
-          gap: `${gapPx}px`,
-        });
-        for (const child of comp.children || []) {
-          div.appendChild(renderInnerComponent(child, surfaceRoot, inGrid));
-        }
-        return div;
-      }
-
-      case "grid": {
-        const div = document.createElement("div");
-        const cols = Math.max(1, Math.min(6, Number(comp.columns) || 2));
-        style(div, {
-          display: "grid",
-          gridTemplateColumns: `repeat(auto-fit, minmax(${cols >= 3 ? "165px" : "220px"}, 1fr))`,
-          gap: "14px",
-          alignItems: "stretch",
-        });
-        for (const child of comp.children || []) {
-          div.appendChild(renderInnerComponent(child, surfaceRoot, true));
-        }
-        return div;
-      }
-
-      case "container": {
-        const div = document.createElement("div");
-        style(div, {
-          display: "flex",
-          flexDirection: "column",
-          gap: "12px",
-        });
-        for (const child of comp.children || []) {
-          div.appendChild(renderInnerComponent(child, surfaceRoot, inGrid));
-        }
-        return div;
-      }
-
-      // Nested card (e.g. KPI stat tile inside a `Grid`)
-      case "card":
-      case "modal": {
-        const tile = document.createElement("div");
-        tile.setAttribute("data-ui-scope", "true");
-        style(tile, {
-          display: "flex",
-          flexDirection: "column",
-          justifyContent: "space-between",
-          gap: "8px",
-          padding: inGrid ? "18px 20px" : "20px 22px",
-          borderRadius: "20px",
-          background: "var(--dm-surface-gray, var(--bg-primary))",
-          border: "1px solid var(--dm-outline, var(--border-default))",
-        });
-
-        if (comp.title) {
-          const t = document.createElement("div");
-          t.textContent = comp.title;
-          style(
-            t,
-            inGrid
-              ? {
-                  fontSize: "13.5px",
-                  fontWeight: "450",
-                  letterSpacing: "0.005em",
-                  color: "var(--dm-text-secondary, var(--text-muted))",
-                }
-              : {
-                  fontSize: "16.5px",
-                  fontWeight: "450",
-                  letterSpacing: "-0.006em",
-                  color: "var(--dm-text-primary, var(--text-primary))",
-                }
-          );
-          tile.appendChild(t);
-        }
-        if (comp.description) {
-          const d = document.createElement("div");
-          d.textContent = comp.description;
-          style(d, {
-            fontSize: "13.5px",
-            lineHeight: "1.45",
-            color: "var(--dm-text-secondary, var(--text-muted))",
-          });
-          tile.appendChild(d);
-        }
-        if (Array.isArray(comp.content) && comp.content.length) {
-          const body = document.createElement("div");
-          style(body, { display: "flex", flexDirection: "column", gap: "8px" });
-          for (const child of comp.content) {
-            body.appendChild(renderInnerComponent(child, tile, inGrid));
-          }
-          tile.appendChild(body);
-        }
-        if (Array.isArray(comp.footer) && comp.footer.length) {
-          const ftr = document.createElement("div");
-          style(ftr, {
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "8px",
-            justifyContent: "flex-end",
-            paddingTop: "10px",
-          });
-          for (const child of comp.footer) {
-            ftr.appendChild(renderInnerComponent(child, tile, false));
-          }
-          tile.appendChild(ftr);
-        }
-        return tile;
-      }
-
-      case "tabs": {
-        const wrap = document.createElement("div");
-        style(wrap, { display: "flex", flexDirection: "column", gap: "14px" });
-        const bar = document.createElement("div");
-        bar.setAttribute("role", "tablist");
-        style(bar, {
-          display: "flex",
-          gap: "4px",
-          borderBottom: "1px solid var(--dm-outline, var(--border-default))",
-          paddingBottom: "0",
-        });
-        const panel = document.createElement("div");
-        panel.setAttribute("role", "tabpanel");
-        panel.tabIndex = 0;
-        const tabs = Array.isArray(comp.tabs) ? comp.tabs : [];
-        const uid = `adk-ui-tabs-${++tabsUid}`;
-        panel.id = `${uid}-panel`;
-        let activeIdx = 0;
-
-        // Active look comes from the `.adk-ui-tab[data-active]` stylesheet rule.
-        const selectTab = (idx, focus = false) => {
-          activeIdx = idx;
-          Array.from(bar.children).forEach((btn, i) => {
-            const active = i === activeIdx;
-            btn.dataset.active = active ? "true" : "false";
-            btn.setAttribute("aria-selected", active ? "true" : "false");
-            btn.tabIndex = active ? 0 : -1;
-            if (active) {
-              panel.setAttribute("aria-labelledby", btn.id);
-              if (focus) btn.focus();
-            }
-          });
-          panel.replaceChildren();
-          for (const child of tabs[idx]?.content || []) {
-            panel.appendChild(renderInnerComponent(child, surfaceRoot, false));
-          }
-        };
-
-        tabs.forEach((tab, idx) => {
-          const b = document.createElement("button");
-          b.type = "button";
-          b.className = "adk-ui-tab";
-          b.id = `${uid}-tab-${idx}`;
-          b.setAttribute("role", "tab");
-          b.setAttribute("aria-controls", panel.id);
-          b.textContent = tab.label || `Tab ${idx + 1}`;
-          style(b, {
-            borderRadius: "0",
-            padding: "10px 16px",
-            marginBottom: "-1px",
-            fontSize: "14px",
-            fontWeight: "500",
-            cursor: "pointer",
-          });
-          b.addEventListener("click", () => selectTab(idx));
-          b.addEventListener("keydown", (event) => {
-            let next = null;
-            if (event.key === "ArrowRight") next = (idx + 1) % tabs.length;
-            else if (event.key === "ArrowLeft") next = (idx - 1 + tabs.length) % tabs.length;
-            else if (event.key === "Home") next = 0;
-            else if (event.key === "End") next = tabs.length - 1;
-            if (next === null) return;
-            event.preventDefault();
-            selectTab(next, true);
-          });
-          bar.appendChild(b);
-        });
-        wrap.append(bar, panel);
-        if (tabs.length) selectTab(0);
-        return wrap;
-      }
-
-      case "chart":
-        return renderChartInner(comp);
-
-      case "table": {
-        const { element, toolbar } = renderTableParts(comp);
-        const box = document.createElement("div");
-        style(box, {
-          border: "1px solid var(--dm-outline, var(--border-default))",
-          borderRadius: "18px",
-          overflow: "hidden",
-        });
-        const bar = document.createElement("div");
-        style(bar, {
-          display: "flex",
-          justifyContent: "flex-end",
-          padding: "10px 16px",
-          background: "transparent",
-          borderBottom: "1px solid var(--dm-outline, var(--border-default))",
-        });
-        bar.appendChild(toolbar);
-        box.append(bar, element);
-        return box;
-      }
-
-      case "key_value": {
-        const dl = document.createElement("div");
-        style(dl, {
-          display: "grid",
-          gridTemplateColumns: "minmax(140px, auto) 1fr",
-          gap: "10px 20px",
-          padding: "16px 18px",
-          borderRadius: "18px",
-          background: "var(--dm-surface-gray, var(--bg-primary))",
-          border: "1px solid var(--dm-outline, var(--border-default))",
-          fontSize: "13.5px",
-        });
-        for (const pair of comp.pairs || []) {
-          const k = document.createElement("div");
-          k.textContent = pair.key;
-          style(k, { color: "var(--dm-text-secondary, var(--text-muted))", fontWeight: "450" });
-          const v = document.createElement("div");
-          v.textContent = pair.value;
-          style(v, { color: "var(--dm-text-primary, var(--text-primary))", fontWeight: "500" });
-          dl.append(k, v);
-        }
-        return dl;
-      }
-
-      case "list": {
-        const list = document.createElement(comp.ordered ? "ol" : "ul");
-        style(list, {
-          margin: "0",
-          paddingLeft: "22px",
-          display: "flex",
-          flexDirection: "column",
-          gap: "6px",
-          fontSize: "14.5px",
-          lineHeight: "1.55",
-          color: "var(--dm-text-primary, var(--text-primary))",
-        });
-        for (const item of comp.items || []) {
-          const li = document.createElement("li");
-          li.textContent = item;
-          list.appendChild(li);
-        }
-        return list;
-      }
-
-      case "code_block": {
-        const pre = document.createElement("pre");
-        pre.textContent = comp.code ?? "";
-        style(pre, {
-          margin: "0",
-          padding: "14px 16px",
-          borderRadius: "14px",
-          background: "var(--dm-surface-gray, var(--bg-primary))",
-          border: "1px solid var(--dm-outline, var(--border-default))",
-          color: "var(--dm-text-primary, var(--text-primary))",
-          fontSize: "12.5px",
-          overflowX: "auto",
-          fontFamily: "var(--mono)",
-        });
-        return pre;
-      }
-
-      case "alert":
-      case "toast": {
-        return createHelperAlert(comp, true);
-      }
-
-      case "progress": {
-        const wrap = document.createElement("div");
-        style(wrap, { display: "flex", flexDirection: "column", gap: "8px" });
-        const pct = Math.max(0, Math.min(100, Number(comp.value) || 0));
-        const top = document.createElement("div");
-        style(top, { display: "flex", justifyContent: "space-between", fontSize: "13.5px" });
-        const lbl = document.createElement("span");
-        lbl.textContent = comp.label || "Progress";
-        style(lbl, { color: "var(--dm-text-primary, var(--text-primary))", fontWeight: "450" });
-        const val = document.createElement("span");
-        val.textContent = `${pct}%`;
-        style(val, { color: "var(--dm-text-secondary, var(--text-muted))", fontFamily: "var(--mono)" });
-        top.append(lbl, val);
-
-        const track = document.createElement("div");
-        style(track, {
-          height: "8px",
-          borderRadius: "999px",
-          background: "var(--dm-surface-gray, var(--bg-primary))",
-          overflow: "hidden",
-        });
-        const bar = document.createElement("div");
-        style(bar, {
-          width: `${pct}%`,
-          height: "100%",
-          borderRadius: "999px",
-          background: "var(--dm-text-primary, var(--accent-primary))",
-        });
-        track.appendChild(bar);
-        wrap.append(top, track);
-        return wrap;
-      }
-
-      case "text_input":
-      case "number_input":
-      case "date_input":
-      case "textarea":
-      case "select":
-      case "multi_select":
-      case "slider":
-      case "switch": {
-        const field = document.createElement("label");
-        style(field, { display: "flex", flexDirection: "column", gap: "6px", fontSize: "13.5px" });
-        const lbl = document.createElement("span");
-        lbl.textContent = `${comp.label || comp.name}${comp.required ? " *" : ""}`;
-        style(lbl, { fontWeight: "450", color: "var(--dm-text-secondary, var(--text-secondary))" });
-        field.appendChild(lbl);
-
-        let control;
-        if (type === "textarea") {
-          control = document.createElement("textarea");
-          control.rows = Number(comp.rows) || 3;
-          control.placeholder = comp.placeholder || "";
-          control.value = comp.default_value || "";
-        } else if (type === "select" || type === "multi_select") {
-          control = document.createElement("select");
-          if (type === "multi_select") control.multiple = true;
-          for (const opt of comp.options || []) {
-            const o = document.createElement("option");
-            o.value = opt.value;
-            o.textContent = opt.label;
-            control.appendChild(o);
-          }
-        } else if (type === "switch") {
-          const row = document.createElement("div");
-          style(row, { display: "flex", alignItems: "center", gap: "10px", padding: "4px 0" });
-          control = document.createElement("input");
-          control.type = "checkbox";
-          control.checked = !!comp.default_checked;
-          row.append(control, lbl);
-          field.replaceChildren(row);
-        } else {
-          control = document.createElement("input");
-          // `input_type` comes from tool output: only allow plain text-like types.
-          const requested = String(comp.input_type || "text").toLowerCase();
-          control.type =
-            type === "number_input"
-              ? "number"
-              : type === "date_input"
-                ? "date"
-                : type === "slider"
-                  ? "range"
-                  : SAFE_INPUT_TYPES.includes(requested)
-                    ? requested
-                    : "text";
-          if (comp.placeholder) control.placeholder = comp.placeholder;
-          if (comp.min !== undefined && comp.min !== null) control.min = String(comp.min);
-          if (comp.max !== undefined && comp.max !== null) control.max = String(comp.max);
-          if (comp.step !== undefined && comp.step !== null) control.step = String(comp.step);
-          if (comp.default_value !== undefined && comp.default_value !== null) {
-            control.value = String(comp.default_value);
-          }
-        }
-
-        if (type !== "switch") {
-          style(control, {
-            padding: type === "select" ? "10px 34px 10px 14px" : "10px 14px",
-            borderRadius: "12px",
-            border: "1px solid var(--dm-outline, var(--border-default))",
-            background: "var(--dm-surface-gray, var(--bg-primary))",
-            color: "var(--dm-text-primary, var(--text-primary))",
-            fontSize: "14px",
-          });
-          field.appendChild(control);
-        }
-
-        control.setAttribute("data-ui-field", comp.name || comp.label || "field");
-        return field;
-      }
-
-      case "button": {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.textContent = comp.label || "Submit";
-        btn.disabled = !!comp.disabled;
-        const v = String(comp.variant || "primary").toLowerCase();
-        const btnStyles =
-          v === "primary"
-            ? {
-                background: "var(--primary-btn-bg, #121317)",
-                color: "var(--primary-btn-fg, #fff)",
-                border: "1px solid transparent",
-              }
-            : v === "danger"
-              ? {
-                  background: "var(--accent-error)",
-                  color: "#fff",
-                  border: "1px solid var(--accent-error)",
-                }
-              : v === "outline"
-                ? {
-                    background: "transparent",
-                    color: "var(--dm-text-primary, var(--text-primary))",
-                    border: "1px solid var(--dm-outline, var(--border-default))",
-                    boxShadow: "0 0 0 1px var(--dm-outline, var(--border-default))",
-                  }
-                : v === "ghost"
-                  ? {
-                      background: "transparent",
-                      color: "var(--dm-text-secondary, var(--text-secondary))",
-                      border: "1px solid transparent",
-                    }
-                  : {
-                      background: "var(--dm-surface-gray, var(--bg-primary))",
-                      color: "var(--dm-text-primary, var(--text-secondary))",
-                      border: "1px solid var(--dm-outline, var(--border-default))",
-                    };
-        style(btn, {
-          padding: "10px 22px",
-          borderRadius: "999px",
-          fontSize: "14px",
-          fontWeight: "500",
-          letterSpacing: "-0.004em",
-          cursor: btn.disabled ? "default" : "pointer",
-          opacity: btn.disabled ? "0.45" : "1",
-          alignSelf: "flex-start",
-          ...btnStyles,
-        });
-
-        btn.addEventListener("click", () => {
-          const scope = btn.closest('[data-ui-scope="true"]') || surfaceRoot;
-          const inputs = scope ? Array.from(scope.querySelectorAll("[data-ui-field]")) : [];
-          const actionId = comp.action_id || comp.label || "click";
-          let msg;
-          if (inputs.length > 0) {
-            const lines = inputs.map((inp) => {
-              const name = inp.getAttribute("data-ui-field");
-              const val =
-                inp.type === "checkbox"
-                  ? String(inp.checked)
-                  : inp.multiple
-                    ? Array.from(inp.selectedOptions)
-                        .map((o) => o.value)
-                        .join(", ")
-                    : inp.value;
-              return `  ${name}: ${val}`;
-            });
-            msg = `[UI Event: Form submitted]\nAction: ${actionId}\nData:\n${lines.join("\n")}`;
-          } else {
-            msg = `[UI Event: Button clicked]\nAction: ${actionId}`;
-          }
-          if (sendMessageToComposer(msg)) {
-            const orig = btn.textContent;
-            btn.textContent = `${orig} ✓`;
-            setTimeout(() => {
-              btn.textContent = orig;
-            }, 1800);
-          }
-        });
-        return btn;
-      }
-
-      default:
-        return document.createTextNode("");
-    }
+    const renderer = Object.prototype.hasOwnProperty.call(RENDERERS, type)
+      ? RENDERERS[type]
+      : null;
+    return renderer ? renderer(comp, surfaceRoot, inGrid, type) : document.createTextNode("");
   };
 
   // Converts a top-level `UiResponse` into one or more standalone `.adk-ui-card` elements
@@ -2076,7 +2102,6 @@
       document.body.appendChild(helperToastStack);
     }
 
-    const vc = variantColors(comp.variant);
     const toast = document.createElement("div");
     style(toast, {
       pointerEvents: "auto",

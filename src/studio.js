@@ -255,21 +255,50 @@
     }
   };
 
+  const MODEL_SELECT_IDS = {
+    model: "setting-model-select",
+    imageModel: "setting-image-model-select",
+    videoModel: "setting-video-model-select",
+  };
+
+  // `PRESET_MODEL_OPTIONS` is the single source of truth for the preset lists:
+  // the <option>s in studio.html are replaced here so the two cannot drift
+  // (drift would make `syncModelControl` silently fall back to "Custom…").
+  const populateModelSelects = () => {
+    for (const [key, id] of Object.entries(MODEL_SELECT_IDS)) {
+      const selectEl = $(id);
+      if (!selectEl) continue;
+      const frag = document.createDocumentFragment();
+      for (const name of PRESET_MODEL_OPTIONS[key]) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        frag.appendChild(opt);
+      }
+      const custom = document.createElement("option");
+      custom.value = "__custom__";
+      custom.textContent = "Custom…";
+      frag.appendChild(custom);
+      selectEl.replaceChildren(frag);
+    }
+  };
+  populateModelSelects();
+
   const syncAllModelControls = () => {
     syncModelControl(
-      $("setting-model-select"),
+      $(MODEL_SELECT_IDS.model),
       $("setting-model-custom"),
       PRESET_MODEL_OPTIONS.model,
       prefs.model
     );
     syncModelControl(
-      $("setting-image-model-select"),
+      $(MODEL_SELECT_IDS.imageModel),
       $("setting-image-model-custom"),
       PRESET_MODEL_OPTIONS.imageModel,
       prefs.imageModel
     );
     syncModelControl(
-      $("setting-video-model-select"),
+      $(MODEL_SELECT_IDS.videoModel),
       $("setting-video-model-custom"),
       PRESET_MODEL_OPTIONS.videoModel,
       prefs.videoModel
@@ -302,16 +331,19 @@
     }
   };
 
-  const applyPreferences = ({
-    rerender = true,
-    syncModels = true,
-    syncPricing = true,
-  } = {}) => {
-    if (prefs.theme === "light" || prefs.theme === "dark") {
-      document.documentElement.setAttribute("data-theme", prefs.theme);
-    } else {
-      document.documentElement.removeAttribute("data-theme");
-    }
+  // Settings controls, resolved once (they live in the static settings popover).
+  const settingEls = {
+    themeButtons: Array.from(document.querySelectorAll("#theme-segmented button")),
+    canvasModeButtons: Array.from(document.querySelectorAll("#canvas-mode-segmented button")),
+    showTools: $("setting-show-tools"),
+    showSessionUsage: $("setting-show-session-usage"),
+    showMessageUsage: $("setting-show-message-usage"),
+    showCost: $("setting-show-cost"),
+    autoScroll: $("setting-autoscroll"),
+  };
+
+  // Writes every preference to localStorage. Pure persistence, no DOM work.
+  const persistPrefs = () => {
     localStorage.setItem(STORAGE_KEYS.theme, prefs.theme);
     localStorage.setItem(STORAGE_KEYS.canvasMode, prefs.canvasMode);
     localStorage.setItem(STORAGE_KEYS.showTools, String(prefs.showTools));
@@ -324,44 +356,56 @@
     localStorage.setItem(STORAGE_KEYS.videoModel, prefs.videoModel);
     localStorage.setItem(STORAGE_KEYS.pricingTier, prefs.pricingTier || "standard");
     localStorage.setItem(STORAGE_KEYS.modelPricing, JSON.stringify(prefs.modelPricing || {}));
+  };
 
-    document.querySelectorAll("#theme-segmented button").forEach((btn) => {
-      const on = btn.dataset.themeChoice === prefs.theme;
+  const syncSegmented = (buttons, dataKey, value) => {
+    for (const btn of buttons) {
+      const on = btn.dataset[dataKey] === value;
       btn.classList.toggle("active", on);
       btn.setAttribute("aria-pressed", on ? "true" : "false");
-    });
-    document.querySelectorAll("#canvas-mode-segmented button").forEach((btn) => {
-      const on = btn.dataset.canvasMode === prefs.canvasMode;
-      btn.classList.toggle("active", on);
-      btn.setAttribute("aria-pressed", on ? "true" : "false");
-    });
-    $("setting-show-tools").checked = prefs.showTools;
-    if ($("setting-show-session-usage")) {
-      $("setting-show-session-usage").checked = prefs.showSessionUsage;
     }
-    if ($("setting-show-message-usage")) {
-      $("setting-show-message-usage").checked = prefs.showMessageUsage;
-    }
-    if ($("setting-show-cost")) {
-      $("setting-show-cost").checked = prefs.showCost;
-    }
-    $("setting-autoscroll").checked = prefs.autoScroll;
+  };
+
+  // Reflects `prefs` into the settings popover controls and the composer hint.
+  const syncPrefControls = ({ syncModels = true, syncPricing = true } = {}) => {
+    syncSegmented(settingEls.themeButtons, "themeChoice", prefs.theme);
+    syncSegmented(settingEls.canvasModeButtons, "canvasMode", prefs.canvasMode);
+    if (settingEls.showTools) settingEls.showTools.checked = prefs.showTools;
+    if (settingEls.showSessionUsage) settingEls.showSessionUsage.checked = prefs.showSessionUsage;
+    if (settingEls.showMessageUsage) settingEls.showMessageUsage.checked = prefs.showMessageUsage;
+    if (settingEls.showCost) settingEls.showCost.checked = prefs.showCost;
+    if (settingEls.autoScroll) settingEls.autoScroll.checked = prefs.autoScroll;
     if (syncModels) {
       syncAllModelControls();
     }
-    if (syncPricing && typeof syncPricingControls === "function") {
+    if (syncPricing) {
       syncPricingControls();
     }
+    composerContextHint.textContent = `${prefs.model} · Enter to send`;
+  };
+
+  // Entry point used throughout the file: persist, reflect into the controls,
+  // apply the theme, then re-render (or at least refresh the usage UI).
+  const applyPreferences = ({
+    rerender = true,
+    syncModels = true,
+    syncPricing = true,
+  } = {}) => {
+    if (prefs.theme === "light" || prefs.theme === "dark") {
+      document.documentElement.setAttribute("data-theme", prefs.theme);
+    } else {
+      document.documentElement.removeAttribute("data-theme");
+    }
+    persistPrefs();
+    syncPrefControls({ syncModels, syncPricing });
     if (typeof syncCanvasStageTheme === "function") {
       syncCanvasStageTheme();
     }
 
-    composerContextHint.textContent = `${prefs.model} · Enter to send`;
-
     if (rerender) {
       renderTranscript();
       renderCanvas();
-    } else if (typeof updateSessionUsageUi === "function") {
+    } else {
       updateSessionUsageUi();
     }
   };
@@ -1522,6 +1566,8 @@
       const groupW = groupStep * 0.72;
       const barW = Math.max(4, groupW / Math.max(1, yKeys.length) - 2);
       const zeroY = yToPx(Math.max(0, minVal));
+      // Show at most ~10 x-axis labels regardless of row count.
+      const stepEvery = Math.max(1, Math.ceil(n / 10));
 
       data.forEach((row, i) => {
         const gx = padL + i * groupStep + (groupStep - groupW) / 2;
@@ -1560,7 +1606,6 @@
           }
         });
 
-        const stepEvery = Math.max(1, Math.ceil(n / 10));
         if (i % stepEvery === 0) {
           const rawLbl = String(row[xKey] ?? "");
           const shortLbl = rawLbl.length > 13 ? `${rawLbl.slice(0, 12)}…` : rawLbl;
@@ -2771,19 +2816,8 @@
     }
   };
 
-  const isInputComponent = (c) => {
-    const t = String(c?.type || "").toLowerCase();
-    return (
-      t === "text_input" ||
-      t === "number_input" ||
-      t === "date_input" ||
-      t === "textarea" ||
-      t === "select" ||
-      t === "multi_select" ||
-      t === "slider" ||
-      t === "switch"
-    );
-  };
+  // Lower-cased component type, matching how `renderInnerComponent` dispatches.
+  const compType = (c) => String(c?.type || "").toLowerCase();
 
   const isConfirmCard = (comp, toolName) => {
     if (toolName === "render_confirm") return true;
@@ -2830,8 +2864,8 @@
     const cards = [];
 
     if (
-      (comps.length === 2 && comps[0]?.type === "text" && comps[1]?.type === "table") ||
-      (comps.length === 1 && comps[0]?.type === "table")
+      (comps.length === 2 && compType(comps[0]) === "text" && compType(comps[1]) === "table") ||
+      (comps.length === 1 && compType(comps[0]) === "table")
     ) {
       const title = comps.length === 2 ? comps[0].content : comps[0].title || "Data Table";
       const tableComp = comps.length === 2 ? comps[1] : comps[0];
@@ -2846,11 +2880,11 @@
       return { title, cards };
     }
 
-    if (comps.length === 1 && comps[0]?.type === "chart") {
+    if (comps.length === 1 && compType(comps[0]) === "chart") {
       const chartComp = comps[0];
       const title = chartComp.title || "Chart";
       const { card, body } = createStandaloneCard({ title });
-      body.appendChild(renderChartInner({ ...chartComp, title: null }));
+      body.appendChild(renderChartInner(chartComp));
       cards.push(card);
       return { title, cards };
     }
@@ -2884,8 +2918,8 @@
         t === "stack" &&
         Array.isArray(comp.children) &&
         comp.children.length === 2 &&
-        comp.children[0]?.type === "text" &&
-        comp.children[1]?.type === "grid"
+        compType(comp.children[0]) === "text" &&
+        compType(comp.children[1]) === "grid"
       ) {
         const secTitle = comp.children[0].content;
         if (!surfaceTitle) surfaceTitle = secTitle;
@@ -2904,17 +2938,17 @@
 
       if (t === "card" || t === "modal") {
         let contentArr = Array.isArray(comp.content) ? [...comp.content] : [];
-        const singleTable = contentArr.length === 1 && contentArr[0]?.type === "table";
-        const singleChart = contentArr.length === 1 && contentArr[0]?.type === "chart";
+        const singleTable = contentArr.length === 1 && compType(contentArr[0]) === "table";
+        const singleChart = contentArr.length === 1 && compType(contentArr[0]) === "chart";
         const isProgress =
           toolName === "render_progress" ||
           (!comp.title && contentArr.some((c) => String(c?.type || "").toLowerCase() === "progress"));
 
         let liftedTitle = null;
         let liftedDesc = null;
-        if (isProgress && !comp.title && contentArr[0]?.type === "text") {
+        if (isProgress && !comp.title && compType(contentArr[0]) === "text") {
           liftedTitle = contentArr.shift().content;
-          if (contentArr[0]?.type === "text" && String(contentArr[0].variant || "").toLowerCase() === "caption") {
+          if (compType(contentArr[0]) === "text" && String(contentArr[0].variant || "").toLowerCase() === "caption") {
             liftedDesc = contentArr.shift().content;
           }
         }
@@ -2945,7 +2979,7 @@
         if (singleTable && tableElement) {
           body.appendChild(tableElement);
         } else if (singleChart) {
-          body.appendChild(renderChartInner({ ...contentArr[0], title: null }));
+          body.appendChild(renderChartInner(contentArr[0]));
         } else {
           for (const child of contentArr) {
             body.appendChild(renderInnerComponent(child, card));

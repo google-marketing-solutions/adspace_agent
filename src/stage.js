@@ -320,7 +320,6 @@ out float v_alpha;
 out float v_hoverMix;
 
 uniform vec2 u_cssSize;
-uniform float u_dpr;
 uniform int u_cols;
 uniform vec2 u_gridOrigin;
 uniform float u_gridStep;
@@ -466,7 +465,7 @@ void main() {
   gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
 
   v_localCoord = corner * quadHalfCss;
-  // Pass radius in local CSS pixels in v_hoverMix's companion or normalize localCoord by radius
+  // Normalise by radius so the fragment shader sees the dot edge at dist == 1
   v_localCoord /= max(radiusCss, 0.1);
   v_color = dotColor;
   v_alpha = clamp(alpha, 0.0, 1.0);
@@ -655,7 +654,6 @@ void main() {
         ]);
         dotU = getUniforms(gl, dotProg, [
           "u_cssSize",
-          "u_dpr",
           "u_cols",
           "u_gridOrigin",
           "u_gridStep",
@@ -745,12 +743,7 @@ void main() {
       let streamTime = 0;
       const accentFor = (name) =>
         preset.accents[name] || preset.accents[WAVE_ACTIVITIES[0]];
-      const accent = {
-        tint: accentFor(WAVE_ACTIVITIES[0]).tint.slice(),
-        hover: accentFor(WAVE_ACTIVITIES[0]).hover.slice(),
-        core: accentFor(WAVE_ACTIVITIES[0]).core.slice(),
-        bgGain: accentFor(WAVE_ACTIVITIES[0]).bgGain,
-      };
+      const accent = { tint: [], hover: [], core: [], bgGain: 0 };
       let accentTargetName = WAVE_ACTIVITIES[0];
 
       const streamActive = () => streamTarget > 0 || stream > 0.002;
@@ -762,6 +755,7 @@ void main() {
         accent.core = target.core.slice();
         accent.bgGain = target.bgGain;
       };
+      snapAccent();
 
       const stepStream = (dt) => {
         if (dt <= 0) return;

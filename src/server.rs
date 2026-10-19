@@ -211,6 +211,8 @@ app_modules! {
     "format.js",
     "markdown.js",
     "stage.js",
+    "state.js",
+    "status.js",
     "usage/counter.js",
 }
 

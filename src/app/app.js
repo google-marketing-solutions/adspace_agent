@@ -23,7 +23,16 @@
 // 4. Right-hand Interactive `adk-ui` Canvas rendering standalone KPI dashboards,
 //    SVG charts, sortable/filterable tables, and two-way forms.
 
-import { $, style } from "./dom.js";
+import {
+  $,
+  bindPopoverTrigger,
+  closePopover,
+  focusableIn,
+  isPopoverOpen,
+  openPopover,
+  showToast,
+  style,
+} from "./dom.js";
 import {
   formatExactInt,
   formatUsdDetail,
@@ -31,102 +40,26 @@ import {
   initialsOf,
   safeImageSrc,
   variantColors,
-  variantIconName,
 } from "./format.js";
+import {
+  APP_NAME,
+  DEFAULT_MODELS,
+  els,
+  prefs,
+  PRESET_MODEL_OPTIONS,
+  state,
+  STORAGE_KEYS,
+} from "./state.js";
+import { onStatusChange, setStatus, showError } from "./status.js";
 import { appendInlineMarkdown, parseMarkdownBlocksInto } from "./markdown.js";
 import { animateCounter, prefersReducedMotion, triggerPulseClass } from "./usage/counter.js";
 import { renderChartInner } from "./adk-ui/charts.js";
 import { renderTableParts } from "./adk-ui/tables.js";
 import { AdSpaceStage } from "./stage.js";
 
-const APP_NAME = "adspace_agent";
 const CHANNEL = "adspace:oauth";
 const EVENTS_PATH = "/oauth2/events";
 const ACK_PATH = "/oauth2/ack";
-
-const STORAGE_KEYS = {
-  theme: "adspace.studio.theme",
-  canvasMode: "adspace.studio.canvasMode",
-  showTools: "adspace.studio.showTools",
-  showSessionUsage: "adspace.studio.showSessionUsage",
-  showMessageUsage: "adspace.studio.showMessageUsage",
-  showCost: "adspace.studio.showCost",
-  autoScroll: "adspace.studio.autoScroll",
-  leftWidth: "adspace.studio.leftWidth",
-  model: "adspace.studio.model",
-  imageModel: "adspace.studio.imageModel",
-  videoModel: "adspace.studio.videoModel",
-  pricingTier: "adspace.studio.pricingTier",
-  modelPricing: "adspace.studio.modelPricing",
-};
-
-const DEFAULT_MODELS = {
-  model: "gemini-3.8-flash",
-  imageModel: "gemini-3.1-flash-image",
-  videoModel: "veo-3.1-fast-generate-001",
-};
-
-const PRESET_MODEL_OPTIONS = {
-  model: ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-argon"],
-  imageModel: [
-    "gemini-3.1-flash-image",
-    "imagen-4.0-generate-001",
-    "imagen-4.0-fast-generate-001",
-  ],
-  videoModel: [
-    "veo-3.1-fast-generate-001",
-    "veo-3.1-generate-001",
-    "veo-3.0-generate-001",
-  ],
-};
-
-// Application State
-let currentUser = null;
-let sessions = [];
-let activeSession = null;
-let isRunning = false;
-let abortController = null;
-let attachments = [];
-let canvasSurfaces = []; // [{ id, title, eyebrow, raw, cards }]
-let activeSurfaceId = "all";
-let popup = null;
-const handledAuthRequests = new Set();
-// Whether the signed-in user may hot-swap the global models (`/auth/me` → `is_admin`).
-// Absent (e.g. OAuth unconfigured) is treated as allowed.
-let canManageModels = true;
-
-const loadStoredModelPricing = () => {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEYS.modelPricing);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-};
-
-// Preferences
-let prefs = {
-  theme: localStorage.getItem(STORAGE_KEYS.theme) || "system",
-  canvasMode: localStorage.getItem(STORAGE_KEYS.canvasMode) || "stacked",
-  showTools: localStorage.getItem(STORAGE_KEYS.showTools) !== "false",
-  showSessionUsage: localStorage.getItem(STORAGE_KEYS.showSessionUsage) !== "false",
-  showMessageUsage: localStorage.getItem(STORAGE_KEYS.showMessageUsage) !== "false",
-  showCost: localStorage.getItem(STORAGE_KEYS.showCost) !== "false",
-  autoScroll: localStorage.getItem(STORAGE_KEYS.autoScroll) === "true",
-  model: localStorage.getItem(STORAGE_KEYS.model) || DEFAULT_MODELS.model,
-  imageModel: localStorage.getItem(STORAGE_KEYS.imageModel) || DEFAULT_MODELS.imageModel,
-  videoModel: localStorage.getItem(STORAGE_KEYS.videoModel) || DEFAULT_MODELS.videoModel,
-  pricingTier: localStorage.getItem(STORAGE_KEYS.pricingTier) || "standard",
-  modelPricing: loadStoredModelPricing(),
-};
-
-// Per-model Paid Tier Standard rates served by the backend (`config::model_pricing`)
-// in the `/auth/models` payload, keyed by lower-cased model name. The server is the
-// source of truth; the local heuristics in `getDefaultModelPricing` are only a
-// fallback for models the server did not price (or older servers without `pricing`).
-let serverModelPricing = {};
 
 const toFiniteRate = (v) => {
   const n = Number(v);
@@ -153,65 +86,8 @@ const ingestServerPricing = (models) => {
       audioIn: toFiniteRate(p.audio_input_per_million) ?? input,
     };
   }
-  serverModelPricing = next;
+  state.serverModelPricing = next;
   return true;
-};
-
-// DOM Elements
-const statusPill = $("status-pill");
-const statusText = $("status-text");
-const sessionControls = $("session-controls");
-const sessionSelect = $("session-select");
-const newSessionBtn = $("new-session-btn");
-const settingsBtn = $("settings-btn");
-const settingsMenu = $("settings-menu");
-const userMenuAnchor = $("user-menu-anchor");
-const userBtn = $("user-btn");
-const userMenu = $("user-menu");
-const logoutBtn = $("logout-btn");
-const deleteSessionBtn = $("delete-session-btn");
-const errorBanner = $("error-banner");
-const errorBannerText = $("error-banner-text");
-const errorBannerClose = $("error-banner-close");
-const authGate = $("auth-gate");
-const authGateHint = $("auth-gate-hint");
-const googleLoginBtn = $("google-login-btn");
-const workspace = $("workspace");
-const sessionUsageBtn = $("session-usage-btn");
-const sessionUsagePopover = $("session-usage-popover");
-const refreshSessionBtn = $("refresh-session-btn");
-const chatTranscript = $("chat-transcript");
-const attachmentChips = $("attachment-chips");
-const fileInput = $("file-input");
-const chatInput = $("chat-input");
-const sendBtn = $("send-btn");
-const composerContextHint = $("composer-context-hint");
-const composerUserHint = $("composer-user-hint");
-const paneResizer = $("pane-resizer");
-const canvasTabs = $("canvas-tabs");
-const canvasEmpty = $("canvas-empty");
-const canvasSurfacesEl = $("canvas-surfaces");
-const exportUiBtn = $("export-ui-btn");
-const clearUiBtn = $("clear-ui-btn");
-
-const showError = (msg) => {
-  if (!msg) {
-    errorBanner.classList.add("hidden");
-    return;
-  }
-  errorBannerText.textContent = msg;
-  errorBanner.classList.remove("hidden");
-};
-
-// Lets the canvas stage react to the status (streaming wave while the
-// agent is running). Bound once the stage instances exist, see
-// `syncStageStreaming` below.
-let onStatusChange = null;
-
-const setStatus = (kind, label) => {
-  statusPill.className = `status status-${kind}`;
-  statusText.textContent = label || kind;
-  if (typeof onStatusChange === "function") onStatusChange(kind);
 };
 
 // ---------------------------------------------------------------------------
@@ -285,7 +161,7 @@ const syncAllModelControls = () => {
 };
 
 const pushModelsToServer = async () => {
-  if (!canManageModels) return;
+  if (!state.canManageModels) return;
   try {
     const resp = await fetch("/auth/models", {
       method: "POST",
@@ -360,7 +236,7 @@ const syncPrefControls = ({ syncModels = true, syncPricing = true } = {}) => {
   if (syncPricing) {
     syncPricingControls();
   }
-  composerContextHint.textContent = `${prefs.model} · Enter to send`;
+  els.composerContextHint.textContent = `${prefs.model} · Enter to send`;
 };
 
 // Entry point used throughout the file: persist, reflect into the controls,
@@ -412,7 +288,7 @@ const openPopup = (url, name = "adspace_google_auth") => {
     `popup=yes,width=${w},height=${h},left=${left},top=${top}`
   );
   if (win) {
-    popup = win;
+    state.popup = win;
     try {
       win.focus();
     } catch {
@@ -425,9 +301,9 @@ const openPopup = (url, name = "adspace_google_auth") => {
 const handleAuthRequired = async (data) => {
   // The event carries an opaque `request_id` (never the signed OAuth state).
   if (!data || !data.auth_url || !data.request_id) return;
-  if (!currentUser || !activeSession) return;
-  if (data.session_id && data.session_id !== activeSession.id) return;
-  if (handledAuthRequests.has(data.request_id)) return;
+  if (!state.currentUser || !state.activeSession) return;
+  if (data.session_id && data.session_id !== state.activeSession.id) return;
+  if (state.handledAuthRequests.has(data.request_id)) return;
   // Defense in depth: the server is trusted, but never hand `window.open` a
   // `javascript:` (or other non-web) URL — the new window inherits our origin.
   let authUrl;
@@ -437,7 +313,7 @@ const handleAuthRequired = async (data) => {
     return;
   }
   if (authUrl.protocol !== "https:" && authUrl.origin !== location.origin) return;
-  handledAuthRequests.add(data.request_id);
+  state.handledAuthRequests.add(data.request_id);
 
   setStatus("authorizing", "authorizing…");
   const win = openPopup(authUrl.href);
@@ -462,23 +338,23 @@ const handleOAuthCompletion = async (status) => {
   }
   lastOAuthCompletion = { status, at: now };
 
-  if (popup && !popup.closed) {
+  if (state.popup && !state.popup.closed) {
     try {
-      popup.close();
+      state.popup.close();
     } catch {
       /* ignore */
     }
   }
-  popup = null;
+  state.popup = null;
 
   if (status === "login_ok") {
     await checkAuthStatus();
     return;
   }
   if (status === "ok") {
-    setStatus(isRunning ? "running" : "ready", isRunning ? "streaming" : "ready");
-    if (activeSession && !isRunning) {
-      await loadSession(activeSession.id);
+    setStatus(state.isRunning ? "running" : "ready", state.isRunning ? "streaming" : "ready");
+    if (state.activeSession && !state.isRunning) {
+      await loadSession(state.activeSession.id);
     }
   } else if (status === "error") {
     setStatus("ready", "ready");
@@ -538,10 +414,10 @@ const setAvatarImage = (imgEl, fallbackEl, user) => {
 let authCheckPromise = null;
 
 function syncSettingsAvailability() {
-  const hasSession = Boolean(currentUser && activeSession);
-  if (!settingsMenu) return;
-  settingsMenu.classList.toggle("settings-popover--auth-only", !hasSession);
-  settingsMenu.querySelectorAll("[data-session-only]").forEach((el) => {
+  const hasSession = Boolean(state.currentUser && state.activeSession);
+  if (!els.settingsMenu) return;
+  els.settingsMenu.classList.toggle("settings-popover--auth-only", !hasSession);
+  els.settingsMenu.querySelectorAll("[data-session-only]").forEach((el) => {
     el.classList.toggle("hidden", !hasSession);
     el.querySelectorAll("input, select, button, textarea").forEach((ctrl) => {
       ctrl.disabled = !hasSession;
@@ -549,13 +425,13 @@ function syncSettingsAvailability() {
   });
   // Model selectors stay visible (so users can see the active models) but
   // are disabled for non-admins, who would get a 403 from POST /auth/models.
-  settingsMenu.querySelectorAll("[data-admin-only]").forEach((el) => {
+  els.settingsMenu.querySelectorAll("[data-admin-only]").forEach((el) => {
     el.querySelectorAll("input, select").forEach((ctrl) => {
-      ctrl.disabled = !hasSession || !canManageModels;
+      ctrl.disabled = !hasSession || !state.canManageModels;
     });
   });
   const adminHint = $("setting-models-admin-hint");
-  if (adminHint) adminHint.classList.toggle("hidden", canManageModels);
+  if (adminHint) adminHint.classList.toggle("hidden", state.canManageModels);
 }
 
 const checkAuthStatus = () => {
@@ -569,40 +445,40 @@ const checkAuthStatus = () => {
       }
       const data = await resp.json();
       if (!data.authenticated || !data.user) {
-        currentUser = null;
-        activeSession = null;
-        canManageModels = true;
-        authGate.classList.remove("hidden");
-        workspace.classList.add("hidden");
+        state.currentUser = null;
+        state.activeSession = null;
+        state.canManageModels = true;
+        els.authGate.classList.remove("hidden");
+        els.workspace.classList.add("hidden");
         syncActiveStage();
         syncSettingsAvailability();
-        sessionControls.classList.add("hidden");
-        userMenuAnchor.classList.add("hidden");
-        authGateHint.textContent = data.oauth_configured
+        els.sessionControls.classList.add("hidden");
+        els.userMenuAnchor.classList.add("hidden");
+        els.authGateHint.textContent = data.oauth_configured
           ? ""
           : "Configure CLIENT_ID and CLIENT_SECRET in .env to enable Google Sign-In.";
-        authGateHint.classList.toggle("hidden", Boolean(data.oauth_configured));
+        els.authGateHint.classList.toggle("hidden", Boolean(data.oauth_configured));
         return;
       }
 
-      currentUser = data.user;
+      state.currentUser = data.user;
       // `is_admin` gates POST /auth/models; absent (e.g. OAuth unconfigured) means allowed.
-      canManageModels = data.is_admin !== false;
-      authGate.classList.add("hidden");
-      workspace.classList.remove("hidden");
+      state.canManageModels = data.is_admin !== false;
+      els.authGate.classList.add("hidden");
+      els.workspace.classList.remove("hidden");
       syncActiveStage();
       syncSettingsAvailability();
-      sessionControls.classList.remove("hidden");
-      userMenuAnchor.classList.remove("hidden");
+      els.sessionControls.classList.remove("hidden");
+      els.userMenuAnchor.classList.remove("hidden");
 
-      $("user-name").textContent = currentUser.name || currentUser.email;
-      $("menu-user-name").textContent = currentUser.name || "Google User";
-      $("menu-user-email").textContent = currentUser.email;
-      $("menu-user-id").textContent = currentUser.id;
-      composerUserHint.textContent = currentUser.email;
+      $("user-name").textContent = state.currentUser.name || state.currentUser.email;
+      $("menu-user-name").textContent = state.currentUser.name || "Google User";
+      $("menu-user-email").textContent = state.currentUser.email;
+      $("menu-user-id").textContent = state.currentUser.id;
+      els.composerUserHint.textContent = state.currentUser.email;
 
-      setAvatarImage($("user-avatar-img"), $("user-avatar-fallback"), currentUser);
-      setAvatarImage($("menu-avatar-img"), $("menu-avatar-fallback"), currentUser);
+      setAvatarImage($("user-avatar-img"), $("user-avatar-fallback"), state.currentUser);
+      setAvatarImage($("menu-avatar-img"), $("menu-avatar-fallback"), state.currentUser);
 
       if (data.models) {
         ingestServerPricing(data.models);
@@ -625,21 +501,21 @@ const checkAuthStatus = () => {
   return authCheckPromise;
 };
 
-googleLoginBtn.addEventListener("click", () => {
+els.googleLoginBtn.addEventListener("click", () => {
   const win = openPopup("/auth/login", "adspace_google_login");
   if (!win) {
     window.location.href = "/auth/login";
   }
 });
 
-logoutBtn.addEventListener("click", async () => {
-  userMenu.classList.add("hidden");
+els.logoutBtn.addEventListener("click", async () => {
+  els.userMenu.classList.add("hidden");
   try {
     const resp = await fetch("/auth/logout", { method: "POST" });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    activeSession = null;
-    sessions = [];
-    canvasSurfaces = [];
+    state.activeSession = null;
+    state.sessions = [];
+    state.canvasSurfaces = [];
   } catch (err) {
     showError(`Could not sign out: ${err.message || err}`);
   } finally {
@@ -654,24 +530,24 @@ logoutBtn.addEventListener("click", async () => {
 const apiUrl = (path) => `/api${path}`;
 
 const loadUserSessions = async () => {
-  if (!currentUser) return;
+  if (!state.currentUser) return;
   try {
     const resp = await fetch(
-      apiUrl(`/apps/${encodeURIComponent(APP_NAME)}/users/${encodeURIComponent(currentUser.id)}/sessions`)
+      apiUrl(`/apps/${encodeURIComponent(APP_NAME)}/users/${encodeURIComponent(state.currentUser.id)}/sessions`)
     );
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const list = await resp.json();
-    sessions = (Array.isArray(list) ? list : []).sort(
+    state.sessions = (Array.isArray(list) ? list : []).sort(
       (a, b) => (b.lastUpdateTime || 0) - (a.lastUpdateTime || 0)
     );
 
-    if (sessions.length === 0) {
+    if (state.sessions.length === 0) {
       await createNewSession();
     } else {
       const targetId =
-        activeSession && sessions.some((s) => s.id === activeSession.id)
-          ? activeSession.id
-          : sessions[0].id;
+        state.activeSession && state.sessions.some((s) => s.id === state.activeSession.id)
+          ? state.activeSession.id
+          : state.sessions[0].id;
       renderSessionOptions(targetId);
       await loadSession(targetId);
     }
@@ -681,25 +557,25 @@ const loadUserSessions = async () => {
 };
 
 const renderSessionOptions = (selectedId) => {
-  sessionSelect.replaceChildren();
-  sessions.forEach((s, idx) => {
+  els.sessionSelect.replaceChildren();
+  state.sessions.forEach((s, idx) => {
     const opt = document.createElement("option");
     opt.value = s.id;
     const shortId = s.id.slice(0, 8);
     opt.textContent = idx === 0 ? `Latest (${shortId})` : `Session ${shortId}`;
     if (s.id === selectedId) opt.selected = true;
-    sessionSelect.appendChild(opt);
+    els.sessionSelect.appendChild(opt);
   });
 };
 
 let createSessionPromise = null;
 
 const createNewSession = () => {
-  if (!currentUser) return Promise.resolve();
+  if (!state.currentUser) return Promise.resolve();
   if (createSessionPromise) return createSessionPromise;
   createSessionPromise = (async () => {
     const url = apiUrl(
-      `/apps/${encodeURIComponent(APP_NAME)}/users/${encodeURIComponent(currentUser.id)}/sessions`
+      `/apps/${encodeURIComponent(APP_NAME)}/users/${encodeURIComponent(state.currentUser.id)}/sessions`
     );
     try {
       let resp = await fetch(url, {
@@ -717,7 +593,7 @@ const createNewSession = () => {
       }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const created = await resp.json();
-      sessions = [created, ...sessions.filter((s) => s.id !== created.id)];
+      state.sessions = [created, ...state.sessions.filter((s) => s.id !== created.id)];
       renderSessionOptions(created.id);
       await loadSession(created.id);
     } catch (err) {
@@ -734,31 +610,31 @@ const createNewSession = () => {
 let loadSeq = 0;
 
 const loadSession = async (sessionId) => {
-  if (!currentUser || !sessionId) return;
+  if (!state.currentUser || !sessionId) return;
   const seq = ++loadSeq;
-  const isSessionSwitch = !activeSession || activeSession.id !== sessionId;
+  const isSessionSwitch = !state.activeSession || state.activeSession.id !== sessionId;
   // Switching away from a streaming session: stop the run so its SSE loop
   // cannot keep appending the old session's events into the new one.
-  if (isSessionSwitch && isRunning && abortController) abortController.abort();
+  if (isSessionSwitch && state.isRunning && state.abortController) state.abortController.abort();
   try {
     const resp = await fetch(
       apiUrl(
         `/apps/${encodeURIComponent(APP_NAME)}/users/${encodeURIComponent(
-          currentUser.id
+          state.currentUser.id
         )}/sessions/${encodeURIComponent(sessionId)}`
       )
     );
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
     if (seq !== loadSeq) return; // stale: a newer load has started
-    activeSession = data;
+    state.activeSession = data;
     syncSettingsAvailability();
-    $("menu-session-id").textContent = activeSession.id;
+    $("menu-session-id").textContent = state.activeSession.id;
     if (isSessionSwitch) {
-      activeSurfaceId = "all";
+      state.activeSurfaceId = "all";
       closeModalOverlay();
     }
-    rebuildFromSessionEvents(activeSession.events || [], {
+    rebuildFromSessionEvents(state.activeSession.events || [], {
       forceCanvas: isSessionSwitch,
       suppressOverlays: true,
     });
@@ -768,27 +644,27 @@ const loadSession = async (sessionId) => {
   }
 };
 
-sessionSelect.addEventListener("change", () => {
-  if (sessionSelect.value) loadSession(sessionSelect.value);
+els.sessionSelect.addEventListener("change", () => {
+  if (els.sessionSelect.value) loadSession(els.sessionSelect.value);
 });
 
-newSessionBtn.addEventListener("click", () => {
+els.newSessionBtn.addEventListener("click", () => {
   createNewSession();
 });
 
-refreshSessionBtn.addEventListener("click", () => {
-  if (activeSession) loadSession(activeSession.id);
+els.refreshSessionBtn.addEventListener("click", () => {
+  if (state.activeSession) loadSession(state.activeSession.id);
 });
 
-deleteSessionBtn.addEventListener("click", async () => {
-  userMenu.classList.add("hidden");
-  if (!currentUser || !activeSession) return;
+els.deleteSessionBtn.addEventListener("click", async () => {
+  els.userMenu.classList.add("hidden");
+  if (!state.currentUser || !state.activeSession) return;
   try {
     const resp = await fetch(
       apiUrl(
         `/apps/${encodeURIComponent(APP_NAME)}/users/${encodeURIComponent(
-          currentUser.id
-        )}/sessions/${encodeURIComponent(activeSession.id)}`
+          state.currentUser.id
+        )}/sessions/${encodeURIComponent(state.activeSession.id)}`
       ),
       { method: "DELETE" }
     );
@@ -797,7 +673,7 @@ deleteSessionBtn.addEventListener("click", async () => {
     showError(`Could not delete session: ${err.message || err}`);
     return;
   }
-  activeSession = null;
+  state.activeSession = null;
   syncSettingsAvailability();
   await loadUserSessions();
 });
@@ -806,112 +682,9 @@ deleteSessionBtn.addEventListener("click", async () => {
 // `adk-ui` (`UiResponse`) Interactive Component Renderer (Right-Hand Canvas)
 // ---------------------------------------------------------------------------
 
-const showToast = (comp) => {
-  const stack = $("toast-stack");
-  if (!stack || !comp) return;
-  const vc = variantColors(comp.variant);
-  const toast = document.createElement("div");
-  toast.className = "ui-toast";
-  toast.setAttribute("role", "status");
-
-  const iconWrap = document.createElement("span");
-  iconWrap.className = "ui-toast-icon";
-  style(iconWrap, { color: vc.fg });
-  const icon = document.createElement("span");
-  icon.className = "google-symbols filled";
-  icon.setAttribute("aria-hidden", "true");
-  icon.textContent = variantIconName(comp.variant);
-  iconWrap.appendChild(icon);
-
-  const body = document.createElement("div");
-  body.className = "ui-toast-body";
-  const title = document.createElement("div");
-  title.className = "ui-toast-title";
-  title.textContent = comp.message || comp.title || "Notification";
-  body.appendChild(title);
-  if (comp.description) {
-    const desc = document.createElement("div");
-    desc.className = "ui-toast-desc";
-    desc.textContent = comp.description;
-    body.appendChild(desc);
-  }
-
-  toast.append(iconWrap, body);
-
-  let dismissed = false;
-  let timerId = 0;
-  const requestedMs = Number(comp.duration);
-  let remainingMs = Number.isFinite(requestedMs) ? Math.max(0, requestedMs) : 5000;
-  let startedAt = 0;
-
-  const dismiss = () => {
-    if (dismissed) return;
-    dismissed = true;
-    if (timerId) clearTimeout(timerId);
-    toast.classList.add("leaving");
-    setTimeout(() => toast.remove(), 190);
-  };
-
-  // A toast that never auto-dismisses must always be closable by hand.
-  if (comp.dismissible !== false || remainingMs === 0) {
-    const closeBtn = document.createElement("button");
-    closeBtn.type = "button";
-    closeBtn.className = "ui-toast-close";
-    closeBtn.setAttribute("aria-label", "Dismiss notification");
-    closeBtn.innerHTML = "&times;";
-    closeBtn.addEventListener("click", dismiss);
-    toast.appendChild(closeBtn);
-  }
-
-  if (remainingMs > 0) {
-    const bar = document.createElement("div");
-    bar.className = "ui-toast-timer";
-    style(bar, {
-      background: vc.fg,
-      animationDuration: `${remainingMs}ms`,
-    });
-    toast.appendChild(bar);
-
-    const startTimer = () => {
-      if (dismissed || remainingMs <= 0) return;
-      startedAt = performance.now();
-      timerId = window.setTimeout(dismiss, remainingMs);
-    };
-
-    const pauseTimer = () => {
-      if (dismissed || !timerId) return;
-      clearTimeout(timerId);
-      timerId = 0;
-      remainingMs = Math.max(0, remainingMs - (performance.now() - startedAt));
-    };
-
-    toast.addEventListener("pointerenter", pauseTimer);
-    toast.addEventListener("pointerleave", startTimer);
-    // Keyboard users tabbing onto the close button get the same grace period.
-    toast.addEventListener("focusin", pauseTimer);
-    toast.addEventListener("focusout", (ev) => {
-      if (!toast.contains(ev.relatedTarget)) startTimer();
-    });
-    startTimer();
-  }
-
-  stack.appendChild(toast);
-};
-
 let activeModalCleanup = null;
 // Unique id prefix for each rendered `tabs` component (tab ↔ panel wiring).
 let uiTabsSeq = 0;
-
-const FOCUSABLE_SELECTOR =
-  'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), ' +
-  'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-const focusableIn = (container) =>
-  container
-    ? Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
-        (el) => !el.closest(".hidden") && el.getClientRects().length > 0
-      )
-    : [];
 
 const closeModalOverlay = () => {
   const root = $("ui-modal-root");
@@ -1049,10 +822,10 @@ const showModalOverlay = (spec, { isConfirm = false } = {}) => {
   titleEl.id = "ui-modal-title";
   root.setAttribute("aria-labelledby", "ui-modal-title");
   dialog.tabIndex = -1;
-  if (workspace) workspace.inert = true;
+  if (els.workspace) els.workspace.inert = true;
   activeModalCleanup = () => {
     window.removeEventListener("keydown", onKeyDown);
-    if (workspace) workspace.inert = false;
+    if (els.workspace) els.workspace.inert = false;
     root.removeAttribute("aria-labelledby");
     if (previouslyFocused && typeof previouslyFocused.focus === "function") {
       try {
@@ -1859,7 +1632,7 @@ const renderInnerComponent = (comp, surfaceRoot, ctx = {}) => {
         // Programmatic sends must never double as the composer's stop toggle:
         // while a run is streaming, refuse instead of aborting it and dropping
         // the form payload.
-        if (isRunning) {
+        if (state.isRunning) {
           showToast({ variant: "warning", message: "Wait for the agent to finish." });
           return;
         }
@@ -2271,8 +2044,6 @@ const extractUiResponse = (obj) => {
 // Transcript & Canvas Rendering
 // ---------------------------------------------------------------------------
 
-let currentEvents = [];
-
 // ---------------------------------------------------------------------------
 // OpenTelemetry GenAI Token Usage (`adk_telemetry` / `gen_ai.usage.*`) & Cost
 // ---------------------------------------------------------------------------
@@ -2394,7 +2165,7 @@ const getDefaultModelPricing = (model, tier = prefs.pricingTier) => {
   const m = String(model || prefs.model || DEFAULT_MODELS.model)
     .trim()
     .toLowerCase();
-  const base = serverModelPricing[m] || getFallbackModelPricing(m);
+  const base = state.serverModelPricing[m] || getFallbackModelPricing(m);
 
   const mult = tier === "priority" ? 1.8 : tier === "batch" ? 0.5 : 1.0;
   const scale = (v) => Number((v * mult).toFixed(6));
@@ -2665,10 +2436,10 @@ const syncUsageCache = () => {
   const sig = `${prefs.model}|${prefs.pricingTier || "standard"}|${JSON.stringify(
     prefs.modelPricing || {}
   )}`;
-  if (sig !== usageCacheSig || serverModelPricing !== usageCacheServerPricing) {
+  if (sig !== usageCacheSig || state.serverModelPricing !== usageCacheServerPricing) {
     usageCache = new WeakMap();
     usageCacheSig = sig;
-    usageCacheServerPricing = serverModelPricing;
+    usageCacheServerPricing = state.serverModelPricing;
   }
 };
 
@@ -2734,7 +2505,7 @@ const computeSessionUsage = (events) => {
 };
 
 const updateSessionUsageUi = () => {
-  const s = computeSessionUsage(currentEvents);
+  const s = computeSessionUsage(state.currentEvents);
   const activeModel = prefs.model || DEFAULT_MODELS.model;
   const modelsList = s.models.size > 0 ? Array.from(s.models) : [activeModel];
   const primaryModel = modelsList[modelsList.length - 1] || activeModel;
@@ -2744,21 +2515,21 @@ const updateSessionUsageUi = () => {
 
   if ($("session-usage-anchor")) {
     $("session-usage-anchor").classList.toggle("hidden", !showSession);
-    if (!showSession && sessionUsagePopover) {
-      sessionUsagePopover.classList.add("hidden");
+    if (!showSession && els.sessionUsagePopover) {
+      els.sessionUsagePopover.classList.add("hidden");
     }
   }
 
-  if (sessionUsageBtn) {
-    const prevBtnTokens = sessionUsageBtn._lastSessionTokens;
+  if (els.sessionUsageBtn) {
+    const prevBtnTokens = els.sessionUsageBtn._lastSessionTokens;
     if (
       typeof prevBtnTokens === "number" &&
       s.totalTokens > prevBtnTokens &&
       showSession
     ) {
-      triggerPulseClass(sessionUsageBtn, "usage-pill-bump");
+      triggerPulseClass(els.sessionUsageBtn, "usage-pill-bump");
     }
-    sessionUsageBtn._lastSessionTokens = s.totalTokens;
+    els.sessionUsageBtn._lastSessionTokens = s.totalTokens;
   }
 
   animateCounter(
@@ -2773,9 +2544,9 @@ const updateSessionUsageUi = () => {
     $("session-usage-cost").classList.toggle("hidden", !showCost);
     animateCounter($("session-usage-cost"), s.totalCost, formatUsdShort);
   }
-  if (sessionUsageBtn) {
+  if (els.sessionUsageBtn) {
     const costSuffix = showCost ? ` · Est. ${formatUsdDetail(s.totalCost)}` : "";
-    sessionUsageBtn.title = `Session usage: ${formatExactInt(s.totalTokens)} tokens (${formatExactInt(
+    els.sessionUsageBtn.title = `Session usage: ${formatExactInt(s.totalTokens)} tokens (${formatExactInt(
       s.inputTokens
     )} input, ${formatExactInt(s.outputTokens)} output)${costSuffix} across ${s.llmCalls} LLM call${
       s.llmCalls === 1 ? "" : "s"
@@ -2975,13 +2746,13 @@ const rebuildFromSessionEvents = (
   events,
   { forceCanvas = false, suppressOverlays = false } = {}
 ) => {
-  currentEvents = Array.isArray(events) ? events : [];
-  const prevSurfaceIds = canvasSurfaces.map((s) => s.id).join("|");
-  const existingById = new Map(canvasSurfaces.map((s) => [s.id, s]));
+  state.currentEvents = Array.isArray(events) ? events : [];
+  const prevSurfaceIds = state.canvasSurfaces.map((s) => s.id).join("|");
+  const existingById = new Map(state.canvasSurfaces.map((s) => [s.id, s]));
   const nextSurfaces = [];
   const nextOverlays = new Map();
 
-  currentEvents.forEach((ev, idx) => {
+  state.currentEvents.forEach((ev, idx) => {
     const parts = ev?.content?.parts || [];
     let uiIndex = 0;
     parts.forEach((part) => {
@@ -2989,7 +2760,7 @@ const rebuildFromSessionEvents = (
       if (!uiResp) return;
       const slotIndex = uiIndex++;
       const surfaceId = `surface-${ev.id || idx}-${slotIndex}`;
-      const overlayKey = `${activeSession?.id || "anon"}:${ev.id || idx}:${slotIndex}`;
+      const overlayKey = `${state.activeSession?.id || "anon"}:${ev.id || idx}:${slotIndex}`;
       const classified = classifyUiResponse(part, uiResp);
 
       if (classified.toasts.length > 0) {
@@ -3058,9 +2829,9 @@ const rebuildFromSessionEvents = (
       }
     });
   });
-  canvasSurfaces = nextSurfaces;
+  state.canvasSurfaces = nextSurfaces;
   overlayTriggersById = nextOverlays;
-  const nextSurfaceIds = canvasSurfaces.map((s) => s.id).join("|");
+  const nextSurfaceIds = state.canvasSurfaces.map((s) => s.id).join("|");
 
   renderTranscript();
   if (forceCanvas || prevSurfaceIds !== nextSurfaceIds) {
@@ -3069,7 +2840,7 @@ const rebuildFromSessionEvents = (
 };
 
 const focusSurfaceOnCanvas = (surfaceId) => {
-  activeSurfaceId = surfaceId;
+  state.activeSurfaceId = surfaceId;
   prefs.canvasMode = "focused";
   applyPreferences({ rerender: false });
   renderCanvas();
@@ -3084,9 +2855,9 @@ const createAvatarElement = (isUser, authorLabel) => {
   avatar.className = `avatar ${isUser ? "avatar-user" : "avatar-agent"}`;
   avatar.title = authorLabel;
   if (isUser) {
-    if (currentUser?.picture) {
+    if (state.currentUser?.picture) {
       const img = document.createElement("img");
-      img.src = currentUser.picture;
+      img.src = state.currentUser.picture;
       img.alt = authorLabel;
       img.referrerPolicy = "no-referrer";
       img.onerror = () => {
@@ -3193,14 +2964,14 @@ const updateUsageFooter = (parentEl, { isUser, usage }) => {
       usageEl.type = "button";
       usageEl.className = "message-usage";
       usageEl.setAttribute("aria-haspopup", "dialog");
-      if (sessionUsagePopover?.id) usageEl.setAttribute("aria-controls", sessionUsagePopover.id);
+      if (els.sessionUsagePopover?.id) usageEl.setAttribute("aria-controls", els.sessionUsagePopover.id);
       usageEl.addEventListener("click", (e) => {
         e.stopPropagation();
-        if (sessionUsagePopover && prefs.showSessionUsage) {
-          closePopover(settingsBtn, settingsMenu);
-          closePopover(userBtn, userMenu);
+        if (els.sessionUsagePopover && prefs.showSessionUsage) {
+          closePopover(els.settingsBtn, els.settingsMenu);
+          closePopover(els.userBtn, els.userMenu);
           updateSessionUsageUi();
-          openPopover(sessionUsageBtn, sessionUsagePopover);
+          openPopover(els.sessionUsageBtn, els.sessionUsagePopover);
         }
       });
       parentEl.appendChild(usageEl);
@@ -3453,15 +3224,15 @@ const renderTranscript = () => {
   // Decide whether to follow the bottom *before* mutating the DOM: only
   // stick when the user is already near the bottom (or the session changed),
   // so scrolling up to read an earlier message is not fought by streaming.
-  const sessionKey = activeSession?.id || "";
-  const isNewSessionView = chatTranscript._renderedSessionId !== sessionKey;
-  chatTranscript._renderedSessionId = sessionKey;
+  const sessionKey = state.activeSession?.id || "";
+  const isNewSessionView = els.chatTranscript._renderedSessionId !== sessionKey;
+  els.chatTranscript._renderedSessionId = sessionKey;
   const nearBottom =
-    chatTranscript.scrollHeight - chatTranscript.scrollTop - chatTranscript.clientHeight < 40;
+    els.chatTranscript.scrollHeight - els.chatTranscript.scrollTop - els.chatTranscript.clientHeight < 40;
   const stickToBottom = prefs.autoScroll && (nearBottom || isNewSessionView);
   const visibleItems = [];
 
-  currentEvents.forEach((ev, idx) => {
+  state.currentEvents.forEach((ev, idx) => {
     const parts = ev?.content?.parts || [];
     const hasToolOrUi = parts.some(
       (p) =>
@@ -3493,7 +3264,7 @@ const renderTranscript = () => {
       if (uiResp) {
         const surfaceId = `surface-${ev.id || idx}-${uiIndex++}`;
         const found =
-          canvasSurfaces.find((s) => s.id === surfaceId) || overlayTriggersById.get(surfaceId);
+          state.canvasSurfaces.find((s) => s.id === surfaceId) || overlayTriggersById.get(surfaceId);
         if (found) surfaceRefs.push(found);
         return;
       }
@@ -3508,7 +3279,7 @@ const renderTranscript = () => {
     }
 
     const authorLabel = isUser
-      ? currentUser?.name || currentUser?.email || "You"
+      ? state.currentUser?.name || state.currentUser?.email || "You"
       : ev.author === APP_NAME
         ? "AdSpace Agent"
         : ev.author || "Agent";
@@ -3525,7 +3296,7 @@ const renderTranscript = () => {
   });
 
   if (!visibleItems.length) {
-    chatTranscript.replaceChildren();
+    els.chatTranscript.replaceChildren();
     const empty = document.createElement("div");
     empty.className = "transcript-empty-placeholder";
     style(empty, {
@@ -3537,19 +3308,19 @@ const renderTranscript = () => {
     });
     empty.textContent =
       "Ask a question on the left or pick a starter card on the right to begin.";
-    chatTranscript.appendChild(empty);
+    els.chatTranscript.appendChild(empty);
     return;
   }
 
-  chatTranscript
+  els.chatTranscript
     .querySelectorAll(":scope > .transcript-empty-placeholder")
     .forEach((el) => el.remove());
 
   // On a session switch, drop the old rows instead of reusing them so the
   // per-message counters do not animate from the previous session's values.
-  if (isNewSessionView) chatTranscript.replaceChildren();
+  if (isNewSessionView) els.chatTranscript.replaceChildren();
 
-  const existingRows = Array.from(chatTranscript.querySelectorAll(":scope > .message-row"));
+  const existingRows = Array.from(els.chatTranscript.querySelectorAll(":scope > .message-row"));
 
   visibleItems.forEach((item, idx) => {
     const roleKey = item.isUser ? "user" : "agent";
@@ -3567,9 +3338,9 @@ const renderTranscript = () => {
       newRow.append(avatar, col);
 
       if (row) {
-        chatTranscript.replaceChild(newRow, row);
+        els.chatTranscript.replaceChild(newRow, row);
       } else {
-        chatTranscript.appendChild(newRow);
+        els.chatTranscript.appendChild(newRow);
       }
       row = newRow;
     }
@@ -3578,12 +3349,12 @@ const renderTranscript = () => {
     updateMessageCol(col, item);
   });
 
-  while (chatTranscript.children.length > visibleItems.length) {
-    chatTranscript.lastElementChild.remove();
+  while (els.chatTranscript.children.length > visibleItems.length) {
+    els.chatTranscript.lastElementChild.remove();
   }
 
   if (stickToBottom) {
-    chatTranscript.scrollTop = chatTranscript.scrollHeight;
+    els.chatTranscript.scrollTop = els.chatTranscript.scrollHeight;
   }
 };
 
@@ -3593,27 +3364,27 @@ const canvasPanelIdFor = (surfaceId) => `canvas-panel-${surfaceId}`;
 const renderCanvas = () => {
   // Rebuilding the tablist destroys the focused tab; remember whether focus
   // was inside so it can be restored on the newly active tab afterwards.
-  const hadTabFocus = canvasTabs.contains(document.activeElement);
-  canvasSurfacesEl.replaceChildren();
-  canvasTabs.replaceChildren();
+  const hadTabFocus = els.canvasTabs.contains(document.activeElement);
+  els.canvasSurfacesEl.replaceChildren();
+  els.canvasTabs.replaceChildren();
 
-  if (canvasSurfaces.length === 0) {
-    canvasEmpty.classList.remove("hidden");
-    canvasTabs.classList.add("hidden");
+  if (state.canvasSurfaces.length === 0) {
+    els.canvasEmpty.classList.remove("hidden");
+    els.canvasTabs.classList.add("hidden");
     return;
   }
 
   if (prefs.canvasMode === "stacked") {
-    activeSurfaceId = "all";
+    state.activeSurfaceId = "all";
   } else if (
-    activeSurfaceId === "all" ||
-    !canvasSurfaces.some((s) => s.id === activeSurfaceId)
+    state.activeSurfaceId === "all" ||
+    !state.canvasSurfaces.some((s) => s.id === state.activeSurfaceId)
   ) {
-    activeSurfaceId = canvasSurfaces[canvasSurfaces.length - 1].id;
+    state.activeSurfaceId = state.canvasSurfaces[state.canvasSurfaces.length - 1].id;
   }
 
-  canvasEmpty.classList.add("hidden");
-  canvasTabs.classList.remove("hidden");
+  els.canvasEmpty.classList.add("hidden");
+  els.canvasTabs.classList.remove("hidden");
 
   const makeTab = (id, label, isActive, controlsId) => {
     const tab = document.createElement("button");
@@ -3632,31 +3403,31 @@ const renderCanvas = () => {
   const allActive = prefs.canvasMode === "stacked";
   const allBtn = makeTab(
     "all",
-    `All Cards (${canvasSurfaces.length})`,
+    `All Cards (${state.canvasSurfaces.length})`,
     allActive,
-    canvasSurfacesEl.id || "canvas-surfaces"
+    els.canvasSurfacesEl.id || "canvas-surfaces"
   );
   allBtn.addEventListener("click", () => {
-    activeSurfaceId = "all";
+    state.activeSurfaceId = "all";
     prefs.canvasMode = "stacked";
     applyPreferences({ rerender: false });
     renderCanvas();
   });
-  canvasTabs.appendChild(allBtn);
+  els.canvasTabs.appendChild(allBtn);
 
-  canvasSurfaces.forEach((surf) => {
-    const isActive = prefs.canvasMode === "focused" && activeSurfaceId === surf.id;
+  state.canvasSurfaces.forEach((surf) => {
+    const isActive = prefs.canvasMode === "focused" && state.activeSurfaceId === surf.id;
     const tab = makeTab(surf.id, surf.title, isActive, canvasPanelIdFor(surf.id));
     tab.addEventListener("click", () => {
       focusSurfaceOnCanvas(surf.id);
     });
-    canvasTabs.appendChild(tab);
+    els.canvasTabs.appendChild(tab);
   });
 
   const visibleSurfaces =
-    prefs.canvasMode === "focused" && activeSurfaceId !== "all"
-      ? canvasSurfaces.filter((s) => s.id === activeSurfaceId)
-      : canvasSurfaces;
+    prefs.canvasMode === "focused" && state.activeSurfaceId !== "all"
+      ? state.canvasSurfaces.filter((s) => s.id === state.activeSurfaceId)
+      : state.canvasSurfaces;
 
   for (const surf of visibleSurfaces) {
     const group = document.createElement("div");
@@ -3668,19 +3439,19 @@ const renderCanvas = () => {
     for (const card of surf.cards) {
       group.appendChild(card);
     }
-    canvasSurfacesEl.appendChild(group);
+    els.canvasSurfacesEl.appendChild(group);
   }
 
   if (hadTabFocus) {
-    const selected = canvasTabs.querySelector('[role="tab"][aria-selected="true"]');
+    const selected = els.canvasTabs.querySelector('[role="tab"][aria-selected="true"]');
     if (selected) selected.focus();
   }
 };
 
 // Arrow / Home / End move between canvas tabs and activate the target
 // (activation re-renders, which re-focuses the selected tab above).
-canvasTabs.addEventListener("keydown", (e) => {
-  const tabs = Array.from(canvasTabs.querySelectorAll('[role="tab"]'));
+els.canvasTabs.addEventListener("keydown", (e) => {
+  const tabs = Array.from(els.canvasTabs.querySelectorAll('[role="tab"]'));
   if (!tabs.length) return;
   const idx = tabs.indexOf(document.activeElement);
   let next;
@@ -3694,22 +3465,22 @@ canvasTabs.addEventListener("keydown", (e) => {
   tabs[next].click();
 });
 
-exportUiBtn.addEventListener("click", () => {
-  if (!canvasSurfaces.length) return;
-  const payload = canvasSurfaces.map((s) => s.raw);
+els.exportUiBtn.addEventListener("click", () => {
+  if (!state.canvasSurfaces.length) return;
+  const payload = state.canvasSurfaces.map((s) => s.raw);
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `adspace-ui-${activeSession?.id?.slice(0, 8) || "canvas"}.json`;
+  a.download = `adspace-ui-${state.activeSession?.id?.slice(0, 8) || "canvas"}.json`;
   a.click();
   // Revoke after the click has been dispatched; revoking synchronously can
   // cancel the download in some browsers.
   setTimeout(() => URL.revokeObjectURL(url), 0);
 });
 
-clearUiBtn.addEventListener("click", () => {
-  canvasSurfaces = [];
+els.clearUiBtn.addEventListener("click", () => {
+  state.canvasSurfaces = [];
   renderCanvas();
 });
 
@@ -3717,7 +3488,7 @@ clearUiBtn.addEventListener("click", () => {
 document.querySelectorAll(".starter-card").forEach((card) => {
   card.addEventListener("click", () => {
     const prompt = card.getAttribute("data-prompt");
-    if (prompt && !isRunning) sendMessage(prompt);
+    if (prompt && !state.isRunning) sendMessage(prompt);
   });
 });
 
@@ -3726,13 +3497,13 @@ document.querySelectorAll(".starter-card").forEach((card) => {
 // ---------------------------------------------------------------------------
 
 const renderAttachments = () => {
-  attachmentChips.replaceChildren();
-  if (!attachments.length) {
-    attachmentChips.classList.add("hidden");
+  els.attachmentChips.replaceChildren();
+  if (!state.attachments.length) {
+    els.attachmentChips.classList.add("hidden");
     return;
   }
-  attachmentChips.classList.remove("hidden");
-  attachments.forEach((file, idx) => {
+  els.attachmentChips.classList.remove("hidden");
+  state.attachments.forEach((file, idx) => {
     const chip = document.createElement("button");
     chip.type = "button";
     const nameSpan = document.createElement("span");
@@ -3741,17 +3512,17 @@ const renderAttachments = () => {
     closeB.textContent = "×";
     chip.append(nameSpan, " ", closeB);
     chip.addEventListener("click", () => {
-      attachments.splice(idx, 1);
+      state.attachments.splice(idx, 1);
       renderAttachments();
     });
-    attachmentChips.appendChild(chip);
+    els.attachmentChips.appendChild(chip);
   });
 };
 
-fileInput.addEventListener("change", () => {
-  const files = Array.from(fileInput.files || []);
-  attachments.push(...files);
-  fileInput.value = "";
+els.fileInput.addEventListener("change", () => {
+  const files = Array.from(els.fileInput.files || []);
+  state.attachments.push(...files);
+  els.fileInput.value = "";
   renderAttachments();
 });
 
@@ -3791,7 +3562,7 @@ const parseSseStream = async function* (body) {
 // Aborts the in-flight run, if any. Only the send button toggles between
 // send and stop; Enter, starter cards and adk-ui forms never stop a run.
 const stopRun = () => {
-  if (isRunning && abortController) abortController.abort();
+  if (state.isRunning && state.abortController) state.abortController.abort();
 };
 
 // SSE chunks arrive far faster than frames; coalesce the transcript/canvas
@@ -3803,13 +3574,13 @@ const flushStreamRender = () => {
     cancelAnimationFrame(streamRenderRaf);
     streamRenderRaf = 0;
   }
-  rebuildFromSessionEvents(currentEvents);
+  rebuildFromSessionEvents(state.currentEvents);
 };
 const scheduleStreamRender = () => {
   if (streamRenderRaf) return;
   streamRenderRaf = requestAnimationFrame(() => {
     streamRenderRaf = 0;
-    rebuildFromSessionEvents(currentEvents);
+    rebuildFromSessionEvents(state.currentEvents);
   });
 };
 const cancelStreamRender = () => {
@@ -3835,36 +3606,36 @@ const announce = (text) => {
 };
 
 const sendMessage = async (overrideText) => {
-  if (isRunning) return;
-  if (!currentUser || !activeSession) return;
+  if (state.isRunning) return;
+  if (!state.currentUser || !state.activeSession) return;
 
   const rawText =
-    typeof overrideText === "string" ? overrideText.trim() : chatInput.value.trim();
-  if (!rawText && attachments.length === 0) return;
+    typeof overrideText === "string" ? overrideText.trim() : els.chatInput.value.trim();
+  if (!rawText && state.attachments.length === 0) return;
 
   // Pin the session this run streams for. A session switch mid-stream must
   // not render this run's chunks into (or reload) the newly active session.
-  const runSession = activeSession;
-  const pendingFiles = attachments;
+  const runSession = state.activeSession;
+  const pendingFiles = state.attachments;
 
   if (typeof overrideText !== "string") {
-    chatInput.value = "";
+    els.chatInput.value = "";
     syncComposerHeight();
   }
-  attachments = [];
+  state.attachments = [];
   renderAttachments();
 
   // Flip to the running state synchronously, before any `await`, so a second
   // Enter/click while attachments are still being encoded cannot start a
   // concurrent request.
-  isRunning = true;
+  state.isRunning = true;
   setStatus("running", "streaming");
-  sendBtn.classList.add("stop-button");
+  els.sendBtn.classList.add("stop-button");
   if ($("send-icon")) {
     $("send-icon").textContent = "stop";
     $("send-icon").classList.add("filled");
   }
-  abortController = new AbortController();
+  state.abortController = new AbortController();
   let failed = false;
 
   try {
@@ -3889,7 +3660,7 @@ const sendMessage = async (overrideText) => {
     // Encoding large attachments can take a while; if the user switched
     // sessions (or hit stop) meanwhile, bail before the optimistic bubble
     // lands in the wrong session's transcript.
-    if (abortController.signal.aborted || activeSession?.id !== runSession.id) {
+    if (state.abortController.signal.aborted || state.activeSession?.id !== runSession.id) {
       throw new DOMException("Run superseded before send", "AbortError");
     }
 
@@ -3899,21 +3670,21 @@ const sendMessage = async (overrideText) => {
       author: "user",
       content: { role: "user", parts: [{ text: rawText || "(attachment)" }] },
     };
-    currentEvents.push(userEvent);
+    state.currentEvents.push(userEvent);
     renderTranscript();
     // The user's own message always scrolls into view.
-    if (prefs.autoScroll) chatTranscript.scrollTop = chatTranscript.scrollHeight;
+    if (prefs.autoScroll) els.chatTranscript.scrollTop = els.chatTranscript.scrollHeight;
 
     const resp = await fetch(apiUrl("/run_sse"), {
       method: "POST",
-      signal: abortController.signal,
+      signal: state.abortController.signal,
       headers: {
         "Content-Type": "application/json",
         "x-adk-ui-protocol": "a2ui",
       },
       body: JSON.stringify({
         appName: APP_NAME,
-        userId: currentUser.id,
+        userId: state.currentUser.id,
         sessionId: runSession.id,
         streaming: true,
         newMessage: { role: "user", parts },
@@ -3927,9 +3698,9 @@ const sendMessage = async (overrideText) => {
 
     if (resp.body) {
       for await (const dataStr of parseSseStream(resp.body)) {
-        if (abortController.signal.aborted || activeSession?.id !== runSession.id) {
+        if (state.abortController.signal.aborted || state.activeSession?.id !== runSession.id) {
           // The user switched sessions; stop streaming into the wrong one.
-          abortController.abort();
+          state.abortController.abort();
           break;
         }
         if (!dataStr || dataStr === "[DONE]") continue;
@@ -3946,11 +3717,11 @@ const sendMessage = async (overrideText) => {
           if (ev.error_message || ev.errorMessage) {
             showError(`Agent error: ${ev.error_message || ev.errorMessage}`);
           }
-          const existingIdx = currentEvents.findIndex((e) => e.id && e.id === ev.id);
+          const existingIdx = state.currentEvents.findIndex((e) => e.id && e.id === ev.id);
           if (existingIdx !== -1) {
-            currentEvents[existingIdx] = mergeStreamedEvent(currentEvents[existingIdx], ev);
+            state.currentEvents[existingIdx] = mergeStreamedEvent(state.currentEvents[existingIdx], ev);
           } else {
-            currentEvents.push({
+            state.currentEvents.push({
               ...ev,
               content: ev.content
                 ? { ...ev.content, parts: coalesceParts(ev.content.parts) }
@@ -3967,7 +3738,7 @@ const sendMessage = async (overrideText) => {
     // controller on an explicit switch before `activeSession` changes, so the
     // signal is checked too; otherwise this reload would supersede the
     // user's pending switch.
-    if (!abortController.signal.aborted && activeSession?.id === runSession.id) {
+    if (!state.abortController.signal.aborted && state.activeSession?.id === runSession.id) {
       // Single polite announcement per completed turn (the transcript
       // itself is no longer a live region).
       announce("Agent replied");
@@ -3981,14 +3752,14 @@ const sendMessage = async (overrideText) => {
   } finally {
     // Paint whatever the last frame did not get to (e.g. after stopRun(),
     // which skips the post-loop flush); drop it if the user switched away.
-    if (activeSession?.id === runSession.id) {
+    if (state.activeSession?.id === runSession.id) {
       flushStreamRender();
     } else {
       cancelStreamRender();
     }
-    isRunning = false;
-    abortController = null;
-    sendBtn.classList.remove("stop-button");
+    state.isRunning = false;
+    state.abortController = null;
+    els.sendBtn.classList.remove("stop-button");
     if ($("send-icon")) {
       $("send-icon").textContent = "arrow_upward";
       $("send-icon").classList.remove("filled");
@@ -3999,20 +3770,20 @@ const sendMessage = async (overrideText) => {
 };
 
 const syncComposerHeight = () => {
-  chatInput.style.height = "36px";
-  const next = Math.min(160, Math.max(36, chatInput.scrollHeight));
-  chatInput.style.height = `${next}px`;
+  els.chatInput.style.height = "36px";
+  const next = Math.min(160, Math.max(36, els.chatInput.scrollHeight));
+  els.chatInput.style.height = `${next}px`;
 };
 
-chatInput.addEventListener("input", syncComposerHeight);
-sendBtn.addEventListener("click", () => (isRunning ? stopRun() : sendMessage()));
-chatInput.addEventListener("keydown", (e) => {
+els.chatInput.addEventListener("input", syncComposerHeight);
+els.sendBtn.addEventListener("click", () => (state.isRunning ? stopRun() : sendMessage()));
+els.chatInput.addEventListener("keydown", (e) => {
   // Ignore the Enter that confirms an IME composition (CJK etc.); `keyCode
   // 229` is the legacy signal some browsers still send for it.
   if (e.isComposing || e.keyCode === 229) return;
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
-    if (!isRunning) sendMessage();
+    if (!state.isRunning) sendMessage();
   }
 });
 
@@ -4020,115 +3791,69 @@ chatInput.addEventListener("keydown", (e) => {
 // Popovers, Settings Controls & Split-Pane Resizer
 // ---------------------------------------------------------------------------
 
-// Popovers are plain `.hidden`-toggled cards. `aria-expanded` on each
-// trigger is kept in sync by observing the popover's class attribute, so
-// every code path that hides a popover (outside click, settings toggles,
-// other popovers opening) stays consistent without threading a helper
-// through all of them. Focus moves into the popover on open and returns to
-// the trigger on close (including Escape).
-const POPOVER_FOCUSABLE_SELECTOR =
-  'button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+bindPopoverTrigger(els.settingsBtn, els.settingsMenu);
+bindPopoverTrigger(els.userBtn, els.userMenu);
+bindPopoverTrigger(els.sessionUsageBtn, els.sessionUsagePopover);
 
-const isPopoverOpen = (popover) => Boolean(popover && !popover.classList.contains("hidden"));
-
-const openPopover = (trigger, popover) => {
-  if (!popover || isPopoverOpen(popover)) return;
-  popover.classList.remove("hidden");
-  const first = popover.querySelector(POPOVER_FOCUSABLE_SELECTOR);
-  if (first) {
-    first.focus();
-  } else {
-    if (!popover.hasAttribute("tabindex")) popover.setAttribute("tabindex", "-1");
-    popover.focus();
-  }
-};
-
-const closePopover = (trigger, popover) => {
-  if (!popover || !isPopoverOpen(popover)) return;
-  const hadFocus = popover.contains(document.activeElement);
-  popover.classList.add("hidden");
-  if (hadFocus && trigger && typeof trigger.focus === "function") trigger.focus();
-};
-
-const bindPopoverTrigger = (trigger, popover) => {
-  if (!trigger || !popover) return;
-  if (popover.id && !trigger.hasAttribute("aria-controls")) {
-    trigger.setAttribute("aria-controls", popover.id);
-  }
-  const syncExpanded = () =>
-    trigger.setAttribute("aria-expanded", String(isPopoverOpen(popover)));
-  syncExpanded();
-  if (typeof MutationObserver === "function") {
-    new MutationObserver(syncExpanded).observe(popover, {
-      attributes: true,
-      attributeFilter: ["class"],
-    });
-  }
-};
-
-bindPopoverTrigger(settingsBtn, settingsMenu);
-bindPopoverTrigger(userBtn, userMenu);
-bindPopoverTrigger(sessionUsageBtn, sessionUsagePopover);
-
-settingsBtn.addEventListener("click", (e) => {
+els.settingsBtn.addEventListener("click", (e) => {
   e.stopPropagation();
-  closePopover(userBtn, userMenu);
-  closePopover(sessionUsageBtn, sessionUsagePopover);
-  if (isPopoverOpen(settingsMenu)) {
-    closePopover(settingsBtn, settingsMenu);
+  closePopover(els.userBtn, els.userMenu);
+  closePopover(els.sessionUsageBtn, els.sessionUsagePopover);
+  if (isPopoverOpen(els.settingsMenu)) {
+    closePopover(els.settingsBtn, els.settingsMenu);
   } else {
-    openPopover(settingsBtn, settingsMenu);
+    openPopover(els.settingsBtn, els.settingsMenu);
   }
 });
 
-userBtn.addEventListener("click", (e) => {
+els.userBtn.addEventListener("click", (e) => {
   e.stopPropagation();
-  closePopover(settingsBtn, settingsMenu);
-  closePopover(sessionUsageBtn, sessionUsagePopover);
-  if (isPopoverOpen(userMenu)) {
-    closePopover(userBtn, userMenu);
+  closePopover(els.settingsBtn, els.settingsMenu);
+  closePopover(els.sessionUsageBtn, els.sessionUsagePopover);
+  if (isPopoverOpen(els.userMenu)) {
+    closePopover(els.userBtn, els.userMenu);
   } else {
-    openPopover(userBtn, userMenu);
+    openPopover(els.userBtn, els.userMenu);
   }
 });
 
-if (sessionUsageBtn && sessionUsagePopover) {
-  sessionUsageBtn.addEventListener("click", (e) => {
+if (els.sessionUsageBtn && els.sessionUsagePopover) {
+  els.sessionUsageBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    closePopover(settingsBtn, settingsMenu);
-    closePopover(userBtn, userMenu);
+    closePopover(els.settingsBtn, els.settingsMenu);
+    closePopover(els.userBtn, els.userMenu);
     updateSessionUsageUi();
-    if (isPopoverOpen(sessionUsagePopover)) {
-      closePopover(sessionUsageBtn, sessionUsagePopover);
+    if (isPopoverOpen(els.sessionUsagePopover)) {
+      closePopover(els.sessionUsageBtn, els.sessionUsagePopover);
     } else {
-      openPopover(sessionUsageBtn, sessionUsagePopover);
+      openPopover(els.sessionUsageBtn, els.sessionUsagePopover);
     }
   });
 }
 
 document.addEventListener("click", (e) => {
-  if (!settingsMenu.contains(e.target) && e.target !== settingsBtn) {
-    closePopover(settingsBtn, settingsMenu);
+  if (!els.settingsMenu.contains(e.target) && e.target !== els.settingsBtn) {
+    closePopover(els.settingsBtn, els.settingsMenu);
   }
-  if (!userMenu.contains(e.target) && e.target !== userBtn) {
-    closePopover(userBtn, userMenu);
+  if (!els.userMenu.contains(e.target) && e.target !== els.userBtn) {
+    closePopover(els.userBtn, els.userMenu);
   }
   if (
-    sessionUsagePopover &&
-    sessionUsageBtn &&
-    !sessionUsagePopover.contains(e.target) &&
-    !sessionUsageBtn.contains(e.target)
+    els.sessionUsagePopover &&
+    els.sessionUsageBtn &&
+    !els.sessionUsagePopover.contains(e.target) &&
+    !els.sessionUsageBtn.contains(e.target)
   ) {
-    closePopover(sessionUsageBtn, sessionUsagePopover);
+    closePopover(els.sessionUsageBtn, els.sessionUsagePopover);
   }
 });
 
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   const pairs = [
-    [settingsBtn, settingsMenu],
-    [userBtn, userMenu],
-    [sessionUsageBtn, sessionUsagePopover],
+    [els.settingsBtn, els.settingsMenu],
+    [els.userBtn, els.userMenu],
+    [els.sessionUsageBtn, els.sessionUsagePopover],
   ];
   for (const [trigger, popover] of pairs) {
     if (isPopoverOpen(popover)) {
@@ -4138,7 +3863,7 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-errorBannerClose.addEventListener("click", () => showError(null));
+els.errorBannerClose.addEventListener("click", () => showError(null));
 
 document.querySelectorAll("#theme-segmented button").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -4328,46 +4053,46 @@ const setLeftPanePct = (pct, { persist = false } = {}) => {
   leftPanePct = clamped;
   const val = `${clamped.toFixed(1)}%`;
   document.documentElement.style.setProperty("--left-pane-width", val);
-  if (paneResizer) paneResizer.setAttribute("aria-valuenow", String(Math.round(clamped)));
+  if (els.paneResizer) els.paneResizer.setAttribute("aria-valuenow", String(Math.round(clamped)));
   if (persist) localStorage.setItem(STORAGE_KEYS.leftWidth, val);
   return clamped;
 };
-if (paneResizer) {
-  paneResizer.setAttribute("aria-valuemin", String(LEFT_PANE_MIN_PCT));
-  paneResizer.setAttribute("aria-valuemax", String(LEFT_PANE_MAX_PCT));
-  paneResizer.setAttribute("aria-valuenow", String(Math.round(currentLeftPanePct())));
+if (els.paneResizer) {
+  els.paneResizer.setAttribute("aria-valuemin", String(LEFT_PANE_MIN_PCT));
+  els.paneResizer.setAttribute("aria-valuemax", String(LEFT_PANE_MAX_PCT));
+  els.paneResizer.setAttribute("aria-valuenow", String(Math.round(currentLeftPanePct())));
 
   let resizePointerId = null;
-  paneResizer.addEventListener("pointerdown", (e) => {
+  els.paneResizer.addEventListener("pointerdown", (e) => {
     if (e.button !== 0 && e.pointerType === "mouse") return;
     e.preventDefault();
     resizePointerId = e.pointerId;
-    paneResizer.classList.add("dragging");
+    els.paneResizer.classList.add("dragging");
     try {
-      paneResizer.setPointerCapture(e.pointerId);
+      els.paneResizer.setPointerCapture(e.pointerId);
     } catch {
       /* capture is best-effort (e.g. pointer already released) */
     }
   });
-  paneResizer.addEventListener("pointermove", (e) => {
+  els.paneResizer.addEventListener("pointermove", (e) => {
     if (resizePointerId === null || e.pointerId !== resizePointerId) return;
     setLeftPanePct((e.clientX / window.innerWidth) * 100);
   });
   const endResize = (e) => {
     if (resizePointerId === null || e.pointerId !== resizePointerId) return;
     resizePointerId = null;
-    paneResizer.classList.remove("dragging");
+    els.paneResizer.classList.remove("dragging");
     try {
-      paneResizer.releasePointerCapture(e.pointerId);
+      els.paneResizer.releasePointerCapture(e.pointerId);
     } catch {
       /* already released */
     }
     setLeftPanePct(currentLeftPanePct(), { persist: true });
   };
-  paneResizer.addEventListener("pointerup", endResize);
-  paneResizer.addEventListener("pointercancel", endResize);
+  els.paneResizer.addEventListener("pointerup", endResize);
+  els.paneResizer.addEventListener("pointercancel", endResize);
 
-  paneResizer.addEventListener("keydown", (e) => {
+  els.paneResizer.addEventListener("keydown", (e) => {
     let delta;
     if (e.key === "ArrowLeft") delta = -(e.shiftKey ? 10 : 2);
     else if (e.key === "ArrowRight") delta = e.shiftKey ? 10 : 2;
@@ -4421,7 +4146,7 @@ function syncCanvasStageTheme() {
 // a run started.
 const STAGE_ACTIVITY_BY_STATUS = { running: "streaming", authorizing: "authorizing" };
 const currentStatusKind = () => {
-  const match = /\bstatus-([a-z]+)/.exec(statusPill.className || "");
+  const match = /\bstatus-([a-z]+)/.exec(els.statusPill.className || "");
   return match ? match[1] : "ready";
 };
 function syncStageStreaming(kind = currentStatusKind()) {
@@ -4432,11 +4157,11 @@ function syncStageStreaming(kind = currentStatusKind()) {
     }
   }
 }
-onStatusChange = syncStageStreaming;
+onStatusChange(syncStageStreaming);
 
 function syncActiveStage() {
-  const authVisible = authGate && !authGate.classList.contains("hidden");
-  const workspaceVisible = workspace && !workspace.classList.contains("hidden");
+  const authVisible = els.authGate && !els.authGate.classList.contains("hidden");
+  const workspaceVisible = els.workspace && !els.workspace.classList.contains("hidden");
   const allowMotion = !prefersReducedMotion();
 
   if (authStageInstance) {

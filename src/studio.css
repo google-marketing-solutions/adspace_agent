@@ -1289,7 +1289,6 @@ summary:focus-visible,
   display: flex;
   flex-direction: column;
   width: 100%;
-  will-change: transform;
 }
 
 .odometer-cell {
@@ -1882,8 +1881,6 @@ summary:focus-visible,
   gap: 8px;
   background-color: var(--dm-surface-gray);
   border-color: var(--border-strong);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
 }
 
 .button.button--protected.canvas-jump-btn:hover {
@@ -2225,9 +2222,9 @@ button.message-usage {
   font-size: 12px;
   padding: 1.5px 6px;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--surface-card) 65%, transparent);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  /* Opaque surface (no backdrop-filter): these sit over the animating WebGL
+     stage, and every blur layer there is recomposited each frame. */
+  background: var(--dm-surface-gray);
   border: 1px solid var(--protected-btn-outline);
 }
 
@@ -2318,9 +2315,8 @@ button.message-usage {
   border-radius: 9999px;
   border: 1px solid var(--protected-btn-outline);
   box-shadow: none;
-  background-color: var(--protected-btn-bg);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  /* Opaque like .canvas-jump-btn: no backdrop-filter over the WebGL stage. */
+  background-color: var(--dm-surface-gray);
   color: var(--text-primary);
   font-family: var(--sans);
   font-size: 14.5px;

@@ -2867,7 +2867,10 @@
 
   const appendInlineWithCodeTable = (parent, text, codes) => {
     if (!text) return;
+    // NUL is used as a sentinel around masked inline-code tokens (see
+    // `appendInlineMarkdown`); it cannot appear in real message text.
     const tokenRegex =
+      // eslint-disable-next-line no-control-regex
       /(\u0000CODE(\d+)\u0000|\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+|\/(?!\/)[^\s)]*)\)|\*\*\*([\s\S]+?)\*\*\*|\*\*([\s\S]+?)\*\*|__(?=\S)([\s\S]*?\S)__|~~([\s\S]+?)~~|(?<!\*)\*(?=\S)([\s\S]*?\S)\*(?!\*)|(?<![a-zA-Z0-9_])_(?=\S)([\s\S]*?\S)_(?![a-zA-Z0-9_]))/g;
 
     let lastIdx = 0;
@@ -3146,13 +3149,6 @@
     }
   };
 
-  const renderMarkdownBlock = (text) => {
-    const container = document.createElement("div");
-    container.className = "message-text";
-    parseMarkdownBlocksInto(container, text);
-    return container;
-  };
-
   let currentEvents = [];
 
   // ---------------------------------------------------------------------------
@@ -3363,14 +3359,6 @@
     if (outEl && document.activeElement !== outEl) {
       outEl.value = String(rates.output);
     }
-  };
-
-  const formatCompactTokens = (n) => {
-    const num = Math.max(0, Math.round(Number(n) || 0));
-    if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(2)}M`;
-    if (num >= 10_000) return `${(num / 1_000).toFixed(1)}k`;
-    if (num >= 1_000) return `${(num / 1_000).toFixed(2)}k`;
-    return String(num);
   };
 
   const formatExactInt = (n) => Math.max(0, Math.round(Number(n) || 0)).toLocaleString("en-US");
@@ -3615,16 +3603,10 @@
       typeof el._counterValue === "number" && Number.isFinite(el._counterValue)
         ? el._counterValue
         : 0;
-    const hadPreviousTarget = typeof el._counterTarget === "number";
     el._counterTarget = target;
     el._counterFormatSig = formatSig;
 
-    if (
-      prefersReducedMotion() ||
-      target === 0 ||
-      Math.abs(target - currentVal) < 1e-9 ||
-      (!hadPreviousTarget && !options.pulseOnMount && currentVal === 0 && target === 0)
-    ) {
+    if (prefersReducedMotion() || target === 0 || Math.abs(target - currentVal) < 1e-9) {
       if (el._slotThrottleTimer) {
         clearTimeout(el._slotThrottleTimer);
         el._slotThrottleTimer = null;
@@ -3683,11 +3665,10 @@
     };
   };
 
+  const isUserEvent = (ev) => ev?.content?.role === "user" || ev?.author === "user";
+
   const extractEventUsage = (ev) => {
-    const isUser =
-      (ev?.content?.role || (ev?.author === "user" ? "user" : "model")) === "user" ||
-      ev?.author === "user";
-    if (isUser) return null;
+    if (isUserEvent(ev)) return null;
 
     const u = ev?.usage_metadata || ev?.usageMetadata;
     const streamedEst = ev?.partial
@@ -3831,18 +3812,44 @@
     };
   };
 
-  const computeSessionUsage = (events) => {
-    const deduped = [];
-    const byId = new Map();
-    for (const ev of Array.isArray(events) ? events : []) {
-      if (!ev || typeof ev !== "object") continue;
-      if (ev.id) {
-        byId.set(ev.id, ev);
-      } else {
-        deduped.push(ev);
-      }
+  // Usage of a finished (non-partial) event only changes when the pricing
+  // inputs change, so cache it per event object and drop the whole cache when
+  // the model / tier / custom rates / server table move. Partial events are
+  // re-estimated every time (their parts keep growing).
+  let usageCache = new WeakMap();
+  let usageCacheSig = "";
+  let usageCacheServerPricing = null;
+
+  const syncUsageCache = () => {
+    const sig = `${prefs.model}|${prefs.pricingTier || "standard"}|${JSON.stringify(
+      prefs.modelPricing || {}
+    )}`;
+    if (sig !== usageCacheSig || serverModelPricing !== usageCacheServerPricing) {
+      usageCache = new WeakMap();
+      usageCacheSig = sig;
+      usageCacheServerPricing = serverModelPricing;
     }
-    const allEvents = [...byId.values(), ...deduped];
+  };
+
+  const cachedEventUsage = (ev) => {
+    if (!ev || typeof ev !== "object" || ev.partial) return extractEventUsage(ev);
+    if (usageCache.has(ev)) return usageCache.get(ev);
+    const u = extractEventUsage(ev);
+    usageCache.set(ev, u);
+    return u;
+  };
+
+  const computeSessionUsage = (events) => {
+    syncUsageCache();
+    // Dedupe by id in place (last occurrence wins) without reordering events.
+    const list = Array.isArray(events) ? events : [];
+    const lastIdxById = new Map();
+    list.forEach((ev, idx) => {
+      if (ev && typeof ev === "object" && ev.id) lastIdxById.set(ev.id, idx);
+    });
+    const allEvents = list.filter(
+      (ev, idx) => ev && typeof ev === "object" && (!ev.id || lastIdxById.get(ev.id) === idx)
+    );
 
     const summary = {
       llmCalls: 0,
@@ -3863,7 +3870,7 @@
     };
 
     for (const ev of allEvents) {
-      const u = extractEventUsage(ev);
+      const u = cachedEventUsage(ev);
       if (!u) continue;
       summary.llmCalls += 1;
       summary.inputTokens += u.inputTokens;
@@ -4225,7 +4232,7 @@
     prefs.canvasMode = "focused";
     applyPreferences({ rerender: false });
     renderCanvas();
-    const target = document.querySelector(`[data-surface-id="${surfaceId}"]`);
+    const target = document.querySelector(`[data-surface-id="${CSS.escape(surfaceId)}"]`);
     if (target) {
       target.scrollIntoView({ behavior: "smooth", block: "start" });
     }
@@ -4379,7 +4386,6 @@
         },
         {
           formatSig: `${usage.inputTokens}:${usage.outputTokens}:${usage.thinkingTokens}:${usage.cacheReadTokens}`,
-          pulseOnMount: true,
         }
       );
       usageEl.title = `gen_ai.request.model=${usage.model} · gen_ai.usage.input_tokens=${usage.inputTokens} · gen_ai.usage.output_tokens=${usage.outputTokens} · gen_ai.usage.total_tokens=${usage.totalTokens}`;
@@ -4390,9 +4396,7 @@
           rightSpan.className = "message-usage-cost";
           usageEl.appendChild(rightSpan);
         }
-        animateCounter(rightSpan, usage.totalCost, formatUsdShort, {
-          pulseOnMount: true,
-        });
+        animateCounter(rightSpan, usage.totalCost, formatUsdShort);
       } else if (rightSpan) {
         rightSpan.remove();
       }
@@ -4432,8 +4436,8 @@
           article.prepend(textEl);
         }
       }
-      if (textEl.dataset.renderedText !== textContent) {
-        textEl.dataset.renderedText = textContent;
+      if (textEl._renderedText !== textContent) {
+        textEl._renderedText = textContent;
         const parsedUiEvent = isUser ? parseUiEventMessage(textContent) : null;
         if (parsedUiEvent) {
           article.classList.add("message-ui-event");
@@ -4460,6 +4464,19 @@
     if (legacyUsage) legacyUsage.remove();
   };
 
+  // Serialised tool parts are compared on every render; loaded events keep
+  // the same part objects, so memoise the JSON per object.
+  const toolPartSigCache = new WeakMap();
+  const toolPartSig = (tp) => {
+    if (!tp || typeof tp !== "object") return String(tp);
+    let sig = toolPartSigCache.get(tp);
+    if (sig === undefined) {
+      sig = JSON.stringify(tp);
+      toolPartSigCache.set(tp, sig);
+    }
+    return sig;
+  };
+
   const updateMessageCol = (col, item) => {
     const hasBubble = item.partial || Boolean(item.textContent);
     let article = col.querySelector(":scope > article.message");
@@ -4476,7 +4493,8 @@
     }
 
     // Tool calls live outside the chat bubble as soft-gray pills
-    const toolsSig = item.visibleTools.length ? JSON.stringify(item.visibleTools) : "";
+    const toolSigs = item.visibleTools.map(toolPartSig);
+    const toolsSig = toolSigs.join("\u0001");
     if (col.dataset.toolsSig !== toolsSig) {
       col.dataset.toolsSig = toolsSig;
       let toolGroup = col.querySelector(":scope > .chat-tool-calls");
@@ -4495,10 +4513,16 @@
             col.appendChild(toolGroup);
           }
         }
-        toolGroup.replaceChildren();
-        for (const tp of item.visibleTools) {
+        // Reconcile by position: keep an unchanged <details> (so its open
+        // state survives) and only build the ones that are new or changed.
+        const existing = Array.from(toolGroup.children);
+        item.visibleTools.forEach((tp, i) => {
+          const sig = toolSigs[i];
+          const prevEl = existing[i];
+          if (prevEl && prevEl._toolSig === sig) return;
           const details = document.createElement("details");
           details.className = "tool-call";
+          details._toolSig = sig;
           const summary = document.createElement("summary");
           const isResp = "functionResponse" in tp || "function_response" in tp;
           const name =
@@ -4512,7 +4536,14 @@
           const pre = document.createElement("pre");
           pre.textContent = JSON.stringify(tp, null, 2);
           details.append(summary, pre);
-          toolGroup.appendChild(details);
+          if (prevEl) {
+            toolGroup.replaceChild(details, prevEl);
+          } else {
+            toolGroup.appendChild(details);
+          }
+        });
+        while (toolGroup.children.length > item.visibleTools.length) {
+          toolGroup.lastElementChild.remove();
         }
       }
     }
@@ -4575,24 +4606,31 @@
 
   const renderTranscript = () => {
     updateSessionUsageUi();
+    // Decide whether to follow the bottom *before* mutating the DOM: only
+    // stick when the user is already near the bottom (or the session changed),
+    // so scrolling up to read an earlier message is not fought by streaming.
+    const sessionKey = activeSession?.id || "";
+    const isNewSessionView = chatTranscript._renderedSessionId !== sessionKey;
+    chatTranscript._renderedSessionId = sessionKey;
+    const nearBottom =
+      chatTranscript.scrollHeight - chatTranscript.scrollTop - chatTranscript.clientHeight < 40;
+    const stickToBottom = prefs.autoScroll && (nearBottom || isNewSessionView);
     const visibleItems = [];
 
     currentEvents.forEach((ev, idx) => {
       const parts = ev?.content?.parts || [];
       const hasToolOrUi = parts.some(
         (p) =>
-          "functionCall" in p ||
-          "function_call" in p ||
-          "functionResponse" in p ||
-          "function_response" in p
+          p &&
+          ("functionCall" in p ||
+            "function_call" in p ||
+            "functionResponse" in p ||
+            "function_response" in p)
       );
-      const isUser =
-        !hasToolOrUi &&
-        ((ev?.content?.role || (ev?.author === "user" ? "user" : "model")) === "user" ||
-          ev?.author === "user");
+      const isUser = !hasToolOrUi && isUserEvent(ev);
 
       const textContent = parts
-        .map((p) => (typeof p.text === "string" ? p.text : ""))
+        .map((p) => (typeof p?.text === "string" ? p.text : ""))
         .filter(Boolean)
         .join("");
 
@@ -4601,6 +4639,7 @@
       let uiIndex = 0;
 
       parts.forEach((part) => {
+        if (!part || typeof part !== "object") return;
         const callName =
           part?.name || part?.functionCall?.name || part?.function_call?.name || "";
         if (callName && String(callName).startsWith("render_")) {
@@ -4637,7 +4676,7 @@
         textContent,
         visibleTools,
         surfaceRefs,
-        usage: isUser ? null : extractEventUsage(ev),
+        usage: isUser ? null : cachedEventUsage(ev),
       });
     });
 
@@ -4661,6 +4700,10 @@
     chatTranscript
       .querySelectorAll(":scope > .transcript-empty-placeholder")
       .forEach((el) => el.remove());
+
+    // On a session switch, drop the old rows instead of reusing them so the
+    // per-message counters do not animate from the previous session's values.
+    if (isNewSessionView) chatTranscript.replaceChildren();
 
     const existingRows = Array.from(chatTranscript.querySelectorAll(":scope > .message-row"));
 
@@ -4695,7 +4738,7 @@
       chatTranscript.lastElementChild.remove();
     }
 
-    if (prefs.autoScroll) {
+    if (stickToBottom) {
       chatTranscript.scrollTop = chatTranscript.scrollHeight;
     }
   };
@@ -4770,7 +4813,9 @@
     a.href = url;
     a.download = `adspace-ui-${activeSession?.id?.slice(0, 8) || "canvas"}.json`;
     a.click();
-    URL.revokeObjectURL(url);
+    // Revoke after the click has been dispatched; revoking synchronously can
+    // cancel the download in some browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   });
 
   clearUiBtn.addEventListener("click", () => {
@@ -4859,6 +4904,31 @@
     if (isRunning && abortController) abortController.abort();
   };
 
+  // SSE chunks arrive far faster than frames; coalesce the transcript/canvas
+  // rebuild to at most once per animation frame while streaming. The stream
+  // end (and error paths) flush or cancel the pending frame explicitly.
+  let streamRenderRaf = 0;
+  const flushStreamRender = () => {
+    if (streamRenderRaf) {
+      cancelAnimationFrame(streamRenderRaf);
+      streamRenderRaf = 0;
+    }
+    rebuildFromSessionEvents(currentEvents);
+  };
+  const scheduleStreamRender = () => {
+    if (streamRenderRaf) return;
+    streamRenderRaf = requestAnimationFrame(() => {
+      streamRenderRaf = 0;
+      rebuildFromSessionEvents(currentEvents);
+    });
+  };
+  const cancelStreamRender = () => {
+    if (streamRenderRaf) {
+      cancelAnimationFrame(streamRenderRaf);
+      streamRenderRaf = 0;
+    }
+  };
+
   const sendMessage = async (overrideText) => {
     if (isRunning) return;
     if (!currentUser || !activeSession) return;
@@ -4919,6 +4989,8 @@
       };
       currentEvents.push(userEvent);
       renderTranscript();
+      // The user's own message always scrolls into view.
+      if (prefs.autoScroll) chatTranscript.scrollTop = chatTranscript.scrollHeight;
 
       const resp = await fetch(apiUrl("/run_sse"), {
         method: "POST",
@@ -4973,9 +5045,11 @@
                   : ev.content,
               });
             }
-            rebuildFromSessionEvents(currentEvents);
+            scheduleStreamRender();
           }
         }
+        // Flush whatever the last frame did not get to before reloading.
+        flushStreamRender();
       }
       if (activeSession?.id === runSession.id) await loadSession(runSession.id);
     } catch (err) {
@@ -4984,6 +5058,7 @@
         showError(`Agent request failed: ${err.message || err}`);
       }
     } finally {
+      cancelStreamRender();
       isRunning = false;
       abortController = null;
       sendBtn.classList.remove("stop-button");
@@ -5171,7 +5246,7 @@
     });
   }
 
-  const commitCustomPricingInputs = () => {
+  const commitCustomPricingInputs = ({ rerender = true } = {}) => {
     const activeModel = prefs.model || DEFAULT_MODELS.model;
     const tier = prefs.pricingTier || "standard";
     const defaults = getDefaultModelPricing(activeModel, tier);
@@ -5206,15 +5281,17 @@
       };
     }
 
-    applyPreferences({ syncPricing: false });
+    applyPreferences({ rerender, syncPricing: false });
   };
 
   ["setting-price-input", "setting-price-cached", "setting-price-output"].forEach((id) => {
     const el = $(id);
     if (!el) return;
-    el.addEventListener("input", commitCustomPricingInputs);
+    // Keystrokes only persist + refresh the session totals; the full
+    // transcript/canvas rerender waits for `change` (blur / Enter).
+    el.addEventListener("input", () => commitCustomPricingInputs({ rerender: false }));
     el.addEventListener("change", () => {
-      commitCustomPricingInputs();
+      commitCustomPricingInputs({ rerender: true });
       syncPricingControls();
     });
   });

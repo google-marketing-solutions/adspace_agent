@@ -4782,7 +4782,7 @@
   document.querySelectorAll(".starter-card").forEach((card) => {
     card.addEventListener("click", () => {
       const prompt = card.getAttribute("data-prompt");
-      if (prompt) sendMessage(prompt);
+      if (prompt && !isRunning) sendMessage(prompt);
     });
   });
 
@@ -4838,7 +4838,9 @@
         buffer += decoder.decode();
         break;
       }
-      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      // Normalise CRLF on the accumulated buffer (not just this chunk) so a
+      // `\r\n` split across two TCP reads still forms an event boundary.
+      buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
       let boundary;
       while ((boundary = buffer.indexOf("\n\n")) !== -1) {
         const chunk = buffer.slice(0, boundary);
@@ -4851,34 +4853,24 @@
     if (trailing) yield trailing;
   };
 
+  // Aborts the in-flight run, if any. Only the send button toggles between
+  // send and stop; Enter, starter cards and adk-ui forms never stop a run.
+  const stopRun = () => {
+    if (isRunning && abortController) abortController.abort();
+  };
+
   const sendMessage = async (overrideText) => {
-    if (isRunning) {
-      if (abortController) abortController.abort();
-      return;
-    }
+    if (isRunning) return;
     if (!currentUser || !activeSession) return;
 
     const rawText =
       typeof overrideText === "string" ? overrideText.trim() : chatInput.value.trim();
     if (!rawText && attachments.length === 0) return;
 
-    const parts = [];
-    if (rawText) parts.push({ text: rawText });
-
-    for (const file of attachments) {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      let binary = "";
-      for (let i = 0; i < bytes.length; i += 32768) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + 32768));
-      }
-      parts.push({
-        inlineData: {
-          displayName: file.name,
-          data: btoa(binary),
-          mimeType: file.type || "application/octet-stream",
-        },
-      });
-    }
+    // Pin the session this run streams for. A session switch mid-stream must
+    // not render this run's chunks into (or reload) the newly active session.
+    const runSession = activeSession;
+    const pendingFiles = attachments;
 
     if (typeof overrideText !== "string") {
       chatInput.value = "";
@@ -4887,15 +4879,9 @@
     attachments = [];
     renderAttachments();
 
-    // Optimistically append user message
-    const userEvent = {
-      id: `local-user-${Date.now()}`,
-      author: "user",
-      content: { role: "user", parts: [{ text: rawText || "(attachment)" }] },
-    };
-    currentEvents.push(userEvent);
-    renderTranscript();
-
+    // Flip to the running state synchronously, before any `await`, so a second
+    // Enter/click while attachments are still being encoded cannot start a
+    // concurrent request.
     isRunning = true;
     setStatus("running", "streaming");
     sendBtn.classList.add("stop-button");
@@ -4904,8 +4890,36 @@
       $("send-icon").classList.add("filled");
     }
     abortController = new AbortController();
+    let failed = false;
 
     try {
+      const parts = [];
+      if (rawText) parts.push({ text: rawText });
+
+      for (const file of pendingFiles) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        let binary = "";
+        for (let i = 0; i < bytes.length; i += 32768) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + 32768));
+        }
+        parts.push({
+          inlineData: {
+            displayName: file.name,
+            data: btoa(binary),
+            mimeType: file.type || "application/octet-stream",
+          },
+        });
+      }
+
+      // Optimistically append user message
+      const userEvent = {
+        id: `local-user-${Date.now()}`,
+        author: "user",
+        content: { role: "user", parts: [{ text: rawText || "(attachment)" }] },
+      };
+      currentEvents.push(userEvent);
+      renderTranscript();
+
       const resp = await fetch(apiUrl("/run_sse"), {
         method: "POST",
         signal: abortController.signal,
@@ -4916,7 +4930,7 @@
         body: JSON.stringify({
           appName: APP_NAME,
           userId: currentUser.id,
-          sessionId: activeSession.id,
+          sessionId: runSession.id,
           streaming: true,
           newMessage: { role: "user", parts },
         }),
@@ -4929,6 +4943,11 @@
 
       if (resp.body) {
         for await (const dataStr of parseSseStream(resp.body)) {
+          if (activeSession?.id !== runSession.id) {
+            // The user switched sessions; stop streaming into the wrong one.
+            abortController?.abort();
+            break;
+          }
           if (!dataStr || dataStr === "[DONE]") continue;
           // Only the parse is allowed to fail quietly (a frame may be split
           // mid-JSON); renderer exceptions must surface, not be swallowed.
@@ -4958,9 +4977,10 @@
           }
         }
       }
-      await loadSession(activeSession.id);
+      if (activeSession?.id === runSession.id) await loadSession(runSession.id);
     } catch (err) {
       if (err.name !== "AbortError") {
+        failed = true;
         showError(`Agent request failed: ${err.message || err}`);
       }
     } finally {
@@ -4971,7 +4991,8 @@
         $("send-icon").textContent = "arrow_upward";
         $("send-icon").classList.remove("filled");
       }
-      setStatus("ready", "ready");
+      // `failed` sticks until the next send flips the pill back to running.
+      setStatus(failed ? "failed" : "ready", failed ? "failed" : "ready");
     }
   };
 
@@ -4982,14 +5003,14 @@
   };
 
   chatInput.addEventListener("input", syncComposerHeight);
-  sendBtn.addEventListener("click", () => sendMessage());
+  sendBtn.addEventListener("click", () => (isRunning ? stopRun() : sendMessage()));
   chatInput.addEventListener("keydown", (e) => {
     // Ignore the Enter that confirms an IME composition (CJK etc.); `keyCode
     // 229` is the legacy signal some browsers still send for it.
     if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      sendMessage();
+      if (!isRunning) sendMessage();
     }
   });
 

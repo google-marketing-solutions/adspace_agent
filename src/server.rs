@@ -775,18 +775,26 @@ async fn scrub_json_response(response: Response) -> Response {
 /// 3. strips raw OAuth token secrets ([`CREDENTIALS_STATE_KEY`]) from JSON and
 ///    SSE responses that carry session events or state.
 pub async fn guard_adk_routes(
-    State(credentials): State<Arc<SessionCredentialManager>>,
+    State((credentials, admins)): State<(Arc<SessionCredentialManager>, AdminAllowList)>,
     req: Request,
     next: Next,
 ) -> Response {
     let path = req.uri().path().to_string();
     let oauth_configured = credentials.flow().config().is_configured();
     if oauth_configured && (path == "/ui" || path.starts_with("/ui/")) {
-        return if path == "/ui" || path == "/ui/" {
-            Redirect::to("/app/").into_response()
-        } else {
-            StatusCode::NOT_FOUND.into_response()
-        };
+        // The stock ADK dev UI knows nothing about the signed-in Google user,
+        // so once Sign-In is configured it is reserved for administrators
+        // (`ADMIN_EMAILS`, the same list that may switch the server models);
+        // everyone else is sent to `/app/`.
+        let is_admin = extract_cookie_user(req.headers(), &credentials)
+            .is_some_and(|user| admins.allows(&user.email));
+        if !is_admin {
+            return if path == "/ui" || path == "/ui/" {
+                Redirect::to("/app/").into_response()
+            } else {
+                StatusCode::NOT_FOUND.into_response()
+            };
+        }
     }
     if let Some(target_user_id) = extract_api_path_user_id(&path) {
         match request_user_id(req.headers(), &credentials) {
@@ -1238,13 +1246,14 @@ fn launcher(runtime: &AgentRuntime) -> Launcher {
 /// Returns an error when the adk-server application cannot be built.
 pub fn build_app(launcher: Launcher, routes: OAuthRoutes) -> anyhow::Result<Router> {
     let credentials = routes.credentials.clone();
+    let admins = routes.admins.clone();
     let app = launcher
         .with_request_context_extractor(Arc::new(CookieIdentityExtractor::new(credentials.clone())))
         .build_app()?
         .merge(oauth_router(routes))
         .layer(middleware::from_fn(inject_auth_helper))
         .layer(middleware::from_fn_with_state(
-            credentials,
+            (credentials, admins),
             guard_adk_routes,
         ));
     Ok(app)
@@ -1638,7 +1647,7 @@ mod tests {
                 }),
             )
             .layer(middleware::from_fn_with_state(
-                credentials.clone(),
+                (credentials.clone(), AdminAllowList::default()),
                 guard_adk_routes,
             ));
 
@@ -1927,7 +1936,7 @@ mod tests {
                 }),
             )
             .layer(middleware::from_fn_with_state(
-                credentials.clone(),
+                (credentials.clone(), AdminAllowList::default()),
                 guard_adk_routes,
             ));
 
@@ -2004,8 +2013,10 @@ mod tests {
                 .route("/ui/", get(|| async { Html("<html></html>") }))
                 .route("/ui/assets/x.js", get(|| async { "js" }))
         };
+        let credentials = test_credentials(true);
+        let admins = AdminAllowList::new(["admin@example.com".to_string()]);
         let configured = ui().layer(middleware::from_fn_with_state(
-            test_credentials(true),
+            (credentials.clone(), admins),
             guard_adk_routes,
         ));
         let resp = configured
@@ -2016,6 +2027,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
         assert_eq!(resp.headers()[header::LOCATION], "/app/");
         let resp = configured
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/ui/assets/x.js")
@@ -2026,8 +2038,50 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
+        // Administrators (ADMIN_EMAILS) keep access to the dev UI and its assets.
+        let cookie_for = |email: &str| {
+            let user = AuthenticatedUser {
+                id: "u-1".into(),
+                email: email.into(),
+                name: "Someone".into(),
+                picture: None,
+                sub: Some("1".into()),
+                iat: chrono::Utc::now().timestamp(),
+            };
+            format!("{USER_COOKIE_NAME}={}", credentials.sign_user_cookie(&user))
+        };
+        for (email, status) in [
+            ("admin@example.com", StatusCode::OK),
+            ("user@example.com", StatusCode::SEE_OTHER),
+        ] {
+            let resp = configured
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/ui/")
+                        .header(header::COOKIE, cookie_for(email))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), status, "{email}");
+        }
+        let resp = configured
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/assets/x.js")
+                    .header(header::COOKIE, cookie_for("admin@example.com"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
         let open = ui().layer(middleware::from_fn_with_state(
-            test_credentials(false),
+            (test_credentials(false), AdminAllowList::default()),
             guard_adk_routes,
         ));
         let resp = open

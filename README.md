@@ -97,7 +97,7 @@ GOOGLE_GENAI_USE_VERTEXAI=TRUE
 CLIENT_ID=
 CLIENT_SECRET=
 PUBLIC_BASE_URL=http://localhost:8000
-ADMIN_EMAILS=you@example.com        # who may switch the server-wide models
+ADMIN_EMAILS=you@example.com        # who may switch the server-wide models and open /ui/
 
 # Google Ads
 GOOGLE_ADS_DEVELOPER_TOKEN=
@@ -162,7 +162,7 @@ All settings are environment variables (read from `.env` in development).
 |---|---|---|
 | `CLIENT_ID`, `CLIENT_SECRET` | — | OAuth client used both for Google Sign-In and for the per-user API grants. **Unset = no sign-in** (local development only). |
 | `PUBLIC_BASE_URL` | `http://localhost:8000` | Builds the redirect URI; with `https://` the cookies are `Secure`. |
-| `ADMIN_EMAILS` | — | Comma-separated Google accounts allowed to switch the server-wide models (`POST /auth/models`). With sign-in configured and this unset, nobody can. |
+| `ADMIN_EMAILS` | — | Comma-separated Google accounts allowed to switch the server-wide models (`POST /auth/models`) and to open the stock ADK dev UI at `/ui/` once sign-in is configured (everyone else is redirected to `/app/`). With sign-in configured and this unset, nobody can. |
 | `OAUTH_STATE_SECRET` | derived from `CLIENT_SECRET` | Extra secret mixed into the HMAC key that signs OAuth states and the sign-in cookie. |
 | `SHUTDOWN_GRACE_SECS` | `8` | How long in-flight requests may finish after SIGTERM. |
 

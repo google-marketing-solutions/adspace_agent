@@ -177,10 +177,12 @@ const MAX_SCRUBBED_SSE_EVENT_BYTES: usize = 32 * 1024 * 1024;
 /// Default time in-flight requests get to finish after SIGTERM
 /// (`SHUTDOWN_GRACE_SECS`; Cloud Run allows 10 s).
 const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(8);
-/// The helper script (see the file for what it does in the UI).
-const AUTH_HELPER_JS: &str = include_str!("auth_helper.js");
-/// Tag injected into the web UI page.
-const AUTH_HELPER_TAG: &str = "<script src=\"/oauth2/helper.js\" defer></script>";
+/// Module path (relative to `/app/`) of the `/ui/` helper script, which
+/// imports the shared `adk-ui` renderer; see the file for what it does.
+const AUTH_HELPER_MODULE: &str = "ui-helper.js";
+/// Tag injected into the web UI page. A module script so the helper can
+/// `import` the renderer from `/app/`; modules are deferred by default.
+const AUTH_HELPER_TAG: &str = "<script type=\"module\" src=\"/oauth2/helper.js\"></script>";
 /// Custom AdSpace Agent studio interface HTML (`/app/`).
 const STUDIO_HTML: &str = include_str!("studio.html");
 /// Custom AdSpace Agent studio interface CSS (`/app/app.css`).
@@ -204,7 +206,8 @@ macro_rules! app_modules {
 }
 
 // Custom AdSpace Agent studio client, served as native ES modules under
-// `/app/<path>` (`/app/app.js` is the entry point loaded by `studio.html`).
+// `/app/<path>` (`/app/app.js` is the entry point loaded by `studio.html`;
+// `ui-helper.js` is the `/ui/` entry point, also served as `/oauth2/helper.js`).
 app_modules! {
     "app.js",
     "adk-ui/charts.js",
@@ -226,6 +229,7 @@ app_modules! {
     "state.js",
     "status.js",
     "transcript.js",
+    "ui-helper.js",
     "usage/counter.js",
     "usage/pricing.js",
     "usage/session-usage.js",
@@ -292,8 +296,13 @@ fn html_page(title: &str, body: &str, status: &str) -> Html<String> {
     ))
 }
 
-/// Serves the browser helper.
+/// Serves the browser helper (`/oauth2/helper.js`, the same bytes as
+/// `/app/ui-helper.js`).
 async fn auth_helper() -> Response {
+    js_response(app_module(AUTH_HELPER_MODULE).expect("ui-helper.js is an embedded module"))
+}
+
+fn js_response(src: &'static str) -> Response {
     (
         [
             (
@@ -302,7 +311,7 @@ async fn auth_helper() -> Response {
             ),
             (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
         ],
-        AUTH_HELPER_JS,
+        src,
     )
         .into_response()
 }
@@ -450,17 +459,7 @@ fn css_response(css: &'static str) -> Response {
 /// or `/app/stage.js`. Paths outside the embedded module list are 404.
 async fn app_js(Path(path): Path<String>) -> Response {
     match app_module(&path) {
-        Some(src) => (
-            [
-                (
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/javascript; charset=utf-8"),
-                ),
-                (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
-            ],
-            src,
-        )
-            .into_response(),
+        Some(src) => js_response(src),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -1358,8 +1357,10 @@ mod tests {
             inject_auth_helper_tag("<p>no body tag</p>"),
             format!("<p>no body tag</p>{AUTH_HELPER_TAG}")
         );
-        // The tag loads the helper from our own origin (the UI's CSP is `script-src 'self'`).
+        // The tag loads the helper from our own origin (the UI's CSP is `script-src 'self'`)
+        // as a module, so it can import the shared renderer from `/app/`.
         assert!(AUTH_HELPER_TAG.contains(AUTH_HELPER_PATH));
+        assert!(AUTH_HELPER_TAG.contains("type=\"module\""));
     }
 
     #[test]
@@ -1376,16 +1377,21 @@ mod tests {
 
     #[test]
     fn helper_script_targets_google_auth_links_and_the_resume_turn() {
-        assert!(AUTH_HELPER_JS.contains("https://accounts.google.com/o/oauth2/"));
-        assert!(AUTH_HELPER_JS.contains("window.open("));
-        assert!(AUTH_HELPER_JS.contains("new BroadcastChannel(CHANNEL)"));
-        assert!(AUTH_HELPER_JS.contains("const CHANNEL = \"adspace:oauth\""));
-        assert!(AUTH_HELPER_JS.contains("adk-ui-surface"));
-        assert!(AUTH_HELPER_JS.contains("extractUiResponse"));
-        assert!(AUTH_HELPER_JS.contains("Element.prototype.scrollTo"));
+        let helper = app_module(AUTH_HELPER_MODULE).expect("helper module is embedded");
+        assert!(helper.contains("https://accounts.google.com/o/oauth2/"));
+        assert!(helper.contains("window.open("));
+        assert!(helper.contains("new BroadcastChannel(CHANNEL)"));
+        assert!(helper.contains("const CHANNEL = \"adspace:oauth\""));
+        // It is the `/ui/` host of the shared renderer, not a second copy of it:
+        // served from `/oauth2/`, so the imports must be absolute `/app/` URLs.
+        assert!(helper.contains("from \"/app/adk-ui/index.js\""));
+        assert!(helper.contains("extractUiResponse"));
+        assert!(helper.contains("href = SHARED_CSS_PATH") && helper.contains("\"/app/adk-ui.css\""));
+        assert!(!helper.contains("const renderInnerComponent"));
+        assert!(helper.contains("Element.prototype.scrollTo"));
         // Must match the text `resume_message` produces.
         let marker = "Google access has been granted for this chat";
-        assert!(AUTH_HELPER_JS.contains(marker));
+        assert!(helper.contains(marker));
         let token = OAuthToken {
             access_token: String::new(),
             refresh_token: None,
@@ -1496,6 +1502,23 @@ mod tests {
             );
             assert_eq!(js.headers()[header::CACHE_CONTROL], "no-cache");
         }
+        // The `/ui/` helper is served as a JavaScript module from both paths
+        // (the injected tag uses `/oauth2/helper.js`), with identical bytes.
+        let mut helper_bodies = Vec::new();
+        for path in [AUTH_HELPER_PATH, "/app/ui-helper.js"] {
+            let js = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(js.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                js.headers()[header::CONTENT_TYPE],
+                "application/javascript; charset=utf-8"
+            );
+            helper_bodies.push(to_bytes(js.into_body(), usize::MAX).await.unwrap());
+        }
+        assert_eq!(helper_bodies[0], helper_bodies[1]);
         for path in ["/app/app.css", "/app/adk-ui.css"] {
             let css = app
                 .clone()

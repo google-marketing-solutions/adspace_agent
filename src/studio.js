@@ -401,10 +401,19 @@
     if (!currentUser || !activeSession) return;
     if (data.session_id && data.session_id !== activeSession.id) return;
     if (handledAuthRequests.has(data.request_id)) return;
+    // Defense in depth: the server is trusted, but never hand `window.open` a
+    // `javascript:` (or other non-web) URL — the new window inherits our origin.
+    let authUrl;
+    try {
+      authUrl = new URL(data.auth_url, location.href);
+    } catch {
+      return;
+    }
+    if (authUrl.protocol !== "https:" && authUrl.origin !== location.origin) return;
     handledAuthRequests.add(data.request_id);
 
     setStatus("authorizing", "authorizing…");
-    const win = openPopup(data.auth_url);
+    const win = openPopup(authUrl.href);
     const opened = !!win;
     try {
       await fetch(ACK_PATH, {
@@ -527,6 +536,10 @@
     authCheckPromise = (async () => {
       try {
         const resp = await fetch("/auth/me");
+        if (!resp.ok) {
+          showError(`Could not verify authentication status: server returned HTTP ${resp.status}.`);
+          return;
+        }
         const data = await resp.json();
         if (!data.authenticated || !data.user) {
           currentUser = null;
@@ -566,32 +579,13 @@
 
         if (data.models) {
           ingestServerPricing(data.models);
-          if (!canManageModels) {
-            // Non-admins follow the server's global selection: show it and
-            // never try to push local preferences (that would 403).
-            if (data.models.model) prefs.model = data.models.model;
-            if (data.models.image_model) prefs.imageModel = data.models.image_model;
-            if (data.models.video_model) prefs.videoModel = data.models.video_model;
-            applyPreferences({ rerender: false });
-          } else {
-            if (!localStorage.getItem(STORAGE_KEYS.model) && data.models.model) {
-              prefs.model = data.models.model;
-            }
-            if (!localStorage.getItem(STORAGE_KEYS.imageModel) && data.models.image_model) {
-              prefs.imageModel = data.models.image_model;
-            }
-            if (!localStorage.getItem(STORAGE_KEYS.videoModel) && data.models.video_model) {
-              prefs.videoModel = data.models.video_model;
-            }
-            applyPreferences({ rerender: false });
-            if (
-              data.models.model !== prefs.model ||
-              data.models.image_model !== prefs.imageModel ||
-              data.models.video_model !== prefs.videoModel
-            ) {
-              await pushModelsToServer();
-            }
-          }
+          // The server's global selection is the source of truth on load for
+          // everyone. Admins only push changes from the settings UI; a stale
+          // localStorage value must never silently flip the models for all users.
+          if (data.models.model) prefs.model = data.models.model;
+          if (data.models.image_model) prefs.imageModel = data.models.image_model;
+          if (data.models.video_model) prefs.videoModel = data.models.video_model;
+          applyPreferences({ rerender: false });
         }
 
         await loadUserSessions();
@@ -613,11 +607,17 @@
 
   logoutBtn.addEventListener("click", async () => {
     userMenu.classList.add("hidden");
-    await fetch("/auth/logout", { method: "POST" });
-    activeSession = null;
-    sessions = [];
-    canvasSurfaces = [];
-    await checkAuthStatus();
+    try {
+      const resp = await fetch("/auth/logout", { method: "POST" });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      activeSession = null;
+      sessions = [];
+      canvasSurfaces = [];
+    } catch (err) {
+      showError(`Could not sign out: ${err.message || err}`);
+    } finally {
+      await checkAuthStatus();
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -702,9 +702,17 @@
     return createSessionPromise;
   };
 
+  // Monotonic token so overlapping `loadSession` calls (quick <select> changes,
+  // refresh racing an OAuth completion) cannot apply a stale response.
+  let loadSeq = 0;
+
   const loadSession = async (sessionId) => {
     if (!currentUser || !sessionId) return;
+    const seq = ++loadSeq;
     const isSessionSwitch = !activeSession || activeSession.id !== sessionId;
+    // Switching away from a streaming session: stop the run so its SSE loop
+    // cannot keep appending the old session's events into the new one.
+    if (isSessionSwitch && isRunning && abortController) abortController.abort();
     try {
       const resp = await fetch(
         apiUrl(
@@ -714,7 +722,9 @@
         )
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      activeSession = await resp.json();
+      const data = await resp.json();
+      if (seq !== loadSeq) return; // stale: a newer load has started
+      activeSession = data;
       syncSettingsAvailability();
       $("menu-session-id").textContent = activeSession.id;
       if (isSessionSwitch) {
@@ -726,6 +736,7 @@
         suppressOverlays: true,
       });
     } catch (err) {
+      if (seq !== loadSeq) return;
       showError(`Could not load session: ${err.message || err}`);
     }
   };
@@ -746,7 +757,7 @@
     userMenu.classList.add("hidden");
     if (!currentUser || !activeSession) return;
     try {
-      await fetch(
+      const resp = await fetch(
         apiUrl(
           `/apps/${encodeURIComponent(APP_NAME)}/users/${encodeURIComponent(
             currentUser.id
@@ -754,12 +765,14 @@
         ),
         { method: "DELETE" }
       );
-      activeSession = null;
-      syncSettingsAvailability();
-      await loadUserSessions();
-    } catch {
-      await createNewSession();
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    } catch (err) {
+      showError(`Could not delete session: ${err.message || err}`);
+      return;
     }
+    activeSession = null;
+    syncSettingsAvailability();
+    await loadUserSessions();
   });
 
   // ---------------------------------------------------------------------------
@@ -769,11 +782,25 @@
   const toNumber = (val) => {
     if (typeof val === "number" && Number.isFinite(val)) return val;
     if (typeof val === "string") {
-      const cleaned = val.replace(/[$,%\s,]/g, "");
+      const cleaned = val.replace(/[$,%\s]/g, "");
       const n = Number(cleaned);
       if (cleaned !== "" && Number.isFinite(n)) return n;
     }
     return NaN;
+  };
+
+  // Agent-controlled image sources are limited to web URLs (same-origin
+  // relative paths included) and inline images; anything else renders empty.
+  const safeImageSrc = (src) => {
+    const raw = String(src || "").trim();
+    if (!raw) return "";
+    if (/^data:image\//i.test(raw)) return raw;
+    try {
+      const u = new URL(raw, location.href);
+      return u.protocol === "https:" || u.protocol === "http:" ? u.href : "";
+    } catch {
+      return "";
+    }
   };
 
   const formatCompact = (n) => {
@@ -891,7 +918,8 @@
 
     let dismissed = false;
     let timerId = 0;
-    let remainingMs = Math.max(0, Number(comp.duration ?? 5000));
+    const requestedMs = Number(comp.duration);
+    let remainingMs = Number.isFinite(requestedMs) ? Math.max(0, requestedMs) : 5000;
     let startedAt = 0;
 
     const dismiss = () => {
@@ -902,7 +930,8 @@
       setTimeout(() => toast.remove(), 190);
     };
 
-    if (comp.dismissible !== false) {
+    // A toast that never auto-dismisses must always be closable by hand.
+    if (comp.dismissible !== false || remainingMs === 0) {
       const closeBtn = document.createElement("button");
       closeBtn.type = "button";
       closeBtn.className = "ui-toast-close";
@@ -1033,7 +1062,7 @@
     body.className = "ui-modal-body";
     const contentArr = Array.isArray(spec.content) ? spec.content : [];
     for (const child of contentArr) {
-      body.appendChild(renderInnerComponent(child, dialog, false));
+      body.appendChild(renderInnerComponent(child, dialog, { inModal: true }));
     }
 
     dialog.append(hdr, body);
@@ -1042,7 +1071,7 @@
       const ftr = document.createElement("footer");
       ftr.className = "ui-modal-footer";
       for (const child of spec.footer) {
-        ftr.appendChild(renderInnerComponent(child, dialog, false));
+        ftr.appendChild(renderInnerComponent(child, dialog, { inModal: true }));
       }
       dialog.appendChild(ftr);
     }
@@ -1618,7 +1647,7 @@
     const toolbar = document.createElement("div");
     style(toolbar, { display: "flex", alignItems: "center", gap: "10px" });
     const countChip = document.createElement("span");
-    countChip.textContent = `${rawRows.length} rows`;
+    countChip.setAttribute("aria-live", "polite");
     style(countChip, {
       fontSize: "12.5px",
       fontWeight: "450",
@@ -1728,6 +1757,10 @@
       }
 
       const totalRows = rows.length;
+      countChip.textContent =
+        filterQuery && totalRows !== rawRows.length
+          ? `${totalRows} of ${rawRows.length} rows`
+          : `${totalRows} rows`;
       if (pageSize > 0) {
         const start = page * pageSize;
         rows = rows.slice(start, start + pageSize);
@@ -1822,8 +1855,13 @@
     return { element: wrap, toolbar };
   };
 
-  const renderInnerComponent = (comp, surfaceRoot, inGrid = false) => {
+  // `ctx` is the render context: `inGrid` (KPI tile inside a grid) and
+  // `inModal` (anywhere inside the modal overlay). It is threaded explicitly
+  // because children are rendered while their parents are still detached, so
+  // DOM-based `closest()` sniffing cannot see the modal.
+  const renderInnerComponent = (comp, surfaceRoot, ctx = {}) => {
     if (!comp || typeof comp !== "object") return document.createTextNode("");
+    const { inGrid = false, inModal = false } = ctx || {};
     const type = String(comp.type || "").toLowerCase();
 
     switch (type) {
@@ -1865,9 +1903,6 @@
         } else {
           appendInlineMarkdown(el, raw);
         }
-        const inModal =
-          Boolean(surfaceRoot?.hasAttribute?.("data-ui-modal")) ||
-          Boolean(surfaceRoot?.closest?.('[data-ui-modal="true"]'));
         const map = {
           h1: {
             fontSize: "22px",
@@ -1961,7 +1996,7 @@
           gap: `${gapPx}px`,
         });
         for (const child of comp.children || []) {
-          div.appendChild(renderInnerComponent(child, surfaceRoot, inGrid));
+          div.appendChild(renderInnerComponent(child, surfaceRoot, ctx));
         }
         return div;
       }
@@ -1976,7 +2011,7 @@
           alignItems: "stretch",
         });
         for (const child of comp.children || []) {
-          div.appendChild(renderInnerComponent(child, surfaceRoot, true));
+          div.appendChild(renderInnerComponent(child, surfaceRoot, { inGrid: true, inModal }));
         }
         return div;
       }
@@ -1985,7 +2020,7 @@
         const div = document.createElement("div");
         style(div, { display: "flex", flexDirection: "column", gap: "12px" });
         for (const child of comp.children || []) {
-          div.appendChild(renderInnerComponent(child, surfaceRoot, inGrid));
+          div.appendChild(renderInnerComponent(child, surfaceRoot, ctx));
         }
         return div;
       }
@@ -2037,7 +2072,7 @@
           const body = document.createElement("div");
           style(body, { display: "flex", flexDirection: "column", gap: "8px" });
           for (const child of comp.content) {
-            body.appendChild(renderInnerComponent(child, tile, inGrid));
+            body.appendChild(renderInnerComponent(child, tile, ctx));
           }
           tile.appendChild(body);
         }
@@ -2051,7 +2086,7 @@
             paddingTop: "10px",
           });
           for (const child of comp.footer) {
-            ftr.appendChild(renderInnerComponent(child, tile, false));
+            ftr.appendChild(renderInnerComponent(child, tile, { inModal }));
           }
           tile.appendChild(ftr);
         }
@@ -2084,7 +2119,7 @@
           });
           panel.replaceChildren();
           for (const child of tabs[idx]?.content || []) {
-            panel.appendChild(renderInnerComponent(child, surfaceRoot, false));
+            panel.appendChild(renderInnerComponent(child, surfaceRoot, { inModal }));
           }
         };
 
@@ -2291,12 +2326,25 @@
           }
           for (const opt of comp.options || []) {
             const o = document.createElement("option");
-            o.value = opt.value;
-            o.textContent = opt.label;
+            if (opt && typeof opt === "object") {
+              o.value = String(opt.value ?? opt.label ?? "");
+              o.textContent = String(opt.label ?? opt.value ?? "");
+            } else {
+              // Plain-string options: the string is both value and label.
+              o.value = String(opt ?? "");
+              o.textContent = o.value;
+            }
             control.appendChild(o);
           }
           if (hasDefault) {
-            control.value = String(comp.default_value);
+            if (control.multiple) {
+              const defaults = (
+                Array.isArray(comp.default_value) ? comp.default_value : [comp.default_value]
+              ).map((d) => String(d));
+              for (const o of control.options) o.selected = defaults.includes(o.value);
+            } else {
+              control.value = String(comp.default_value);
+            }
           }
         } else if (type === "switch") {
           const row = document.createElement("div");
@@ -2395,9 +2443,6 @@
         btn.textContent = comp.label || "Submit";
         btn.disabled = !!comp.disabled;
         const v = String(comp.variant || "primary").toLowerCase();
-        const inModal =
-          Boolean(surfaceRoot?.hasAttribute?.("data-ui-modal")) ||
-          Boolean(surfaceRoot?.closest?.('[data-ui-modal="true"]'));
         if (v === "primary" || v === "danger") {
           btn.setAttribute("data-ui-primary", "true");
         }
@@ -2446,6 +2491,13 @@
         });
 
         btn.addEventListener("click", () => {
+          // Programmatic sends must never double as the composer's stop toggle:
+          // while a run is streaming, refuse instead of aborting it and dropping
+          // the form payload.
+          if (isRunning) {
+            showToast({ variant: "warning", message: "Wait for the agent to finish." });
+            return;
+          }
           const scope = btn.closest('[data-ui-scope="true"]') || surfaceRoot;
           const inputs = scope ? Array.from(scope.querySelectorAll("[data-ui-field]")) : [];
           const actionId = comp.action_id || comp.label || "click";
@@ -2551,7 +2603,7 @@
 
       case "image": {
         const img = document.createElement("img");
-        img.src = comp.src || "";
+        img.src = safeImageSrc(comp.src);
         img.alt = comp.alt || "";
         style(img, {
           maxWidth: "100%",
@@ -2730,7 +2782,7 @@
         });
         pendingTitle = null;
         pendingSubtitle = null;
-        body.appendChild(renderInnerComponent(comp.children[1], card, true));
+        body.appendChild(renderInnerComponent(comp.children[1], card, { inGrid: true }));
         cards.push(card);
         continue;
       }
@@ -2781,7 +2833,7 @@
           body.appendChild(renderChartInner({ ...contentArr[0], title: null }));
         } else {
           for (const child of contentArr) {
-            body.appendChild(renderInnerComponent(child, card, false));
+            body.appendChild(renderInnerComponent(child, card));
           }
         }
 
@@ -2796,7 +2848,7 @@
             background: "transparent",
           });
           for (const child of comp.footer) {
-            ftr.appendChild(renderInnerComponent(child, card, false));
+            ftr.appendChild(renderInnerComponent(child, card));
           }
           card.appendChild(ftr);
         }
@@ -2822,7 +2874,7 @@
       });
       pendingTitle = null;
       pendingSubtitle = null;
-      body.appendChild(renderInnerComponent(comp, card, false));
+      body.appendChild(renderInnerComponent(comp, card));
       cards.push(card);
     }
 

@@ -422,7 +422,7 @@ export const updateMessageArticle = (
   if (textContent) {
     if (!textEl) {
       textEl = document.createElement("div");
-      textEl.className = "message-text";
+      textEl.className = "message-text adk-ui-md";
       if (st && st.nextSibling) {
         article.insertBefore(textEl, st.nextSibling);
       } else if (st) {

@@ -185,6 +185,8 @@ const AUTH_HELPER_TAG: &str = "<script src=\"/oauth2/helper.js\" defer></script>
 const STUDIO_HTML: &str = include_str!("studio.html");
 /// Custom AdSpace Agent studio interface CSS (`/app/app.css`).
 const STUDIO_CSS: &str = include_str!("studio.css");
+/// Stylesheet of the `adk-ui` renderer shared by `/app/` and `/ui/` (`/app/adk-ui.css`).
+const ADK_UI_CSS: &str = include_str!("adk-ui.css");
 
 /// Expands a list of module paths into the `match` arms of [`app_module`] so
 /// the served file list lives in exactly one place.
@@ -422,6 +424,15 @@ async fn studio_index() -> Response {
 
 /// Serves the custom AdSpace Agent studio stylesheet (`/app/app.css`).
 async fn studio_css() -> Response {
+    css_response(STUDIO_CSS)
+}
+
+/// Serves the shared `adk-ui` renderer stylesheet (`/app/adk-ui.css`).
+async fn adk_ui_css() -> Response {
+    css_response(ADK_UI_CSS)
+}
+
+fn css_response(css: &'static str) -> Response {
     (
         [
             (
@@ -430,7 +441,7 @@ async fn studio_css() -> Response {
             ),
             (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
         ],
-        STUDIO_CSS,
+        css,
     )
         .into_response()
 }
@@ -1167,6 +1178,7 @@ pub fn oauth_router(routes: OAuthRoutes) -> Router {
         .route("/app", get(|| async { Redirect::to("/app/") }))
         .route("/app/", get(studio_index))
         .route("/app/app.css", get(studio_css))
+        .route("/app/adk-ui.css", get(adk_ui_css))
         .route("/app/{*path}", get(app_js))
         .route("/favicon.ico", get(studio_favicon))
         .route("/favicon.svg", get(studio_favicon))
@@ -1470,7 +1482,7 @@ mod tests {
         assert!(html.contains("/app/app.js"));
 
         // 1a. The studio client is served as ES modules under `/app/<path>`;
-        // `/app/app.css` keeps its own route and unknown paths are 404.
+        // the two stylesheets keep their own routes and unknown paths are 404.
         for path in ["/app/app.js", "/app/state.js", "/app/adk-ui/charts.js"] {
             let js = app
                 .clone()
@@ -1484,21 +1496,20 @@ mod tests {
             );
             assert_eq!(js.headers()[header::CACHE_CONTROL], "no-cache");
         }
-        let css = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/app/app.css")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(css.status(), StatusCode::OK);
-        assert_eq!(
-            css.headers()[header::CONTENT_TYPE],
-            "text/css; charset=utf-8"
-        );
+        for path in ["/app/app.css", "/app/adk-ui.css"] {
+            let css = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(css.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                css.headers()[header::CONTENT_TYPE],
+                "text/css; charset=utf-8"
+            );
+        }
+        // The studio links both stylesheets.
+        assert!(html.contains("/app/adk-ui.css") && html.contains("/app/app.css"));
         let missing = app
             .clone()
             .oneshot(

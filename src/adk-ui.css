@@ -1,0 +1,661 @@
+/*
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/* AdSpace Agent — shared `adk-ui` renderer stylesheet
+ *
+ * Everything the renderer in src/app/adk-ui/* (plus dom.js / markdown.js)
+ * relies on, so one stylesheet serves both hosts: the studio (`/app/`,
+ * linked from studio.html next to app.css) and the ADK web UI (`/ui/`, where
+ * src/app/ui-helper.js injects it). It therefore defines ONLY tokens that no
+ * host page defines itself (the `--dm-*` surface tokens, the studio button
+ * tokens and the overlay z-layers); host palette tokens such as
+ * `--text-primary`, `--surface-card`, `--border-default`, `--accent-*` and
+ * `--mono` come from the host (studio.css or the ADK UI's own stylesheet),
+ * which is what keeps the cards theme-native in `/ui/`.
+ */
+:root {
+  --protected-btn-outline: rgba(33, 34, 38, 0.12);
+  --protected-btn-hover: rgba(33, 34, 38, 0.04);
+  --protected-btn-focus: rgba(33, 34, 38, 0.12);
+  --protected-btn-active: rgba(33, 34, 38, 0.06);
+  --primary-btn-bg: #121317;
+  --primary-btn-fg: #ffffff;
+  --primary-btn-hover: rgba(230, 234, 240, 0.12);
+  --primary-btn-focus: rgba(230, 234, 240, 0.2);
+  --primary-btn-active: rgba(230, 234, 240, 0.12);
+  --dm-surface-gray: #eff2f7;
+  --dm-surface-gray-subtle: #e6eaf0;
+  --dm-text-primary: #121317;
+  --dm-text-secondary: #45474d;
+  --dm-outline: rgba(33, 34, 38, 0.08);
+  --dm-depth-shadow: 0 20px 44px -14px rgba(18, 19, 23, 0.12),
+    0 4px 14px -2px rgba(18, 19, 23, 0.05),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  --dm-modal-shadow: 0 32px 68px -16px rgba(18, 19, 23, 0.2),
+    0 8px 24px -4px rgba(18, 19, 23, 0.09),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  /* Overlay layers; the rest of the studio's stacking scale is in studio.css. */
+  --z-modal: 2100;
+  --z-toast: 2200;
+}
+
+/* MIRROR: the dark token values below are duplicated verbatim in the
+   `:root[data-theme="dark"]` block that follows (JS sets data-theme only for
+   an explicit light/dark choice; "system" relies on this media query).
+   Keep both in sync — `scripts/check-dark-tokens.sh` diffs them. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --protected-btn-outline: rgba(230, 234, 240, 0.12);
+    --protected-btn-hover: rgba(230, 234, 240, 0.06);
+    --protected-btn-focus: rgba(230, 234, 240, 0.14);
+    --protected-btn-active: rgba(230, 234, 240, 0.08);
+    --primary-btn-bg: #f8f9fc;
+    --primary-btn-fg: #121317;
+    --primary-btn-hover: rgba(33, 34, 38, 0.12);
+    --primary-btn-focus: rgba(33, 34, 38, 0.2);
+    --primary-btn-active: rgba(33, 34, 38, 0.12);
+    --dm-surface-gray: #212226;
+    --dm-surface-gray-subtle: #2f3034;
+    --dm-text-primary: #f8f9fc;
+    --dm-text-secondary: #b2bbc5;
+    --dm-outline: rgba(230, 234, 240, 0.1);
+    --dm-depth-shadow: 0 22px 48px -12px rgba(0, 0, 0, 0.55),
+      0 6px 16px -2px rgba(0, 0, 0, 0.32),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    --dm-modal-shadow: 0 36px 76px -16px rgba(0, 0, 0, 0.65),
+      0 10px 28px -4px rgba(0, 0, 0, 0.42),
+      inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  }
+}
+
+/* MIRROR: keep in sync with the `@media (prefers-color-scheme: dark)` block
+   above (see scripts/check-dark-tokens.sh). */
+:root[data-theme="dark"] {
+  --protected-btn-outline: rgba(230, 234, 240, 0.12);
+  --protected-btn-hover: rgba(230, 234, 240, 0.06);
+  --protected-btn-focus: rgba(230, 234, 240, 0.14);
+  --protected-btn-active: rgba(230, 234, 240, 0.08);
+  --primary-btn-bg: #f8f9fc;
+  --primary-btn-fg: #121317;
+  --primary-btn-hover: rgba(33, 34, 38, 0.12);
+  --primary-btn-focus: rgba(33, 34, 38, 0.2);
+  --primary-btn-active: rgba(33, 34, 38, 0.12);
+  --dm-surface-gray: #212226;
+  --dm-surface-gray-subtle: #2f3034;
+  --dm-text-primary: #f8f9fc;
+  --dm-text-secondary: #b2bbc5;
+  --dm-outline: rgba(230, 234, 240, 0.1);
+  --dm-depth-shadow: 0 22px 48px -12px rgba(0, 0, 0, 0.55),
+    0 6px 16px -2px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --dm-modal-shadow: 0 36px 76px -16px rgba(0, 0, 0, 0.65),
+    0 10px 28px -4px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+.google-symbols {
+  font-family: "Google Symbols", sans-serif;
+  font-weight: 300;
+  font-style: normal;
+  font-size: 18px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  user-select: none;
+  flex-shrink: 0;
+  font-variation-settings: "FILL" 0, "wght" 300, "GRAD" 0, "opsz" 48, "ROND" 100;
+  -webkit-font-feature-settings: "liga";
+  font-feature-settings: "liga";
+  -webkit-font-smoothing: antialiased;
+}
+
+.google-symbols.filled {
+  font-variation-settings: "FILL" 1, "wght" 300, "GRAD" 0, "opsz" 48, "ROND" 100;
+}
+
+[hidden],
+.hidden {
+  display: none !important;
+}
+
+/* Markdown bodies (markdown.js): chat bubbles in the studio and multi-line
+   `text` components in adk-ui cards. Named `adk-ui-md` rather than
+   `message-text` because the ADK web UI already styles `.message-text`. */
+.adk-ui-md > :first-child {
+  margin-top: 0;
+}
+
+.adk-ui-md > :last-child {
+  margin-bottom: 0;
+}
+
+.adk-ui-md p {
+  margin: 0 0 10px;
+}
+
+.adk-ui-md h1,
+.adk-ui-md h2,
+.adk-ui-md h3,
+.adk-ui-md h4 {
+  margin: 16px 0 6px;
+  font-weight: 450;
+  line-height: 1.25;
+  letter-spacing: -0.012em;
+}
+
+.adk-ui-md h1 { font-size: 19px; }
+.adk-ui-md h2 { font-size: 16.5px; }
+.adk-ui-md h3 { font-size: 15px; }
+.adk-ui-md h4 { font-size: 14px; }
+
+.adk-ui-md ul,
+.adk-ui-md ol {
+  margin: 6px 0 10px;
+  padding-left: 21px;
+}
+
+.adk-ui-md ul ul,
+.adk-ui-md ul ol,
+.adk-ui-md ol ul,
+.adk-ui-md ol ol {
+  margin: 4px 0 4px;
+}
+
+.adk-ui-md li {
+  margin: 4px 0;
+}
+
+.adk-ui-md hr {
+  border: 0;
+  border-top: 1px solid var(--border-default);
+  margin: 12px 0;
+}
+
+.adk-ui-md blockquote {
+  margin: 8px 0;
+  padding: 8px 14px;
+  border-left: 2px solid var(--text-primary);
+  background: var(--bg-primary);
+  border-radius: 0 12px 12px 0;
+  color: var(--text-secondary);
+}
+
+.adk-ui-md table {
+  width: 100%;
+  /* separate + 0 spacing: border-radius/overflow:hidden are ignored on a
+     border-collapse:collapse table, so cell borders carry the row rules. */
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 10px 0;
+  font-size: 13px;
+  border: 1px solid var(--border-default);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.adk-ui-md th,
+.adk-ui-md td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-default);
+  text-align: left;
+  vertical-align: top;
+}
+
+.adk-ui-md th {
+  background: var(--bg-primary);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: -0.002em;
+  color: var(--text-secondary);
+}
+
+.adk-ui-md tr:last-child td {
+  border-bottom: 0;
+}
+
+.adk-ui-md code {
+  padding: 1.5px 5px;
+  border: 1px solid var(--border-default);
+  border-radius: 5px;
+  background: var(--bg-primary);
+  font: 0.88em/1.5 var(--mono);
+}
+
+.adk-ui-md pre {
+  margin: 9px 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--border-default);
+  border-radius: 14px;
+  background: var(--bg-primary);
+}
+
+.adk-ui-md pre code {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.adk-ui-md a {
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Floating Toast Notifications & Modal Dialog Overlays */
+@keyframes toast-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes toast-countdown {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+@keyframes modal-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes ui-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ui-shimmer {
+  0% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.85;
+  }
+  100% {
+    opacity: 0.45;
+  }
+}
+
+.toast-stack {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 12px;
+  max-width: min(420px, calc(100vw - 40px));
+  pointer-events: none;
+}
+
+.ui-toast {
+  pointer-events: auto;
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 18px 20px 20px;
+  border-radius: 22px;
+  background: var(--dm-surface-gray);
+  border: 1px solid var(--dm-outline);
+  box-shadow: var(--dm-depth-shadow);
+  overflow: hidden;
+  animation: toast-slide-in 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ui-toast.leaving {
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.ui-toast-icon {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--dm-surface-gray-subtle);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+}
+
+.ui-toast-icon .google-symbols {
+  font-size: 18px;
+}
+
+.ui-toast-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 2px;
+}
+
+.ui-toast-title {
+  font-size: 16px;
+  font-weight: 450;
+  line-height: 1.35;
+  letter-spacing: -0.008em;
+  color: var(--dm-text-primary);
+  text-wrap: pretty;
+  word-break: break-word;
+}
+
+.ui-toast-desc {
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.48;
+  color: var(--dm-text-secondary);
+}
+
+.ui-toast-close {
+  flex-shrink: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dm-text-secondary);
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.ui-toast-close:hover {
+  background: var(--dm-surface-gray-subtle);
+  color: var(--dm-text-primary);
+}
+
+.ui-toast-timer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2.5px;
+  opacity: 0.45;
+  transform-origin: left center;
+  animation-name: toast-countdown;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+.ui-toast:hover .ui-toast-timer {
+  animation-play-state: paused;
+}
+
+.ui-modal-root {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.ui-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(18, 19, 23, 0.36);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.ui-modal-dialog {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
+  display: flex;
+  flex-direction: column;
+  border-radius: 28px;
+  background: var(--dm-surface-gray);
+  border: 1px solid var(--dm-outline);
+  box-shadow: var(--dm-modal-shadow);
+  overflow: hidden;
+  animation: modal-pop-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ui-modal--small {
+  max-width: 440px;
+}
+
+.ui-modal--medium {
+  max-width: 560px;
+}
+
+.ui-modal--large {
+  max-width: 760px;
+}
+
+.ui-modal--full {
+  max-width: min(1100px, 94vw);
+  min-height: min(640px, 80vh);
+}
+
+.ui-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 28px 32px 10px;
+}
+
+.ui-modal-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.ui-modal-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 450;
+  line-height: 1.2;
+  letter-spacing: -0.012em;
+  color: var(--dm-text-primary);
+  text-wrap: pretty;
+}
+
+.ui-modal-close {
+  border: 1px solid transparent;
+  background: var(--dm-surface-gray-subtle);
+  color: var(--dm-text-secondary);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.ui-modal-close:hover {
+  background: var(--border-strong);
+  color: var(--dm-text-primary);
+}
+
+.ui-modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 32px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--dm-text-secondary);
+}
+
+.ui-modal-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 8px 32px 28px;
+  background: transparent;
+}
+
+/* Minimal White Alert Card */
+.dm-alert-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 18px;
+  padding: 24px 26px;
+  border-radius: 24px;
+  background: var(--surface-card);
+  border: 1px solid var(--dm-outline);
+  box-shadow: var(--shadow-md);
+}
+
+.dm-alert-inline {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 18px 20px;
+  border-radius: 20px;
+  background: var(--surface-card);
+  border: 1px solid var(--dm-outline);
+}
+
+.dm-alert-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+}
+
+.dm-alert-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 450;
+  line-height: 1.3;
+  letter-spacing: -0.008em;
+  color: var(--dm-text-primary);
+  text-wrap: pretty;
+}
+
+.dm-alert-inline .dm-alert-title {
+  font-size: 16.5px;
+  line-height: 1.34;
+}
+
+.dm-alert-desc {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--dm-text-primary);
+}
+
+.dm-alert-inline .dm-alert-desc {
+  font-size: 14px;
+  line-height: 1.48;
+}
+
+.dm-alert-status-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--protected-btn-outline);
+  background: transparent;
+  color: var(--dm-text-primary);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: 0.004em;
+  user-select: none;
+}
+
+.dm-alert-inline .dm-alert-status-btn {
+  padding: 5px 12px;
+  font-size: 12.5px;
+}
+
+/* DeepMind Gemini Interactive Component Polish */
+.adk-ui-surface input:not([type="checkbox"]):not([type="range"]):focus-visible,
+.adk-ui-surface select:focus-visible,
+.adk-ui-surface textarea:focus-visible,
+.ui-modal-dialog input:not([type="checkbox"]):not([type="range"]):focus-visible,
+.ui-modal-dialog select:focus-visible,
+.ui-modal-dialog textarea:focus-visible {
+  outline: none;
+  /* !important: adk-ui components set border-color inline from studio.js. */
+  border-color: var(--dm-text-primary) !important;
+  box-shadow: 0 0 0 1px var(--dm-text-primary);
+}
+
+.adk-ui-surface button:not(:disabled):hover,
+.ui-modal-footer button:not(:disabled):hover {
+  opacity: 0.88;
+}
+
+.adk-ui-surface button:not(:disabled):active,
+.ui-modal-footer button:not(:disabled):active {
+  transform: scale(0.99);
+}
+
+.adk-ui-surface tbody tr {
+  transition: background-color 0.14s ease;
+}
+
+.adk-ui-surface tbody tr:hover {
+  /* !important: table rows get an inline background from studio.js. */
+  background-color: color-mix(in srgb, var(--dm-surface-gray) 65%, transparent) !important;
+}

@@ -113,7 +113,7 @@ export const renderInnerComponent = (comp, surfaceRoot, ctx = {}) => {
       if (v === "code") {
         el.textContent = raw;
       } else if (v === "body" && raw.includes("\n")) {
-        el.className = "message-text";
+        el.className = "adk-ui-md";
         parseMarkdownBlocksInto(el, raw);
         style(el, { padding: "0" });
       } else {

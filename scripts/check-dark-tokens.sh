@@ -13,25 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Verifies that the two hand-mirrored dark-theme token blocks in
-# src/studio.css have not drifted apart:
+# Verifies that the two hand-mirrored dark-theme token blocks in each
+# stylesheet (src/studio.css and src/adk-ui.css) have not drifted apart:
 #
 #   @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { ... } }
 #   :root[data-theme="dark"] { ... }
 #
-# There is no preprocessor (the file is served verbatim by the Rust server),
+# There is no preprocessor (the files are served verbatim by the Rust server),
 # so the values are duplicated on purpose. This script extracts both blocks,
 # strips indentation, and diffs them. Exits non-zero on drift.
 #
-# Usage: scripts/check-dark-tokens.sh [path/to/studio.css]
+# Usage: scripts/check-dark-tokens.sh [path/to/file.css ...]
 
 set -euo pipefail
 
-css="${1:-$(cd "$(dirname "$0")/.." && pwd)/src/studio.css}"
-
-if [[ ! -f "$css" ]]; then
-  echo "check-dark-tokens: $css not found" >&2
-  exit 2
+if [[ $# -gt 0 ]]; then
+  files=("$@")
+else
+  src="$(cd "$(dirname "$0")/.." && pwd)/src"
+  files=("$src/studio.css" "$src/adk-ui.css")
 fi
 
 # Block A: body of `:root:not([data-theme="light"]) {` inside the media query,
@@ -57,18 +57,27 @@ normalise() {
   sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | grep -v '^$'
 }
 
-a="$(extract_media | normalise)"
-b="$(extract_explicit | normalise)"
+status=0
+for css in "${files[@]}"; do
+  if [[ ! -f "$css" ]]; then
+    echo "check-dark-tokens: $css not found" >&2
+    exit 2
+  fi
 
-if [[ -z "$a" || -z "$b" ]]; then
-  echo "check-dark-tokens: could not locate both dark token blocks in $css" >&2
-  exit 2
-fi
+  a="$(extract_media | normalise)"
+  b="$(extract_explicit | normalise)"
 
-if diff_out="$(diff <(printf '%s\n' "$a") <(printf '%s\n' "$b"))"; then
-  echo "check-dark-tokens: OK ($(printf '%s\n' "$a" | wc -l | tr -d ' ') lines match)"
-else
-  echo "check-dark-tokens: dark token blocks have drifted (< media query, > [data-theme=dark]):" >&2
-  printf '%s\n' "$diff_out" >&2
-  exit 1
-fi
+  if [[ -z "$a" || -z "$b" ]]; then
+    echo "check-dark-tokens: could not locate both dark token blocks in $css" >&2
+    exit 2
+  fi
+
+  if diff_out="$(diff <(printf '%s\n' "$a") <(printf '%s\n' "$b"))"; then
+    echo "check-dark-tokens: OK $(basename "$css") ($(printf '%s\n' "$a" | wc -l | tr -d ' ') lines match)"
+  else
+    echo "check-dark-tokens: dark token blocks in $css have drifted (< media query, > [data-theme=dark]):" >&2
+    printf '%s\n' "$diff_out" >&2
+    status=1
+  fi
+done
+exit "$status"

@@ -52,11 +52,32 @@ pub struct LazyToolsetEntry {
     pub summary: String,
     /// Number of tools the toolset contributes once enabled.
     pub tool_count: usize,
+    /// Size of the toolset's declarations in bytes (0 when unknown). Shown
+    /// to the model as an approximate token cost so it can weigh enabling a
+    /// collection the same way it weighs any other context.
+    pub declaration_bytes: usize,
 }
+
+/// Suffix that marks the write tier of a split collection (see
+/// `config::LAZY_WRITE_TIER_SUFFIX`); used only to phrase the description.
+const WRITE_TIER_SUFFIX: &str = "_write";
 
 /// Session-state key marking `name` as enabled.
 pub fn toolset_state_key(name: &str) -> String {
     format!("{ENABLED_TOOLSET_STATE_KEY_PREFIX}{name}")
+}
+
+/// `", ~12k tokens"` for a declaration size, or `""` when unknown.
+fn approx_tokens(bytes: usize) -> String {
+    if bytes == 0 {
+        return String::new();
+    }
+    let tokens = bytes / 4;
+    if tokens >= 1000 {
+        format!(", ~{}k tokens", tokens / 1000)
+    } else {
+        format!(", ~{tokens} tokens")
+    }
 }
 
 /// Whether `name` is enabled in `state` (per-toolset key or legacy array).
@@ -138,13 +159,22 @@ impl EnableToolsetsTool {
             "Loads additional tool collections on demand. Their tools are NOT available until this tool has been \
              called with the collection name; afterwards they can be called directly for the rest of the session. \
              Call this first whenever the user's request needs one of these collections, passing only the \
-             collections required. Available collections:",
+             collections required.",
         );
+        if entries.iter().any(|e| e.name.ends_with(WRITE_TIER_SUFFIX)) {
+            description.push_str(
+                " Collections ending in `_write` hold the create/update/patch/delete tools of the collection with \
+                 the same base name and are much larger; enable them only when the user asks to create or change \
+                 something, never for reading or reporting.",
+            );
+        }
+        description.push_str(" Available collections:");
         for entry in &entries {
             description.push_str(&format!(
-                "\n- `{}` ({} tools): {}",
+                "\n- `{}` ({} tools{}): {}",
                 entry.name,
                 entry.tool_count,
+                approx_tokens(entry.declaration_bytes),
                 entry.summary.trim()
             ));
         }
@@ -444,13 +474,57 @@ mod tests {
                 name: "cm360".into(),
                 summary: "Campaign Manager 360".into(),
                 tool_count: 218,
+                declaration_bytes: 90_000,
             },
             LazyToolsetEntry {
                 name: "dv360".into(),
                 summary: "Display & Video 360".into(),
                 tool_count: 113,
+                declaration_bytes: 0,
             },
         ])
+    }
+
+    #[test]
+    fn description_mentions_write_tiers_only_when_present() {
+        let plain = tool();
+        assert!(
+            plain
+                .description()
+                .contains("`cm360` (218 tools, ~22k tokens)")
+        );
+        assert!(plain.description().contains("`dv360` (113 tools):"));
+        assert!(!plain.description().contains("_write"));
+
+        let tiered = EnableToolsetsTool::new(vec![
+            LazyToolsetEntry {
+                name: "cm360".into(),
+                summary: "reads".into(),
+                tool_count: 110,
+                declaration_bytes: 2_000,
+            },
+            LazyToolsetEntry {
+                name: "cm360_write".into(),
+                summary: "writes".into(),
+                tool_count: 108,
+                declaration_bytes: 600_000,
+            },
+        ]);
+        assert!(
+            tiered
+                .description()
+                .contains("Collections ending in `_write`")
+        );
+        assert!(
+            tiered
+                .description()
+                .contains("`cm360` (110 tools, ~500 tokens)")
+        );
+        assert!(
+            tiered
+                .description()
+                .contains("`cm360_write` (108 tools, ~150k tokens)")
+        );
     }
 
     #[tokio::test]
@@ -475,7 +549,10 @@ mod tests {
     #[tokio::test]
     async fn enable_tool_records_state_delta_and_reports_unknown_names() {
         let tool = tool();
-        assert!(tool.description().contains("`cm360` (218 tools)"));
+        assert!(
+            tool.description()
+                .contains("`cm360` (218 tools, ~22k tokens)")
+        );
         let schema = tool.parameters_schema().unwrap();
         assert_eq!(
             schema["properties"]["toolset_names"]["items"]["enum"],

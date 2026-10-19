@@ -86,6 +86,47 @@ pub struct ApiParameter {
     pub reserved_expansion: bool,
 }
 
+/// Default per-tool declaration budget (bytes of serialised parameter schema
+/// plus description). Tools above it are re-resolved with a shallower
+/// request schema until they fit; see [`SpecOptions::max_tool_bytes`].
+///
+/// 12 KB keeps every CM360 `ads` / `reports` method (~11.5 KB) at full
+/// depth and only collapses the outliers: CM360 creatives / placements
+/// (15-18 KB), DV360 creatives / targeting options (13-21 KB) and Merchant
+/// Center product inputs (32 KB).
+pub const DEFAULT_MAX_TOOL_BYTES: usize = 12 * 1024;
+
+/// How much of a nested request-body property's description is kept.
+/// Top-level parameters (path, query, and the request body's own top-level
+/// properties) always keep their full description.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NestedDescriptions {
+    /// The full Discovery text.
+    Full,
+    /// Only the first sentence. Google API descriptions lead with what the
+    /// field is and follow with paragraphs of caveats and examples; the
+    /// first sentence carries most of the value at a fraction of the tokens.
+    #[default]
+    FirstSentence,
+    /// No description at all.
+    None,
+}
+
+impl NestedDescriptions {
+    /// Parses an environment value: `full`/`true`, `first_sentence`/`brief`,
+    /// `none`/`false`. Unknown values return `None`.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_lowercase().as_str() {
+            "full" | "1" | "true" | "yes" | "on" => Some(Self::Full),
+            "first_sentence" | "first-sentence" | "first" | "brief" | "short" => {
+                Some(Self::FirstSentence)
+            }
+            "none" | "0" | "false" | "no" | "off" => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
 /// Options controlling spec generation.
 #[derive(Debug, Clone, Copy)]
 pub struct SpecOptions {
@@ -96,9 +137,19 @@ pub struct SpecOptions {
     /// Google APIs document every enum value verbosely, which multiplies the
     /// declaration size the model must read on each request.
     pub include_enum_descriptions: bool,
-    /// Keep descriptions on nested request-body properties (top-level
-    /// parameters always keep theirs).
-    pub include_nested_descriptions: bool,
+    /// How much of each nested request-body property's description to keep.
+    pub nested_descriptions: NestedDescriptions,
+    /// Drop request-body properties the API documents as output-only /
+    /// read-only (`"Output only. ..."`, `"This is a read-only field."`).
+    /// The server ignores them on writes, so they only cost tokens and
+    /// invite the model to invent values for them.
+    pub strip_output_only: bool,
+    /// Per-tool declaration budget in bytes (`0` disables). A tool whose
+    /// declaration exceeds it is rebuilt with `max_schema_depth` lowered one
+    /// level at a time (down to 1) until it fits. Only the handful of giant
+    /// write methods (CM360 creatives/placements, DV360 targeting options)
+    /// are affected; typical tools are well under 2 KB.
+    pub max_tool_bytes: usize,
 }
 
 impl Default for SpecOptions {
@@ -106,14 +157,18 @@ impl Default for SpecOptions {
         Self {
             max_schema_depth: DEFAULT_MAX_SCHEMA_DEPTH,
             include_enum_descriptions: false,
-            include_nested_descriptions: true,
+            nested_descriptions: NestedDescriptions::default(),
+            strip_output_only: true,
+            max_tool_bytes: DEFAULT_MAX_TOOL_BYTES,
         }
     }
 }
 
 impl SpecOptions {
-    /// Reads `GOOGLE_API_SCHEMA_MAX_DEPTH`, `GOOGLE_API_SCHEMA_ENUM_DESCRIPTIONS`
-    /// and `GOOGLE_API_SCHEMA_NESTED_DESCRIPTIONS` from the environment.
+    /// Reads `GOOGLE_API_SCHEMA_MAX_DEPTH`, `GOOGLE_API_SCHEMA_ENUM_DESCRIPTIONS`,
+    /// `GOOGLE_API_SCHEMA_NESTED_DESCRIPTIONS` (`full` / `first_sentence` /
+    /// `none`), `GOOGLE_API_SCHEMA_KEEP_OUTPUT_ONLY` and
+    /// `GOOGLE_API_SCHEMA_MAX_TOOL_BYTES` from the environment.
     pub fn from_env() -> Self {
         let defaults = Self::default();
         let flag = |name: &str, default: bool| {
@@ -137,12 +192,77 @@ impl SpecOptions {
                 "GOOGLE_API_SCHEMA_ENUM_DESCRIPTIONS",
                 defaults.include_enum_descriptions,
             ),
-            include_nested_descriptions: flag(
-                "GOOGLE_API_SCHEMA_NESTED_DESCRIPTIONS",
-                defaults.include_nested_descriptions,
-            ),
+            nested_descriptions: std::env::var("GOOGLE_API_SCHEMA_NESTED_DESCRIPTIONS")
+                .ok()
+                .and_then(|v| NestedDescriptions::parse(&v))
+                .unwrap_or(defaults.nested_descriptions),
+            strip_output_only: !flag("GOOGLE_API_SCHEMA_KEEP_OUTPUT_ONLY", false),
+            max_tool_bytes: std::env::var("GOOGLE_API_SCHEMA_MAX_TOOL_BYTES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(defaults.max_tool_bytes),
         }
     }
+}
+
+/// Whether a property description marks the field as output-only, i.e. set
+/// by the server and ignored on writes.
+///
+/// Recognises the AIP-style `Output only.` / `@OutputOnly` prefix (DV360,
+/// Merchant API, Google Ads) and the Campaign Manager 360 idiom
+/// `This is a read-only field.` / `This is a read-only, auto-generated
+/// field.` Conditional statements (`Output only when ...`, `read-only field
+/// if ...`, `read-only after insertion`) do not count: the model may still
+/// have to set those.
+pub fn is_output_only(description: &str) -> bool {
+    let lower = description.trim().to_ascii_lowercase();
+    if lower.starts_with("@outputonly") {
+        return true;
+    }
+    let prefixed = |marker: &str| {
+        lower
+            .strip_prefix(marker)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', ':', ';', ',']))
+    };
+    if prefixed("output only") || prefixed("read-only") || prefixed("read only") {
+        return true;
+    }
+    lower.split('.').map(str::trim).any(|sentence| {
+        (sentence.starts_with("this is a read-only")
+            || sentence.starts_with("it is a read-only")
+            || sentence.starts_with("it is a auto-generated, read-only")
+            || sentence.starts_with("it is an auto-generated, read-only"))
+            && ![
+                "if", "for", "relevant", "unless", "when", "after", "only to",
+            ]
+            .iter()
+            .any(|c| sentence.contains(&format!(" {c} ")))
+    })
+}
+
+/// The first sentence of `text` (through its terminating period), or the
+/// whole text when there is no sentence boundary. Common abbreviations
+/// (`e.g.`, `i.e.`, `etc.`, `vs.`) and decimals do not end a sentence.
+pub fn first_sentence(text: &str) -> &str {
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    let mut search_from = 0;
+    while let Some(rel) = text[search_from..].find(['.', '!', '?']) {
+        let idx = search_from + rel;
+        let next = bytes.get(idx + 1).copied();
+        let ends_here = next.is_none_or(|b| b.is_ascii_whitespace());
+        if ends_here {
+            let before = &text[..idx];
+            let abbreviation = ["e.g", "i.e", "etc", "vs", "approx", "incl", "resp"]
+                .iter()
+                .any(|a| before.to_ascii_lowercase().ends_with(a));
+            if !abbreviation {
+                return &text[..=idx];
+            }
+        }
+        search_from = idx + 1;
+    }
+    text
 }
 
 /// A fully prepared HTTP request.
@@ -186,6 +306,10 @@ pub struct MethodSpec {
 }
 
 /// Builds method specs for every method of a Discovery document.
+///
+/// Tools whose declaration exceeds [`SpecOptions::max_tool_bytes`] are
+/// rebuilt with a shallower request schema (one depth level at a time, down
+/// to 1) until they fit.
 pub fn build_method_specs(doc: &DiscoveryDocument, options: &SpecOptions) -> Vec<MethodSpec> {
     let resolver = SchemaResolver {
         schemas: &doc.schemas,
@@ -194,7 +318,35 @@ pub fn build_method_specs(doc: &DiscoveryDocument, options: &SpecOptions) -> Vec
     doc.all_methods()
         .into_iter()
         .filter(|m| !m.id.is_empty())
-        .map(|m| build_method_spec(doc, m, &resolver))
+        .map(|m| {
+            let mut spec = build_method_spec(doc, m, &resolver);
+            if options.max_tool_bytes == 0 {
+                return spec;
+            }
+            let original = spec.declaration_bytes();
+            let mut depth = options.max_schema_depth;
+            while depth > 1 && spec.declaration_bytes() > options.max_tool_bytes {
+                depth -= 1;
+                let shallower = SchemaResolver {
+                    schemas: &doc.schemas,
+                    options: SpecOptions {
+                        max_schema_depth: depth,
+                        ..*options
+                    },
+                };
+                spec = build_method_spec(doc, m, &shallower);
+            }
+            if depth != options.max_schema_depth {
+                tracing::debug!(
+                    "{}: declaration of {original} bytes exceeds the {} byte budget; \
+                     resolved the request schema at depth {depth} ({} bytes)",
+                    m.id,
+                    options.max_tool_bytes,
+                    spec.declaration_bytes()
+                );
+            }
+            spec
+        })
         .collect()
 }
 
@@ -414,6 +566,12 @@ fn keep_format(json_type: &str, format: &str) -> bool {
     ALLOWED_FORMATS.contains(&(json_type, format))
 }
 
+/// Leaf method names (lower-cased prefixes) of `POST` methods that read
+/// rather than write; see [`MethodSpec::is_mutating`].
+const READ_LIKE_POST_PREFIXES: &[&str] = &[
+    "get", "list", "search", "query", "run", "generate", "lookup", "download", "audit", "batchget",
+];
+
 /// Builds the JSON schema for a query/path parameter.
 fn parameter_schema(param: &DiscoveryParameter, options: &SpecOptions) -> Value {
     let json_type = param.type_.as_deref().unwrap_or("string");
@@ -514,6 +672,20 @@ impl SchemaResolver<'_> {
         json!({ "type": "object", "description": text })
     }
 
+    /// Applies [`SpecOptions::nested_descriptions`] to a description found
+    /// at `depth`. Depth 1 is the request schema and depth 2 its top-level
+    /// properties, which become tool parameters and always keep their text.
+    fn nested_description<'d>(&self, description: &'d str, depth: usize) -> &'d str {
+        if depth <= 2 {
+            return description;
+        }
+        match self.options.nested_descriptions {
+            NestedDescriptions::Full => description,
+            NestedDescriptions::FirstSentence => first_sentence(description),
+            NestedDescriptions::None => "",
+        }
+    }
+
     fn convert(&self, schema: &Value, depth: usize, stack: &mut Vec<String>) -> Value {
         let Some(obj) = schema.as_object() else {
             return json!({ "type": "string" });
@@ -526,6 +698,9 @@ impl SchemaResolver<'_> {
                 .trim_start_matches('/')
                 .to_string();
             let name = name.rsplit('/').next().unwrap_or(&name).to_string();
+            // The description belongs to the referencing property, which
+            // sits at `depth` (the referenced object is one level deeper).
+            let description = self.nested_description(description, depth);
             if stack.contains(&name) || depth >= self.options.max_schema_depth {
                 return Self::summary(&name, description);
             }
@@ -550,12 +725,8 @@ impl SchemaResolver<'_> {
         let json_type = obj.get("type").and_then(Value::as_str).unwrap_or("object");
         // The request schema itself sits at depth 1 and its top-level
         // properties at depth 2; anything deeper is "nested" and its
-        // descriptions are optional.
-        let description = if depth > 2 && !self.options.include_nested_descriptions {
-            ""
-        } else {
-            description
-        };
+        // description is subject to `nested_descriptions`.
+        let description = self.nested_description(description, depth);
         let mut out = Map::new();
         match json_type {
             "object" => {
@@ -567,6 +738,18 @@ impl SchemaResolver<'_> {
                     );
                 }
                 if let Some(props) = obj.get("properties").and_then(Value::as_object) {
+                    // Output-only properties are dropped from request
+                    // bodies at every depth: the server ignores them.
+                    let props: Vec<(&String, &Value)> = props
+                        .iter()
+                        .filter(|(_, p)| {
+                            !self.options.strip_output_only
+                                || !p
+                                    .get("description")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(is_output_only)
+                        })
+                        .collect();
                     if depth >= self.options.max_schema_depth {
                         let mut text = description.trim().to_string();
                         if !text.is_empty() {
@@ -575,7 +758,11 @@ impl SchemaResolver<'_> {
                         let _ = write!(
                             text,
                             "Object with fields: {}.",
-                            props.keys().cloned().collect::<Vec<_>>().join(", ")
+                            props
+                                .iter()
+                                .map(|(k, _)| k.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         );
                         out.insert("description".to_string(), Value::String(text));
                     } else {
@@ -664,6 +851,39 @@ impl SchemaResolver<'_> {
 }
 
 impl MethodSpec {
+    /// Approximate size of this tool's declaration as sent to the model:
+    /// the serialised parameter schema plus the description.
+    pub fn declaration_bytes(&self) -> usize {
+        serde_json::to_string(&self.parameters_schema())
+            .map(|s| s.len())
+            .unwrap_or(0)
+            + self.description.len()
+    }
+
+    /// Whether the method changes state. `GET` never does; `DELETE`, `PUT`
+    /// and `PATCH` always do; `POST` is judged by the method's leaf name so
+    /// that queries, searches, report runs and tag/forecast generation
+    /// (`dimensionValues.query`, `targetingOptions.search`, `reports.run`,
+    /// `placements.generatetags`, ...) count as reads while `insert`,
+    /// `create`, `bulkEdit`, `publish`, `upload`, ... count as writes.
+    pub fn is_mutating(&self) -> bool {
+        match self.http_method.as_str() {
+            "GET" | "HEAD" | "OPTIONS" => false,
+            "POST" => {
+                let leaf = self
+                    .method_id
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                !READ_LIKE_POST_PREFIXES
+                    .iter()
+                    .any(|prefix| leaf.starts_with(prefix))
+            }
+            _ => true,
+        }
+    }
+
     /// JSON schema describing the tool's arguments.
     pub fn parameters_schema(&self) -> Value {
         let mut properties = Map::new();
@@ -1065,7 +1285,7 @@ mod tests {
     #[test]
     fn nested_descriptions_can_be_dropped() {
         let options = SpecOptions {
-            include_nested_descriptions: false,
+            nested_descriptions: NestedDescriptions::None,
             ..SpecOptions::default()
         };
         let specs = build_method_specs(&doc(), &options);
@@ -1076,6 +1296,295 @@ mod tests {
         );
         let settings = &specs[0].parameter("settings").unwrap().schema;
         assert!(settings["properties"]["mode"].get("description").is_none());
+    }
+
+    /// A document with verbose nested descriptions, output-only fields and
+    /// a write method, for the pruning tests.
+    fn verbose_doc() -> DiscoveryDocument {
+        DiscoveryDocument::parse(
+            r#"{
+          "name": "dfareporting", "version": "v5",
+          "rootUrl": "https://dfareporting.googleapis.com/", "servicePath": "dfareporting/v5/",
+          "schemas": {
+            "Campaign": {"id": "Campaign", "type": "object", "properties": {
+              "id": {"type": "string", "description": "ID of this campaign. This is a read-only auto-generated field."},
+              "accountId": {"type": "string", "description": "Account ID of this campaign. This is a read-only field that can be left blank."},
+              "name": {"type": "string", "description": "Name of this campaign. This is a required field and must be less than 256 characters long and unique among campaigns of the same advertiser."},
+              "kind": {"type": "string", "description": "Output only. Identifies what kind of resource this is."},
+              "conditional": {"type": "string", "description": "Output only when the flag is set."},
+              "afterInsert": {"type": "string", "description": "Advertiser ID. This is a required field that is read-only after insertion."},
+              "settings": {"$ref": "Settings", "description": "Settings of this campaign. See the guide for details, e.g. about defaults."}
+            }},
+            "Settings": {"id": "Settings", "type": "object", "properties": {
+              "lastModified": {"type": "string", "description": "Output only. Last modification time."},
+              "mode": {"type": "string", "description": "The mode. Possible values are documented at length here. More text follows."},
+              "deeper": {"$ref": "Deep", "description": "Deeper settings, i.e. the fine print. Rarely needed."}
+            }},
+            "Deep": {"id": "Deep", "type": "object", "properties": {
+              "a": {"type": "string", "description": "A field. With a second sentence."},
+              "b": {"type": "string"}
+            }}
+          },
+          "resources": {"campaigns": {"methods": {
+            "insert": {"id": "dfareporting.campaigns.insert", "path": "userprofiles/{profileId}/campaigns", "httpMethod": "POST",
+              "parameters": {"profileId": {"type": "string", "location": "path", "required": true}},
+              "request": {"$ref": "Campaign"}},
+            "list": {"id": "dfareporting.campaigns.list", "path": "userprofiles/{profileId}/campaigns", "httpMethod": "GET",
+              "parameters": {"profileId": {"type": "string", "location": "path", "required": true}}},
+            "run": {"id": "dfareporting.reports.run", "path": "userprofiles/{profileId}/reports/{reportId}/run", "httpMethod": "POST",
+              "parameters": {"profileId": {"type": "string", "location": "path", "required": true}, "reportId": {"type": "string", "location": "path", "required": true}}},
+            "patch": {"id": "dfareporting.campaigns.patch", "path": "userprofiles/{profileId}/campaigns", "httpMethod": "PATCH",
+              "parameters": {"profileId": {"type": "string", "location": "path", "required": true}},
+              "request": {"$ref": "Campaign"}}
+          }}}
+        }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn output_only_detection_follows_the_api_idioms() {
+        assert!(is_output_only("Output only. The unique ID."));
+        assert!(is_output_only("Output only"));
+        assert!(is_output_only("@OutputOnly The id."));
+        assert!(is_output_only("Read-only. Generated by the server."));
+        assert!(is_output_only(
+            "Account ID of this ad. This is a read-only field that can be left blank."
+        ));
+        assert!(is_output_only(
+            "ID of this ad. This is a read-only, auto-generated field."
+        ));
+        assert!(is_output_only("It is a read-only field."));
+        // Conditional or lifecycle statements are not output-only.
+        assert!(!is_output_only("Output only when commitment is set."));
+        assert!(!is_output_only(
+            "Advertiser ID. This is a required field that is read-only after insertion."
+        ));
+        assert!(!is_output_only(
+            "This is a read-only field if the asset displayType is OVERLAY."
+        ));
+        assert!(!is_output_only(
+            "This is a read-only field for VPAID_NON_LINEAR_VIDEO assets."
+        ));
+        assert!(!is_output_only(
+            "Read-only convenience field representing the actual URL."
+        ));
+        assert!(!is_output_only(
+            "Name of this campaign. This is a required field."
+        ));
+    }
+
+    #[test]
+    fn first_sentence_handles_abbreviations_and_missing_periods() {
+        assert_eq!(first_sentence("The mode. More text."), "The mode.");
+        assert_eq!(
+            first_sentence("See the guide, e.g. about defaults. More."),
+            "See the guide, e.g. about defaults."
+        );
+        assert_eq!(
+            first_sentence("Ratio is 1.5 or more. Next."),
+            "Ratio is 1.5 or more."
+        );
+        assert_eq!(first_sentence("No period here"), "No period here");
+        assert_eq!(first_sentence("  Trimmed.  "), "Trimmed.");
+        assert_eq!(first_sentence("Really? Yes."), "Really?");
+    }
+
+    #[test]
+    fn output_only_properties_are_stripped_from_request_bodies() {
+        let specs = build_method_specs(&verbose_doc(), &SpecOptions::default());
+        let insert = specs
+            .iter()
+            .find(|s| s.tool_name.ends_with("_insert"))
+            .unwrap();
+        let names: Vec<&str> = insert.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "profile_id",
+                "name",
+                "conditional",
+                "after_insert",
+                "settings"
+            ],
+            "id / accountId / kind are output-only"
+        );
+        let settings = &insert.parameter("settings").unwrap().schema;
+        let nested: Vec<&String> = settings["properties"].as_object().unwrap().keys().collect();
+        assert_eq!(
+            nested,
+            vec!["mode", "deeper"],
+            "nested output-only dropped too"
+        );
+
+        // Opt out keeps everything.
+        let specs = build_method_specs(
+            &verbose_doc(),
+            &SpecOptions {
+                strip_output_only: false,
+                ..SpecOptions::default()
+            },
+        );
+        let insert = specs
+            .iter()
+            .find(|s| s.tool_name.ends_with("_insert"))
+            .unwrap();
+        assert!(insert.parameter("id").is_some());
+        assert!(insert.parameter("kind").is_some());
+    }
+
+    #[test]
+    fn nested_descriptions_keep_only_the_first_sentence_by_default() {
+        // Depth 6 so that `settings.deeper` is fully resolved rather than
+        // summarised (the request body is depth 1, `settings` resolves at
+        // depth 3, `deeper` at depth 5).
+        let deep = SpecOptions {
+            max_schema_depth: 6,
+            ..SpecOptions::default()
+        };
+        let specs = build_method_specs(&verbose_doc(), &deep);
+        let insert = specs
+            .iter()
+            .find(|s| s.tool_name.ends_with("_insert"))
+            .unwrap();
+        // Depth 2 (tool parameters): full text.
+        assert_eq!(
+            insert.parameter("name").unwrap().schema["description"],
+            "Name of this campaign. This is a required field and must be less than 256 characters long and unique among campaigns of the same advertiser."
+        );
+        let settings = &insert.parameter("settings").unwrap().schema;
+        assert_eq!(
+            settings["description"],
+            "Settings of this campaign. See the guide for details, e.g. about defaults."
+        );
+        // Depth 3 and below: first sentence only.
+        assert_eq!(settings["properties"]["mode"]["description"], "The mode.");
+        assert_eq!(
+            settings["properties"]["deeper"]["description"],
+            "Deeper settings, i.e. the fine print."
+        );
+        assert_eq!(
+            settings["properties"]["deeper"]["properties"]["a"]["description"],
+            "A field."
+        );
+        // Summaries of depth-limited refs are trimmed too.
+        let specs = build_method_specs(&verbose_doc(), &SpecOptions::default());
+        let insert = specs
+            .iter()
+            .find(|s| s.tool_name.ends_with("_insert"))
+            .unwrap();
+        assert_eq!(
+            insert.parameter("settings").unwrap().schema["properties"]["deeper"]["description"],
+            "Deeper settings, i.e. the fine print. Deep object (see the API reference for its fields)."
+        );
+
+        let specs = build_method_specs(
+            &verbose_doc(),
+            &SpecOptions {
+                nested_descriptions: NestedDescriptions::Full,
+                ..deep
+            },
+        );
+        let insert = specs
+            .iter()
+            .find(|s| s.tool_name.ends_with("_insert"))
+            .unwrap();
+        assert_eq!(
+            insert.parameter("settings").unwrap().schema["properties"]["mode"]["description"],
+            "The mode. Possible values are documented at length here. More text follows."
+        );
+    }
+
+    #[test]
+    fn oversized_declarations_fall_back_to_a_shallower_schema() {
+        let deep = SpecOptions {
+            max_schema_depth: 6,
+            ..SpecOptions::default()
+        };
+        let full = build_method_specs(&verbose_doc(), &deep);
+        let insert = full
+            .iter()
+            .find(|s| s.tool_name.ends_with("_insert"))
+            .unwrap();
+        let full_bytes = insert.declaration_bytes();
+        assert!(
+            insert.parameter("settings").unwrap().schema["properties"]["deeper"]["properties"]
+                .is_object()
+        );
+
+        // A budget just under the full size drops one level: `deeper` is
+        // summarised but `settings` keeps its properties.
+        let budgeted = build_method_specs(
+            &verbose_doc(),
+            &SpecOptions {
+                max_tool_bytes: full_bytes - 1,
+                ..deep
+            },
+        );
+        let insert = budgeted
+            .iter()
+            .find(|s| s.tool_name.ends_with("_insert"))
+            .unwrap();
+        assert!(insert.declaration_bytes() < full_bytes);
+        let settings = &insert.parameter("settings").unwrap().schema;
+        assert!(settings["properties"]["mode"].is_object());
+        assert!(settings["properties"]["deeper"].get("properties").is_none());
+
+        // An impossible budget bottoms out at depth 1 (single `body` param).
+        let tiny = build_method_specs(
+            &verbose_doc(),
+            &SpecOptions {
+                max_tool_bytes: 1,
+                ..deep
+            },
+        );
+        let insert = tiny
+            .iter()
+            .find(|s| s.tool_name.ends_with("_insert"))
+            .unwrap();
+        assert_eq!(insert.body_kind, BodyKind::Whole);
+        assert!(insert.parameter("body").is_some());
+        // Small tools are untouched by the budget.
+        let list = tiny
+            .iter()
+            .find(|s| s.tool_name.ends_with("_list"))
+            .unwrap();
+        assert_eq!(
+            list,
+            full.iter()
+                .find(|s| s.tool_name.ends_with("_list"))
+                .unwrap()
+        );
+
+        // `0` disables the budget.
+        let unlimited = build_method_specs(
+            &verbose_doc(),
+            &SpecOptions {
+                max_tool_bytes: 0,
+                ..deep
+            },
+        );
+        assert_eq!(unlimited, full);
+    }
+
+    #[test]
+    fn mutating_methods_are_classified_by_verb_and_leaf_name() {
+        let specs = build_method_specs(&verbose_doc(), &SpecOptions::default());
+        let by_name = |suffix: &str| {
+            specs
+                .iter()
+                .find(|s| s.tool_name.ends_with(suffix))
+                .unwrap()
+        };
+        assert!(by_name("_insert").is_mutating());
+        assert!(by_name("_patch").is_mutating());
+        assert!(!by_name("_list").is_mutating());
+        assert!(
+            !by_name("reports_run").is_mutating(),
+            "POST reports.run is a read"
+        );
+        // The googleAds.search POST of the main fixture is a read too.
+        assert!(!build_method_specs(&doc(), &SpecOptions::default())[0].is_mutating());
     }
 
     #[test]

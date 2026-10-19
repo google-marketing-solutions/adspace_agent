@@ -169,12 +169,15 @@ All settings are environment variables (read from `.env` in development).
 |---|---|---|
 | `ENABLED_TOOLSETS` | all | Comma-separated subset of `bid_manager, bigquery, campaign_manager_360, display_video_360, drive, merchant_center_inventories, merchant_center_products, merchant_center_reports, search_ads_360, storage, youtube, google_ads, google_genai`. |
 | `LAZY_TOOLSETS` | `campaign_manager_360,display_video_360,merchant_center_products` | `none`, `all` or a list of toolsets whose tools are only sent to the model after it calls `enable_toolsets` (keeps the prompt small). |
+| `LAZY_SPLIT_WRITES` | `true` | Split each lazy toolset into a read collection (`campaign_manager_360`: list/get/search/query/run) and a `_write` collection (insert/update/patch/delete) that the model enables separately. Write methods carry ~85% of the declaration bytes, so a reporting session enables CM360 for ~20k tokens instead of ~170k. |
 | `GOOGLE_ADS_TOOL_FILTER` | a curated search/insights subset | Restrict the Google Ads toolset to the listed tool names. The DV360, Drive, Storage and YouTube toolsets ship with built-in filters (`src/config.rs`). |
 | `GOOGLE_ADS_DEVELOPER_TOKEN`, `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | — | Google Ads API headers. |
 | `BIGQUERY_READ_ONLY` | `true` | `false` allows DML/DDL and requests the `bigquery` scope instead of `bigquery.readonly`. |
 | `GEMINI_BUILTIN_TOOLS` | `google_search,url_context,google_maps` | Gemini server-side tools; `all` adds code execution, `none` disables. `GOOGLE_MAPS_CONTEXT_LAT/LNG` seed Maps. |
 | `PYTHON_EXECUTOR` | `gemini` | Python backend: `gemini`, `docker`, `vertex` or `monty` (see [Python data analysis](#python-data-analysis)). |
-| `GOOGLE_API_SCHEMA_MAX_DEPTH`, `GOOGLE_API_SCHEMA_ENUM_DESCRIPTIONS`, `GOOGLE_API_SCHEMA_NESTED_DESCRIPTIONS` | `4`, `false`, `true` | How much of each request schema is exposed to the model. |
+| `GOOGLE_API_SCHEMA_MAX_DEPTH`, `GOOGLE_API_SCHEMA_ENUM_DESCRIPTIONS`, `GOOGLE_API_SCHEMA_NESTED_DESCRIPTIONS` | `4`, `false`, `first_sentence` | How much of each request schema is exposed to the model. Nested descriptions: `full`, `first_sentence` or `none` (top-level parameters always keep their full text). |
+| `GOOGLE_API_SCHEMA_KEEP_OUTPUT_ONLY` | `false` | By default request-body fields documented as `Output only.` / `This is a read-only field.` are dropped from tool declarations: the API ignores them on writes and they only invite the model to invent values. |
+| `GOOGLE_API_SCHEMA_MAX_TOOL_BYTES` | `12288` | Per-tool declaration budget. A tool above it is re-resolved with a shallower request schema until it fits (only the giant CM360 creative/placement and DV360 targeting write methods are affected). `0` disables. Check with `adspace-agent list-tools all --sizes`. |
 | `DISCOVERY_CACHE_DIR` | `~/.cache/adspace-agent/discovery` | On-disk cache of Discovery documents (`off` disables). Documents whose `rootUrl` is not a `googleapis.com` origin are rejected. |
 
 ### Services

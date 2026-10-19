@@ -903,7 +903,7 @@ pub fn google_api_toolset_configs(settings: &Settings) -> Vec<GoogleApiToolsetCo
 async fn load_google_api_toolsets(
     settings: &Settings,
     credentials: &Arc<SessionCredentialManager>,
-) -> Vec<Arc<GoogleApiToolset>> {
+) -> Vec<GoogleApiToolset> {
     let fetcher = DiscoveryFetcher::new();
     let futures = google_api_toolset_configs(settings)
         .into_iter()
@@ -913,7 +913,7 @@ async fn load_google_api_toolsets(
             async move {
                 let name = config.toolset_name.clone();
                 match GoogleApiToolset::load(config, &fetcher, credentials).await {
-                    Ok(toolset) => Some(Arc::new(toolset)),
+                    Ok(toolset) => Some(toolset),
                     Err(e) => {
                         tracing::warn!("Skipping toolset '{name}': {e:#}");
                         None
@@ -1161,24 +1161,53 @@ pub async fn create_agent(
     }
 
     let mut deferred: Vec<LazyToolsetEntry> = Vec::new();
+    let mut lazy: Vec<GoogleApiToolset> = Vec::new();
+    let mut defer = |toolset: GoogleApiToolset, summary: String| {
+        deferred.push(LazyToolsetEntry {
+            name: toolset.name().to_string(),
+            summary,
+            tool_count: toolset.tool_names().len(),
+            declaration_bytes: toolset.declaration_bytes(),
+        });
+        lazy.push(toolset);
+    };
     for toolset in load_google_api_toolsets(settings, &credentials).await {
-        if settings.lazy_toolsets.iter().any(|n| n == toolset.name()) {
-            deferred.push(LazyToolsetEntry {
-                name: toolset.name().to_string(),
-                summary: config::toolset_summary(toolset.name()).to_string(),
-                tool_count: toolset.tool_names().len(),
-            });
-            toolsets.push(Arc::new(LazyToolset::new(toolset)));
-        } else {
-            toolsets.push(toolset);
+        if !settings.lazy_toolsets.iter().any(|n| n == toolset.name()) {
+            toolsets.push(Arc::new(toolset));
+            continue;
         }
+        let name = toolset.name().to_string();
+        // Reads and writes are deferred separately: the write methods carry
+        // the request-body schemas that dominate the declaration size, and a
+        // reporting session never needs them.
+        let (reads, writes) = if settings.lazy_split_writes {
+            toolset.split_writes(config::LAZY_WRITE_TIER_SUFFIX)
+        } else {
+            (toolset, None)
+        };
+        match writes {
+            Some(writes) => {
+                let (read_summary, write_summary) = config::tiered_toolset_summaries(&name);
+                defer(reads, read_summary);
+                defer(writes, write_summary);
+            }
+            None => defer(reads, config::toolset_summary(&name).to_string()),
+        }
+    }
+    for toolset in lazy {
+        toolsets.push(Arc::new(LazyToolset::new(Arc::new(toolset))));
     }
     if !deferred.is_empty() {
         tracing::info!(
             "Deferred toolsets (loaded on demand via enable_toolsets): {}",
             deferred
                 .iter()
-                .map(|d| format!("{} ({} tools)", d.name, d.tool_count))
+                .map(|d| format!(
+                    "{} ({} tools, ~{}k tokens)",
+                    d.name,
+                    d.tool_count,
+                    d.declaration_bytes / 4 / 1000
+                ))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -1365,6 +1394,7 @@ mod tests {
             ],
             google_ads_tool_filter: Some(vec!["googleads_customers_google_ads_search".into()]),
             lazy_toolsets: vec![],
+            lazy_split_writes: true,
             skills_bucket_name: None,
             local_skills_dir: "./skills".into(),
             compaction: config::CompactionSettings::from_env(),

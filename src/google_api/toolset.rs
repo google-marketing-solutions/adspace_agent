@@ -505,6 +505,72 @@ impl GoogleApiToolset {
             .map(|(name, scopes)| (name.as_str(), scopes.as_slice()))
     }
 
+    /// Splits the toolset into a read tier and a write tier.
+    ///
+    /// Returns `(reads, Some(writes))` where `reads` keeps this toolset's
+    /// name and holds every non-mutating tool (see
+    /// [`MethodSpec::is_mutating`]) and `writes` is named
+    /// `<name><suffix>` and holds the rest. Returns `(self, None)` when the
+    /// split would leave either tier empty.
+    ///
+    /// Write methods carry the request-body schemas that make up ~85% of
+    /// the declaration bytes of the large APIs, so deferring them
+    /// separately lets a reporting session enable e.g. Campaign Manager 360
+    /// for ~22k tokens instead of ~170k.
+    pub fn split_writes(self, suffix: &str) -> (Self, Option<Self>) {
+        let (writes, reads): (Vec<Arc<GoogleApiTool>>, Vec<Arc<GoogleApiTool>>) = self
+            .tools
+            .iter()
+            .cloned()
+            .partition(|t| t.spec.is_mutating());
+        if reads.is_empty() || writes.is_empty() {
+            return (self, None);
+        }
+        let write_name = format!("{}{suffix}", self.name);
+        let writes = Self::from_tools(
+            write_name,
+            self.api_name.clone(),
+            self.api_version.clone(),
+            writes,
+        );
+        let reads = Self::from_tools(self.name, self.api_name, self.api_version, reads);
+        (reads, Some(writes))
+    }
+
+    /// Assembles a toolset from already-built tools, recomputing the scope
+    /// bookkeeping.
+    fn from_tools(
+        name: String,
+        api_name: String,
+        api_version: String,
+        tools: Vec<Arc<GoogleApiTool>>,
+    ) -> Self {
+        let mut scopes: Vec<String> = Vec::new();
+        let mut scopes_by_tool: Vec<(String, Vec<String>)> = Vec::new();
+        for tool in &tools {
+            for scope in &tool.scopes {
+                if !scopes.contains(scope) {
+                    scopes.push(scope.clone());
+                }
+            }
+            scopes_by_tool.push((tool.name.clone(), tool.scopes.clone()));
+        }
+        Self {
+            name,
+            api_name,
+            api_version,
+            scopes,
+            scopes_by_tool,
+            tools,
+        }
+    }
+
+    /// Total declaration bytes of the exposed tools (what the model reads
+    /// on every request once the toolset is active).
+    pub fn declaration_bytes(&self) -> usize {
+        self.tools.iter().map(|t| t.spec.declaration_bytes()).sum()
+    }
+
     /// Distinct OAuth scopes requested across the toolset's tools (each tool
     /// only ever asks for its own).
     pub fn scopes(&self) -> &[String] {
@@ -742,6 +808,54 @@ mod tests {
         );
         let schema = tools[1].parameters_schema().unwrap();
         assert_eq!(schema["required"], json!(["file_id"]));
+    }
+
+    #[test]
+    fn split_writes_separates_mutating_tools_and_recomputes_scopes() {
+        let toolset = GoogleApiToolset::from_document(
+            &doc(),
+            GoogleApiToolsetConfig::new("drive", "drive", "v3"),
+            credentials(),
+        );
+        let (reads, writes) = toolset.split_writes("_write");
+        let writes = writes.expect("delete is a write");
+        assert_eq!(reads.name(), "drive");
+        assert_eq!(
+            reads.tool_names(),
+            vec!["drive_files_list", "drive_files_get"]
+        );
+        assert_eq!(
+            reads.scopes(),
+            &["https://www.googleapis.com/auth/drive.readonly".to_string()]
+        );
+        assert_eq!(writes.name(), "drive_write");
+        assert_eq!(writes.api_name(), "drive");
+        assert_eq!(writes.tool_names(), vec!["drive_files_delete"]);
+        assert_eq!(
+            writes.scopes(),
+            &["https://www.googleapis.com/auth/drive".to_string()]
+        );
+        assert_eq!(writes.tool_scopes().count(), 1);
+        assert_eq!(
+            reads.declaration_bytes() + writes.declaration_bytes(),
+            GoogleApiToolset::from_document(
+                &doc(),
+                GoogleApiToolsetConfig::new("drive", "drive", "v3"),
+                credentials(),
+            )
+            .declaration_bytes()
+        );
+
+        // Nothing to split: the toolset comes back whole.
+        let reads_only = GoogleApiToolset::from_document(
+            &doc(),
+            GoogleApiToolsetConfig::new("drive", "drive", "v3")
+                .with_tool_filter(["drive_files_list", "drive_files_get"]),
+            credentials(),
+        );
+        let (whole, none) = reads_only.split_writes("_write");
+        assert!(none.is_none());
+        assert_eq!(whole.tool_names().len(), 2);
     }
 
     #[test]

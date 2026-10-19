@@ -29,7 +29,9 @@ use adk_rust::Toolset as _;
 use adspace_agent::agent::{
     self, build_credential_manager, build_runtime, google_api_toolset_configs,
 };
-use adspace_agent::config::{self, GOOGLE_ADS_API_VERSION, Settings, YOUTUBE_TOOL_FILTER};
+use adspace_agent::config::{
+    self, GOOGLE_ADS_API_VERSION, LAZY_WRITE_TIER_SUFFIX, Settings, YOUTUBE_TOOL_FILTER,
+};
 use adspace_agent::google_api::{DiscoveryFetcher, GoogleApiToolset, GoogleApiToolsetConfig};
 use adspace_agent::server;
 use adspace_agent::tools::bigquery::BigQueryToolset;
@@ -158,6 +160,22 @@ async fn list_tools(target: ListTarget, sizes: bool, scopes: bool) -> anyhow::Re
             );
         }
         names.extend(agent::list_tool_names(&toolset).await?);
+        // What each tier costs once the model enables it (lazy toolsets are
+        // split into reads and writes; see `LAZY_SPLIT_WRITES`).
+        let lazy = settings.lazy_toolsets.iter().any(|n| n == toolset.name());
+        if sizes && lazy && settings.lazy_split_writes {
+            let (reads, writes) = toolset.split_writes(LAZY_WRITE_TIER_SUFFIX);
+            for tier in std::iter::once(&reads).chain(writes.as_ref()) {
+                let bytes = tier.declaration_bytes();
+                eprintln!(
+                    "  {:<30} {:>5} tools  {:>9} bytes  (~{} tokens once enabled)",
+                    tier.name(),
+                    tier.tool_names().len(),
+                    bytes,
+                    bytes / 4
+                );
+            }
+        }
     }
     if sizes {
         eprintln!(

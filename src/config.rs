@@ -261,6 +261,11 @@ pub const DEFAULT_LAZY_TOOLSETS: &[&str] = &[
     "merchant_center_products",
 ];
 
+/// Suffix of the write tier of a deferred toolset (`campaign_manager_360`
+/// holds the read tools, `campaign_manager_360_write` the create / update /
+/// patch / delete tools). See [`crate::google_api::GoogleApiToolset::split_writes`].
+pub const LAZY_WRITE_TIER_SUFFIX: &str = "_write";
+
 /// Short descriptions of the Google toolsets, shown to the model by
 /// `enable_toolsets` for deferred toolsets.
 pub fn toolset_summary(name: &str) -> &'static str {
@@ -288,6 +293,23 @@ pub fn toolset_summary(name: &str) -> &'static str {
         "youtube" => "YouTube Data API: videos, channels, captions, comments, search, live chat.",
         _ => "Google API tools.",
     }
+}
+
+/// Summaries shown to the model for the two tiers of a deferred toolset
+/// that has been split with [`LAZY_WRITE_TIER_SUFFIX`]: `(reads, writes)`.
+pub fn tiered_toolset_summaries(name: &str) -> (String, String) {
+    let base = toolset_summary(name);
+    let reads = format!(
+        "{base} Read operations only (list, get, search, query, run reports); \
+         create/update/delete tools are in `{name}{LAZY_WRITE_TIER_SUFFIX}`."
+    );
+    let writes = format!(
+        "Create, update, patch and delete operations of `{name}` ({}). \
+         Enable only when the user asks to create or change something; \
+         reading never needs it.",
+        base.split(':').next().unwrap_or(base).trim_end_matches('.')
+    );
+    (reads, writes)
 }
 
 /// Resolves which toolsets are deferred from a raw `LAZY_TOOLSETS` value
@@ -557,6 +579,9 @@ pub struct Settings {
     pub google_ads_tool_filter: Option<Vec<String>>,
     /// Toolsets loaded on demand through `enable_toolsets` (`LAZY_TOOLSETS`).
     pub lazy_toolsets: Vec<String>,
+    /// Split each deferred toolset into a read tier and a `_write` tier
+    /// that are enabled separately (`LAZY_SPLIT_WRITES`, default `true`).
+    pub lazy_split_writes: bool,
     /// GCS bucket holding skills and CM360 payloads (`SKILLS_BUCKET_NAME`).
     pub skills_bucket_name: Option<String>,
     /// Local skills directory (`LOCAL_SKILLS_DIR`, defaults to `./skills`).
@@ -590,6 +615,7 @@ impl Settings {
             enabled_toolsets,
             google_ads_tool_filter: get_google_ads_tool_filter(),
             lazy_toolsets,
+            lazy_split_writes: env_bool_or("LAZY_SPLIT_WRITES", true),
             skills_bucket_name: env_opt("SKILLS_BUCKET_NAME"),
             local_skills_dir: env_or("LOCAL_SKILLS_DIR", "./skills"),
             compaction: CompactionSettings::from_env(),

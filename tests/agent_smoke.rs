@@ -90,6 +90,7 @@ fn settings() -> Settings {
         enabled_toolsets: vec!["campaign_manager_360".into()],
         google_ads_tool_filter: None,
         lazy_toolsets: vec![],
+        lazy_split_writes: true,
         skills_bucket_name: None,
         local_skills_dir: "./does-not-exist".into(),
         compaction: CompactionSettings {

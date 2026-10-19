@@ -16,7 +16,10 @@
   "use strict";
 
   // AdSpace Agent — Interactive Canvas Dotted Grid Stage (WebGL2)
-  // Argon color palette with smooth cursor repulsion, size bloom, glow, and tap ripples.
+  // Argon color palette with smooth cursor repulsion, size bloom, glow, tap
+  // ripples, and a slow accent-blue wave that rolls across the grid while the
+  // agent is streaming (`update({ streaming })`), settling back to the resting
+  // grid when the run completes.
 
   const PRESETS = {
     "argon-dark": {
@@ -33,6 +36,9 @@
       dotCore: [248 / 255, 249 / 255, 252 / 255],
       restAlpha: 0.22,
       hoverAlpha: 0.88,
+      // Streaming wave tint (Google blue 300 reads well on dark surfaces).
+      streamColor: [138 / 255, 180 / 255, 248 / 255],
+      streamBgGain: 0.1,
     },
     "argon-light": {
       id: "argon-light",
@@ -48,6 +54,9 @@
       dotCore: [18 / 255, 19 / 255, 23 / 255],
       restAlpha: 0.2,
       hoverAlpha: 0.85,
+      // Streaming wave tint (--accent-primary, #1a73e8).
+      streamColor: [26 / 255, 115 / 255, 232 / 255],
+      streamBgGain: 0.06,
     },
   };
 
@@ -59,6 +68,15 @@
     hoverSwirl: 2.2,
     hoverScale: 1.35,
     loopSeconds: 14,
+    // Streaming wave: the grid undulates with a primary swell of
+    // `streamWavelength` CSS px that travels one wavelength every
+    // `streamWaveSeconds`, displacing dots by up to `streamAmplitude` px;
+    // the effect fades in / out over `streamFadeIn` / `streamFadeOut` s.
+    streamWaveSeconds: 5.5,
+    streamWavelength: 440,
+    streamAmplitude: 6.5,
+    streamFadeIn: 0.9,
+    streamFadeOut: 1.6,
   };
 
   function selectPreset(colorMode, darkId, lightId) {
@@ -199,6 +217,12 @@ uniform vec3 u_bgBottomLeft;
 uniform vec3 u_bgBottomRight;
 uniform vec3 u_glowColor;
 uniform float u_isLight;
+uniform float u_stream;
+uniform float u_streamTime;
+uniform vec3 u_streamColor;
+uniform float u_streamBgGain;
+uniform vec2 u_cssSize;
+uniform float u_streamWavelength;
 
 void main() {
   vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
@@ -214,6 +238,16 @@ void main() {
     float glow = exp(-dot(d, d) / 0.085) * u_hoverAmount;
     float glowGain = u_isLight > 0.5 ? 0.055 : 0.085;
     col = mix(col, u_glowColor, glow * glowGain);
+  }
+
+  // Streaming: a soft swell of the accent hue riding the same primary wave
+  // as the dots, so the surface appears to lift with the grid.
+  if (u_stream > 0.001) {
+    vec2 dir = normalize(vec2(0.8, 0.6));
+    float along = dot(uv * u_cssSize, dir);
+    float swell = 0.5 + 0.5 * sin((along / u_streamWavelength) * 6.2831853 - u_streamTime * 6.2831853);
+    swell = swell * swell;
+    col = mix(col, u_streamColor, u_stream * u_streamBgGain * (0.35 + 0.65 * swell));
   }
 
   // Fine interleaved gradient noise dither to prevent 8-bit banding
@@ -254,6 +288,11 @@ uniform vec3 u_dotHover;
 uniform vec3 u_dotCore;
 uniform float u_restAlpha;
 uniform float u_hoverAlpha;
+uniform float u_stream;
+uniform float u_streamTime;
+uniform vec3 u_streamColor;
+uniform float u_streamWavelength;
+uniform float u_streamAmplitude;
 
 float smooth01(float a, float b, float x) {
   float t = clamp((x - a) / (b - a), 0.0, 1.0);
@@ -272,8 +311,37 @@ void main() {
   float waveAngle = float(gridCol) * 0.22 + float(gridRow) * 0.16 - u_phase * 6.2831853;
   float ambientWave = 0.5 + 0.5 * sin(waveAngle);
 
-  // Subtle pointer parallax
-  vec2 pos = basePos - u_pointer * 4.0;
+  // Streaming wave: the grid itself undulates. Two travelling waves run
+  // diagonally from the top-left to the bottom-right; each dot orbits a small
+  // ellipse as a crest passes (like a water particle), so rows and columns
+  // visibly bunch and stretch instead of just changing colour. The accent hue
+  // follows the crest as a secondary cue. streamCrest is 0 in the trough, 1
+  // on the ridge; the whole effect is scaled by u_stream (0 -> 1 fade).
+  float streamCrest = 0.0;
+  vec2 streamShift = vec2(0.0);
+  if (u_stream > 0.001) {
+    vec2 dir = normalize(vec2(0.8, 0.6));
+    vec2 perp = vec2(-dir.y, dir.x);
+    float along = dot(basePos, dir);
+    float across = dot(basePos, perp);
+    // Primary swell: wavelength u_streamWavelength px, one wavelength per
+    // period. Secondary chop: shorter, faster, slightly skewed.
+    float p1 = (along / u_streamWavelength) * 6.2831853 - u_streamTime * 6.2831853;
+    float p2 = (along / (u_streamWavelength * 0.5) + across / (u_streamWavelength * 1.7)) * 6.2831853
+             - u_streamTime * 6.2831853 * 1.6;
+    float w1 = sin(p1);
+    float w2 = sin(p2);
+    // Trochoidal orbit: lift across the wave on the crest, drift along the
+    // travel direction on the way up (cos), giving a rolling motion.
+    streamShift = (perp * w1 + dir * cos(p1) * 0.55) * u_streamAmplitude
+                + perp * w2 * u_streamAmplitude * 0.2;
+    streamShift *= u_stream;
+    float c1 = 0.5 + 0.5 * w1;
+    streamCrest = (c1 * c1 * 0.8 + (0.5 + 0.5 * w2) * 0.2) * u_stream;
+  }
+
+  // Subtle pointer parallax, plus the streaming displacement.
+  vec2 pos = basePos - u_pointer * 4.0 + streamShift;
 
   float hoverBell = 0.0;
   float hoverCore = 0.0;
@@ -313,19 +381,22 @@ void main() {
   // Color & alpha blending using Argon palette
   float paletteMix = clamp(normUv.x * 0.65 + (1.0 - normUv.y) * 0.35, 0.0, 1.0);
   vec3 restCol = mix(u_dotRestA, u_dotRestB, paletteMix);
+  // Streaming tint: a soft base hue everywhere, deepening on the crest.
+  restCol = mix(restCol, u_streamColor, u_stream * 0.25 + streamCrest * 0.55);
   float activeMix = clamp(hoverBell + tapBoost * 0.7, 0.0, 1.0);
   vec3 dotColor = mix(restCol, u_dotHover, activeMix);
   dotColor = mix(dotColor, u_dotCore, clamp(hoverCore * 0.85 + tapBoost * 0.35, 0.0, 1.0));
 
   float alpha = mix(
-    u_restAlpha * (0.9 + 0.14 * ambientWave),
+    u_restAlpha * (0.9 + 0.14 * ambientWave) + streamCrest * 0.42 + u_stream * 0.06,
     u_hoverAlpha,
     activeMix
   );
 
-  // Dot radius with hover bloom & tap pulse, plus extra quad padding for soft glow & AA
-  float radiusCss = u_dotRadius * (1.0 + hoverBell * u_hoverScale + tapBoost * 0.65);
-  float quadHalfCss = radiusCss + 2.2 + hoverBell * 2.4;
+  // Dot radius with hover bloom, tap pulse and streaming crest swell, plus
+  // extra quad padding for soft glow & AA
+  float radiusCss = u_dotRadius * (1.0 + hoverBell * u_hoverScale + tapBoost * 0.65 + streamCrest * 0.45);
+  float quadHalfCss = radiusCss + 2.2 + hoverBell * 2.4 + streamCrest * 1.6;
 
   // 4-vertex triangle strip quad
   vec2 corner = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1)) * 2.0 - 1.0;
@@ -340,7 +411,7 @@ void main() {
   v_localCoord /= max(radiusCss, 0.1);
   v_color = dotColor;
   v_alpha = clamp(alpha, 0.0, 1.0);
-  v_hoverMix = activeMix;
+  v_hoverMix = clamp(activeMix + streamCrest * 0.6, 0.0, 1.0);
 }
 `;
 
@@ -443,6 +514,14 @@ void main() {
       const hoverPush = Math.max(0, Number(config.hover_push ?? DEFAULTS.hoverPush));
       const hoverSwirl = Math.max(0, Number(config.hover_swirl ?? DEFAULTS.hoverSwirl));
       const hoverScale = Math.max(0, Number(config.hover_scale ?? DEFAULTS.hoverScale));
+      const streamWavelength = Math.max(
+        80,
+        Number(config.stream_wavelength) || DEFAULTS.streamWavelength
+      );
+      const streamAmplitude = Math.max(
+        0,
+        Number(config.stream_amplitude ?? DEFAULTS.streamAmplitude)
+      );
 
       let bgProg = null;
       let dotProg = null;
@@ -465,6 +544,12 @@ void main() {
           "u_bgBottomRight",
           "u_glowColor",
           "u_isLight",
+          "u_stream",
+          "u_streamTime",
+          "u_streamColor",
+          "u_streamBgGain",
+          "u_cssSize",
+          "u_streamWavelength",
         ]);
         dotU = getUniforms(gl, dotProg, [
           "u_cssSize",
@@ -489,6 +574,11 @@ void main() {
           "u_dotCore",
           "u_restAlpha",
           "u_hoverAlpha",
+          "u_stream",
+          "u_streamTime",
+          "u_streamColor",
+          "u_streamWavelength",
+          "u_streamAmplitude",
         ]);
       };
 
@@ -537,6 +627,31 @@ void main() {
       let rafId = 0;
       let running = false;
 
+      // Streaming wave state. `streamTarget` is what the host asked for,
+      // `stream` eases towards it (so the hue fades in and, when streaming
+      // ends, the grid settles back to rest instead of snapping), and
+      // `streamTime` only advances while the wave is visible.
+      let streamTarget = 0;
+      let stream = 0;
+      let streamTime = 0;
+
+      const streamActive = () => streamTarget > 0 || stream > 0.002;
+
+      const stepStream = (dt) => {
+        if (dt <= 0) return;
+        const seconds = streamTarget > stream ? DEFAULTS.streamFadeIn : DEFAULTS.streamFadeOut;
+        // Exponential ease: ~95% of the way after `seconds`.
+        const ease = 1 - Math.exp((-dt * 3) / Math.max(seconds, 0.05));
+        stream += (streamTarget - stream) * ease;
+        if (streamTarget === 0 && stream < 0.002) {
+          stream = 0;
+          streamTime = 0;
+        }
+        if (stream > 0) {
+          streamTime = (streamTime + dt / DEFAULTS.streamWaveSeconds) % 1;
+        }
+      };
+
       const renderFrame = (dt, now) => {
         if (contextLost || gl.isContextLost()) return;
         if (canvas.width <= 0 || canvas.height <= 0) return;
@@ -563,6 +678,12 @@ void main() {
         gl.uniform3fv(bgU.u_bgBottomRight, preset.bgBottomRight);
         gl.uniform3fv(bgU.u_glowColor, preset.dotRestB);
         gl.uniform1f(bgU.u_isLight, isLight);
+        gl.uniform1f(bgU.u_stream, stream);
+        gl.uniform1f(bgU.u_streamTime, streamTime);
+        gl.uniform3fv(bgU.u_streamColor, preset.streamColor);
+        gl.uniform1f(bgU.u_streamBgGain, preset.streamBgGain);
+        gl.uniform2f(bgU.u_cssSize, cssWidth, cssHeight);
+        gl.uniform1f(bgU.u_streamWavelength, streamWavelength);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
 
         // 2. Dotted grid with mouseover repulsion, bloom, and tap ripple
@@ -591,6 +712,11 @@ void main() {
         gl.uniform3fv(dotU.u_dotCore, preset.dotCore);
         gl.uniform1f(dotU.u_restAlpha, preset.restAlpha);
         gl.uniform1f(dotU.u_hoverAlpha, preset.hoverAlpha);
+        gl.uniform1f(dotU.u_stream, stream);
+        gl.uniform1f(dotU.u_streamTime, streamTime);
+        gl.uniform3fv(dotU.u_streamColor, preset.streamColor);
+        gl.uniform1f(dotU.u_streamWavelength, streamWavelength);
+        gl.uniform1f(dotU.u_streamAmplitude, streamAmplitude);
         gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, cols * rows);
 
         gl.disable(gl.BLEND);
@@ -608,14 +734,16 @@ void main() {
 
       const tick = (now) => {
         const elapsedMs = lastNow ? now - lastNow : 16;
-        // Throttle idle background updates when pointer is inactive
-        if (!tracker.isActive(now) && elapsedMs < 40) {
+        // Throttle idle background updates when pointer is inactive and no
+        // streaming wave is running
+        if (!tracker.isActive(now) && !streamActive() && elapsedMs < 40) {
           rafId = requestAnimationFrame(tick);
           return;
         }
         const dt = lastNow ? Math.min(Math.max(elapsedMs, 0), 100) / 1000 : 0;
         lastNow = now;
         phase = (phase + dt / DEFAULTS.loopSeconds) % 1;
+        stepStream(dt);
         renderFrame(dt, now);
         rafId = requestAnimationFrame(tick);
       };
@@ -693,6 +821,20 @@ void main() {
             canvas.style.background = preset.background;
             if (!rafId) renderFrame(0, performance.now());
           }
+          if (typeof next.streaming === "boolean") {
+            streamTarget = next.streaming ? 1 : 0;
+            if (!rafId) {
+              // Paused (hidden pane or reduced motion): no wave, but still
+              // show / clear the resting tint in a single static frame.
+              stream = streamTarget;
+              streamTime = 0;
+              renderFrame(0, performance.now());
+            }
+          }
+        },
+        /** Whether the streaming wave is currently requested. */
+        get streaming() {
+          return streamTarget > 0;
         },
         destroy,
       };

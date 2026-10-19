@@ -215,9 +215,15 @@
     errorBanner.classList.remove("hidden");
   };
 
+  // Lets the canvas stage react to the status (streaming wave while the
+  // agent is running). Bound once the stage instances exist, see
+  // `syncStageStreaming` below.
+  let onStatusChange = null;
+
   const setStatus = (kind, label) => {
     statusPill.className = `status status-${kind}`;
     statusText.textContent = label || kind;
+    if (typeof onStatusChange === "function") onStatusChange(kind);
   };
 
   const initialsOf = (nameOrEmail) => {
@@ -5252,6 +5258,20 @@
     }
   }
 
+  // Streaming wave on the canvas stage while the agent is running. Driven
+  // off the status pill so every path that flips it (send, stop, errors,
+  // reconnect after login) keeps the stage in sync; re-applied when the
+  // stage is (re)mounted since mounting may finish after a run started.
+  function syncStageStreaming(kind = isRunning ? "running" : "ready") {
+    const streaming = kind === "running";
+    if (canvasStageInstance && typeof canvasStageInstance.update === "function") {
+      if (canvasStageInstance.streaming !== streaming) {
+        canvasStageInstance.update({ streaming });
+      }
+    }
+  }
+  onStatusChange = syncStageStreaming;
+
   function syncActiveStage() {
     const authVisible = authGate && !authGate.classList.contains("hidden");
     const workspaceVisible = workspace && !workspace.classList.contains("hidden");
@@ -5302,6 +5322,7 @@
     authStageInstance = authInst;
     canvasStageInstance = canvasInst;
     syncActiveStage();
+    syncStageStreaming();
   };
 
   if (window.matchMedia) {

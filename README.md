@@ -305,23 +305,42 @@ rejected when staging from GCS.
 
 ## Frontend layout
 
-The studio client lives in `src/app/` and is served by the Rust binary as
-native ES modules: `src/studio.html` loads `<script type="module"
-src="/app/app.js">`, modules import each other with relative paths, and
+There are two browser hosts and one `adk-ui` renderer:
+
+- **The studio, `/app/`** — `src/studio.html` loads `<script type="module"
+  src="/app/app.js">`; the client lives in `src/app/` as native ES modules.
+- **The stock ADK dev UI, `/ui/`** — a third-party React page proxied by the
+  server, which injects `<script type="module" src="/oauth2/helper.js">`
+  before `</body>`. That script is `src/app/ui-helper.js` (also served as
+  `/app/ui-helper.js`): it does the OAuth popup plumbing, finds `render_*`
+  tool blocks in the React transcript, and renders them with the **same**
+  `src/app/adk-ui/*` modules the studio uses. It imports them with absolute
+  `/app/...` specifiers because it is served from `/oauth2/`.
+
 `server.rs` embeds every file in the `app_modules!` list with `include_str!`
 and serves it at `/app/<path>` (anything not in that list is 404). Adding a
 module means adding the file, the `app_modules!` entry and a
-`<link rel="modulepreload">` in `studio.html`. `src/studio.css` is served as
-`/app/app.css`.
+`<link rel="modulepreload">` in `studio.html`. Two stylesheets:
+`src/adk-ui.css` (`/app/adk-ui.css`) holds everything the shared renderer
+needs — the `--dm-*` surface tokens, button tokens and overlay z-layers,
+toasts, the modal overlay, alert cards, `.adk-ui-md` markdown typography,
+`.google-symbols`, `.hidden` — and is linked by `studio.html` and injected by
+the helper; `src/studio.css` (`/app/app.css`) is everything else about the
+studio, including the host palette tokens (`--text-*`, `--surface-card`,
+`--border-*`, `--accent-*`, `--mono`) that the ADK UI defines for itself on
+`/ui/`, which is what keeps the cards theme-native there.
+`scripts/check-dark-tokens.sh` verifies the mirrored dark-theme blocks in
+both files.
 
 ```text
 src/app/
-├── app.js                 entry: imports everything, wires late bindings, runs the init block
+├── app.js                 studio entry: imports everything, wires late bindings, runs the init block
+├── ui-helper.js           /ui/ entry (served as /oauth2/helper.js): OAuth popup, transcript scanning, host adapter
 ├── state.js               `state` (shared mutable singletons), `prefs`, `els` (DOM handles), constants
-├── dom.js                 $(), style(), svgEl(), popovers, focus helpers, showToast — no app state
+├── dom.js                 $(), style(), svgEl(), popovers, focus helpers, showToast, createIcon — no app state
 ├── status.js              setStatus() / showError() + the `onStatusChange` hook
 ├── format.js              number / currency / cell-value / initials formatting — pure
-├── markdown.js            Markdown → DOM for transcript text — pure
+├── markdown.js            Markdown → DOM for transcript text and adk-ui text — pure
 ├── prefs.js               preference persistence, settings controls sync, applyPreferences()
 ├── auth.js                /auth/me, login / logout, openPopup()
 ├── oauth-popup.js         in-flight OAuth consent (SSE events, BroadcastChannel, postMessage)
@@ -331,7 +350,7 @@ src/app/
 ├── settings-ui.js         settings popover controls, model pickers, pricing inputs, pane resizer
 ├── stage.js               WebGL dotted-grid stage (`AdSpaceStage`)
 ├── stage-bridge.js        mounts the stage, syncs theme / activity with the app
-├── adk-ui/
+├── adk-ui/                the renderer shared by both hosts — imports no app state
 │   ├── index.js           UiResponse extraction / classification, standalone cards
 │   ├── components.js      renderInnerComponent (the component switch) + button handler
 │   ├── modal.js           modal / confirm overlay with focus trap
@@ -346,20 +365,30 @@ src/app/
 
 Rules of the road:
 
-- **Leaf modules import no app state.** `format.js`, `markdown.js`,
-  `adk-ui/charts.js`, `adk-ui/tables.js` and `usage/counter.js` import nothing
-  from `state.js` (they may use the DOM helpers in `dom.js`); that keeps them
-  reusable and trivially testable.
+- **The shared renderer imports no app state.** `adk-ui/*`, `dom.js`,
+  `format.js` and `markdown.js` never import `state.js` (nor does
+  `usage/counter.js`); that is what lets `/ui/` load them. Everything the
+  renderer needs from its host is injected by the host entry point through
+  a documented setter — `bindSendMessage(fn, { isBusy })`,
+  `bindModalHost({ root, inertTarget })`, `bindModalComponentRenderer`,
+  `bindIconRenderer` — with defaults that suit a page shipping
+  `#ui-modal-root` and the Google Symbols font. `app.js` passes the studio's
+  `sendMessage` / `state.isRunning` / `els.workspace`; `ui-helper.js` passes
+  the ADK composer, the React `#root` and an inline-SVG icon renderer (the
+  `/ui/` CSP blocks the icon web font) and remaps the `--dm-*` tokens onto
+  the ADK palette.
 - **Shared mutable state lives on `state.state`.** ES module `let` exports are
   read-only to importers, so cross-module mutable values (`currentUser`,
   `activeSession`, `isRunning`, …) are properties of the exported `state`
   object; DOM handles are on `els`.
 - **No import cycles.** Where a low module must call a high one, the high
-  module is injected from `app.js` through a documented setter
+  module is injected from the entry point through a documented setter
   (`onStatusChange`, `bindPreferenceRenderers`, `bindModalComponentRenderer`,
   `bindSendMessage`).
 - No bundler: every file must be valid as-is in the browser (ES2022, no JSX,
-  no TypeScript).
+  no TypeScript). `/ui/` additionally runs under `default-src 'self'`: no
+  inline styles or scripts, no cross-origin fonts — the helper styles through
+  CSSOM only.
 
 ## Deployment
 

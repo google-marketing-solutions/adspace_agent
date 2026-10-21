@@ -127,16 +127,16 @@ cargo test --locked
 
 ## Command line
 
-| Command | What it does |
-|---|---|
-| `serve [--host 0.0.0.0] [--port 8000]` | Serves the studio (`/app/`), the OAuth routes and adk-server's REST API. `PORT` is honoured (Cloud Run). While `CLIENT_ID` / `CLIENT_SECRET` are unset the stock ADK dev UI is also available at `/ui/`. |
-| `console [--host] [--port]` | adk-cli terminal chat as user `user`; the OAuth callback is still served on `host:port`, so consent popups complete. |
-| `list-tools google-ads` | Google Ads API tools (unfiltered). |
-| `list-tools youtube` | YouTube Data API tools (with the agent's filter). |
-| `list-tools google --api drive --version v3` | Any Google API by Discovery name and version. |
-| `list-tools all` | Every Discovery-based toolset the current configuration enables. |
-| `list-tools … --scopes` | Also print the OAuth scope each tool asks for. |
-| `list-tools … --sizes` | Also print the size of the tool declarations sent to the model per request. |
+| Command                                      | What it does                                                                                                                                                                                             |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `serve [--host 0.0.0.0] [--port 8000]`       | Serves the studio (`/app/`), the OAuth routes and adk-server's REST API. `PORT` is honoured (Cloud Run). While `CLIENT_ID` / `CLIENT_SECRET` are unset the stock ADK dev UI is also available at `/ui/`. |
+| `console [--host] [--port]`                  | adk-cli terminal chat as user `user`; the OAuth callback is still served on `host:port`, so consent popups complete.                                                                                     |
+| `list-tools google-ads`                      | Google Ads API tools (unfiltered).                                                                                                                                                                       |
+| `list-tools youtube`                         | YouTube Data API tools (with the agent's filter).                                                                                                                                                        |
+| `list-tools google --api drive --version v3` | Any Google API by Discovery name and version.                                                                                                                                                            |
+| `list-tools all`                             | Every Discovery-based toolset the current configuration enables.                                                                                                                                         |
+| `list-tools … --scopes`                      | Also print the OAuth scope each tool asks for.                                                                                                                                                           |
+| `list-tools … --sizes`                       | Also print the size of the tool declarations sent to the model per request.                                                                                                                              |
 
 Tool names are derived from the Discovery documents exactly like the Python ADK
 (`drive.files.list` → `drive_files_list`, truncated to 60 characters; names
@@ -149,50 +149,50 @@ All settings are environment variables (read from `.env` in development).
 
 ### Model and project
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION` | — | Vertex AI project / location (`global` recommended). Also the default BigQuery project. |
-| `GOOGLE_GENAI_USE_VERTEXAI` | `TRUE` | `FALSE` + `GOOGLE_API_KEY` uses the Gemini Developer API instead. Accepts `true/1/yes/on`. |
-| `MODEL`, `IMAGE_MODEL`, `VIDEO_MODEL` | `gemini-3.8-flash`, `gemini-3.1-flash-image`, `veo-3.1-fast-generate-001` | Start-up models; administrators can switch them at runtime from the studio. |
-| `CONTEXT_CACHE_*`, `COMPACTION_*` | see `.env.sample` | Gemini context caching and events compaction thresholds. |
+| Variable                                        | Default                                                                   | Purpose                                                                                    |
+| ----------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION` | —                                                                         | Vertex AI project / location (`global` recommended). Also the default BigQuery project.    |
+| `GOOGLE_GENAI_USE_VERTEXAI`                     | `TRUE`                                                                    | `FALSE` + `GOOGLE_API_KEY` uses the Gemini Developer API instead. Accepts `true/1/yes/on`. |
+| `MODEL`, `IMAGE_MODEL`, `VIDEO_MODEL`           | `gemini-3.8-flash`, `gemini-3.1-flash-image`, `veo-3.1-fast-generate-001` | Start-up models; administrators can switch them at runtime from the studio.                |
+| `CONTEXT_CACHE_*`, `COMPACTION_*`               | see `.env.sample`                                                         | Gemini context caching and events compaction thresholds.                                   |
 
 ### Sign-in and access
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `CLIENT_ID`, `CLIENT_SECRET` | — | OAuth client used both for Google Sign-In and for the per-user API grants. **Unset = no sign-in** (local development only). |
-| `PUBLIC_BASE_URL` | `http://localhost:8000` | Builds the redirect URI; with `https://` the cookies are `Secure`. |
-| `ADMIN_EMAILS` | — | Comma-separated Google accounts allowed to switch the server-wide models (`POST /auth/models`) and to open the stock ADK dev UI at `/ui/` once sign-in is configured (everyone else is redirected to `/app/`). With sign-in configured and this unset, nobody can. |
-| `OAUTH_STATE_SECRET` | derived from `CLIENT_SECRET` | Extra secret mixed into the HMAC key that signs OAuth states and the sign-in cookie. |
-| `SHUTDOWN_GRACE_SECS` | `8` | How long in-flight requests may finish after SIGTERM. |
+| Variable                     | Default                      | Purpose                                                                                                                                                                                                                                                            |
+| ---------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CLIENT_ID`, `CLIENT_SECRET` | —                            | OAuth client used both for Google Sign-In and for the per-user API grants. **Unset = no sign-in** (local development only).                                                                                                                                        |
+| `PUBLIC_BASE_URL`            | `http://localhost:8000`      | Builds the redirect URI; with `https://` the cookies are `Secure`.                                                                                                                                                                                                 |
+| `ADMIN_EMAILS`               | —                            | Comma-separated Google accounts allowed to switch the server-wide models (`POST /auth/models`) and to open the stock ADK dev UI at `/ui/` once sign-in is configured (everyone else is redirected to `/app/`). With sign-in configured and this unset, nobody can. |
+| `OAUTH_STATE_SECRET`         | derived from `CLIENT_SECRET` | Extra secret mixed into the HMAC key that signs OAuth states and the sign-in cookie.                                                                                                                                                                               |
+| `SHUTDOWN_GRACE_SECS`        | `8`                          | How long in-flight requests may finish after SIGTERM.                                                                                                                                                                                                              |
 
 ### Toolsets
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `ENABLED_TOOLSETS` | all | Comma-separated subset of `bid_manager, bigquery, campaign_manager_360, display_video_360, drive, merchant_center_inventories, merchant_center_products, merchant_center_reports, search_ads_360, storage, youtube, google_ads, google_genai`. |
-| `LAZY_TOOLSETS` | `campaign_manager_360,display_video_360,merchant_center_products` | `none`, `all` or a list of toolsets whose tools are only sent to the model after it calls `enable_toolsets` (keeps the prompt small). |
-| `LAZY_SPLIT_WRITES` | `true` | Split each lazy toolset into a read collection (`campaign_manager_360`: list/get/search/query/run) and a `_write` collection (insert/update/patch/delete) that the model enables separately. Write methods carry ~85% of the declaration bytes, so a reporting session enables CM360 for ~20k tokens instead of ~170k. |
-| `GOOGLE_ADS_TOOL_FILTER` | a curated search/insights subset | Restrict the Google Ads toolset to the listed tool names. The DV360, Drive, Storage and YouTube toolsets ship with built-in filters (`src/config.rs`). |
-| `GOOGLE_ADS_DEVELOPER_TOKEN`, `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | — | Google Ads API headers. |
-| `BIGQUERY_READ_ONLY` | `true` | `false` allows DML/DDL and requests the `bigquery` scope instead of `bigquery.readonly`. |
-| `GEMINI_BUILTIN_TOOLS` | `google_search,url_context,google_maps` | Gemini server-side tools; `all` adds code execution, `none` disables. `GOOGLE_MAPS_CONTEXT_LAT/LNG` seed Maps. |
-| `PYTHON_EXECUTOR` | `gemini` | Python backend: `gemini`, `docker`, `vertex` or `monty` (see [Python data analysis](#python-data-analysis)). |
-| `GOOGLE_API_SCHEMA_MAX_DEPTH`, `GOOGLE_API_SCHEMA_ENUM_DESCRIPTIONS`, `GOOGLE_API_SCHEMA_NESTED_DESCRIPTIONS` | `4`, `false`, `first_sentence` | How much of each request schema is exposed to the model. Nested descriptions: `full`, `first_sentence` or `none` (top-level parameters always keep their full text). |
-| `GOOGLE_API_SCHEMA_KEEP_OUTPUT_ONLY` | `false` | By default request-body fields documented as `Output only.` / `This is a read-only field.` are dropped from tool declarations: the API ignores them on writes and they only invite the model to invent values. |
-| `GOOGLE_API_SCHEMA_MAX_TOOL_BYTES` | `12288` | Per-tool declaration budget. A tool above it is re-resolved with a shallower request schema until it fits (only the giant CM360 creative/placement and DV360 targeting write methods are affected). `0` disables. Check with `adspace-agent list-tools all --sizes`. |
-| `DISCOVERY_CACHE_DIR` | `~/.cache/adspace-agent/discovery` | On-disk cache of Discovery documents (`off` disables). Documents whose `rootUrl` is not a `googleapis.com` origin are rejected. |
+| Variable                                                                                                      | Default                                                           | Purpose                                                                                                                                                                                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ENABLED_TOOLSETS`                                                                                            | all                                                               | Comma-separated subset of `bid_manager, bigquery, campaign_manager_360, display_video_360, drive, merchant_center_inventories, merchant_center_products, merchant_center_reports, search_ads_360, storage, youtube, google_ads, google_genai`.                                                                         |
+| `LAZY_TOOLSETS`                                                                                               | `campaign_manager_360,display_video_360,merchant_center_products` | `none`, `all` or a list of toolsets whose tools are only sent to the model after it calls `enable_toolsets` (keeps the prompt small).                                                                                                                                                                                  |
+| `LAZY_SPLIT_WRITES`                                                                                           | `true`                                                            | Split each lazy toolset into a read collection (`campaign_manager_360`: list/get/search/query/run) and a `_write` collection (insert/update/patch/delete) that the model enables separately. Write methods carry ~85% of the declaration bytes, so a reporting session enables CM360 for ~20k tokens instead of ~170k. |
+| `GOOGLE_ADS_TOOL_FILTER`                                                                                      | a curated search/insights subset                                  | Restrict the Google Ads toolset to the listed tool names. The DV360, Drive, Storage and YouTube toolsets ship with built-in filters (`src/config.rs`).                                                                                                                                                                 |
+| `GOOGLE_ADS_DEVELOPER_TOKEN`, `GOOGLE_ADS_LOGIN_CUSTOMER_ID`                                                  | —                                                                 | Google Ads API headers.                                                                                                                                                                                                                                                                                                |
+| `BIGQUERY_READ_ONLY`                                                                                          | `true`                                                            | `false` allows DML/DDL and requests the `bigquery` scope instead of `bigquery.readonly`.                                                                                                                                                                                                                               |
+| `GEMINI_BUILTIN_TOOLS`                                                                                        | `google_search,url_context,google_maps`                           | Gemini server-side tools; `all` adds code execution, `none` disables. `GOOGLE_MAPS_CONTEXT_LAT/LNG` seed Maps.                                                                                                                                                                                                         |
+| `PYTHON_EXECUTOR`                                                                                             | `gemini`                                                          | Python backend: `gemini`, `docker`, `vertex` or `monty` (see [Python data analysis](#python-data-analysis)).                                                                                                                                                                                                           |
+| `GOOGLE_API_SCHEMA_MAX_DEPTH`, `GOOGLE_API_SCHEMA_ENUM_DESCRIPTIONS`, `GOOGLE_API_SCHEMA_NESTED_DESCRIPTIONS` | `4`, `false`, `first_sentence`                                    | How much of each request schema is exposed to the model. Nested descriptions: `full`, `first_sentence` or `none` (top-level parameters always keep their full text).                                                                                                                                                   |
+| `GOOGLE_API_SCHEMA_KEEP_OUTPUT_ONLY`                                                                          | `false`                                                           | By default request-body fields documented as `Output only.` / `This is a read-only field.` are dropped from tool declarations: the API ignores them on writes and they only invite the model to invent values.                                                                                                         |
+| `GOOGLE_API_SCHEMA_MAX_TOOL_BYTES`                                                                            | `12288`                                                           | Per-tool declaration budget. A tool above it is re-resolved with a shallower request schema until it fits (only the giant CM360 creative/placement and DV360 targeting write methods are affected). `0` disables. Check with `adspace-agent list-tools all --sizes`.                                                   |
+| `DISCOVERY_CACHE_DIR`                                                                                         | `~/.cache/adspace-agent/discovery`                                | On-disk cache of Discovery documents (`off` disables). Documents whose `rootUrl` is not a `googleapis.com` origin are rejected.                                                                                                                                                                                        |
 
 ### Services
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `SESSION_SERVICE_URI` | `sqlite:///./sessions.db` | `memory://`, `sqlite:///path.db` or `firestore://` (needs `GOOGLE_CLOUD_PROJECT`). |
-| `SESSION_ENCRYPTION_KEY`, `SESSION_ENCRYPTION_PREVIOUS_KEYS` | — | AES-256-GCM encryption of session state, including the stored OAuth tokens; previous keys allow rotation. |
-| `ARTIFACT_SERVICE_URI` | `memory://` | `gs://bucket` or `file://./.artifacts` for uploads, generated media and staged CM360 payloads. |
-| `MEMORY_SERVICE_URI` | `memory://` | Cross-session memory backing `preload_memory`. |
-| `SKILLS_BUCKET_NAME`, `LOCAL_SKILLS_DIR` | —, `./skills` | Where [skills](#skills) are loaded from. |
-| `RUST_LOG` | `info` | Log filter. |
+| Variable                                                     | Default                   | Purpose                                                                                                   |
+| ------------------------------------------------------------ | ------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `SESSION_SERVICE_URI`                                        | `sqlite:///./sessions.db` | `memory://`, `sqlite:///path.db` or `firestore://` (needs `GOOGLE_CLOUD_PROJECT`).                        |
+| `SESSION_ENCRYPTION_KEY`, `SESSION_ENCRYPTION_PREVIOUS_KEYS` | —                         | AES-256-GCM encryption of session state, including the stored OAuth tokens; previous keys allow rotation. |
+| `ARTIFACT_SERVICE_URI`                                       | `memory://`               | `gs://bucket` or `file://./.artifacts` for uploads, generated media and staged CM360 payloads.            |
+| `MEMORY_SERVICE_URI`                                         | `memory://`               | Cross-session memory backing `preload_memory`.                                                            |
+| `SKILLS_BUCKET_NAME`, `LOCAL_SKILLS_DIR`                     | —, `./skills`             | Where [skills](#skills) are loaded from.                                                                  |
+| `RUST_LOG`                                                   | `info`                    | Log filter.                                                                                               |
 
 ## Authentication and authorization
 
@@ -243,39 +243,40 @@ the user-scoped entry is written.
 
 ### Who can call what
 
-| `CLIENT_ID` / `CLIENT_SECRET` | Who is the caller | `/ui/` dev UI | `POST /auth/models` |
-|---|---|---|---|
-| unset (local development) | everyone is the anonymous user `user`; the port must not be reachable by anyone else | available | anyone (or `ADMIN_EMAILS` when set) |
-| set | the signed-in Google user — **every** `/api/…` route (sessions, `/api/run*`, artifacts, debug) answers `401` without the cookie and `403` for another user's session, whether the user id comes from the path or from the JSON body | disabled (redirects to `/app/`) | administrators listed in `ADMIN_EMAILS` only |
+| `CLIENT_ID` / `CLIENT_SECRET` | Who is the caller                                                                                                                                                                                                                   | `/ui/` dev UI                   | `POST /auth/models`                          |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- | -------------------------------------------- |
+| unset (local development)     | everyone is the anonymous user `user`; the port must not be reachable by anyone else                                                                                                                                                | available                       | anyone (or `ADMIN_EMAILS` when set)          |
+| set                           | the signed-in Google user — **every** `/api/…` route (sessions, `/api/run*`, artifacts, debug) answers `401` without the cookie and `403` for another user's session, whether the user id comes from the path or from the JSON body | disabled (redirects to `/app/`) | administrators listed in `ADMIN_EMAILS` only |
 
 Identity is enforced by adk-server's own auth layer through a
 `RequestContextExtractor` backed by the cookie, plus a response guard that
-strips the user's OAuth tokens (`user:CREDENTIALS_CACHE_KEY` and the legacy per-session `CREDENTIALS_CACHE_KEY`) from every JSON and SSE response so they never
-reach the browser. `/oauth2/events` and `/oauth2/ack` are limited to the
+strips the user's OAuth tokens (`user:CREDENTIALS_CACHE_KEY` and the legacy
+per-session `CREDENTIALS_CACHE_KEY`) from every JSON and SSE response so they
+never reach the browser. `/oauth2/events` and `/oauth2/ack` are limited to the
 signed-in user's own sessions and never carry the signed OAuth `state`.
 
 ## Toolsets
 
-| Toolset key | Implementation |
-|---|---|
-| `google_ads`, `display_video_360`, `drive`, `youtube`, `storage`, `search_ads_360`, `bid_manager`, `merchant_center_*`, `campaign_manager_360` | Discovery-document driven `GoogleApiToolset` (`src/google_api`) with the user's OAuth credentials. Responses are capped at 2 MiB (the model is told to narrow with `pageSize` / `fields`). |
-| `campaign_manager_360` (additionally) | `parse_sheet_tool` / `traffic_campaigns_in_cm360_tool` (`src/tools/cm360_trafficking`): validates a trafficking sheet, diffs it against CM360, stages the operations as a versioned artifact and executes them once approved. Each staged payload can be executed exactly once; re-parse to retry. The workflow instructions ship with the toolset — no separate skill is needed. |
-| `bigquery` | Native `BigQueryToolset` (`src/tools/bigquery.rs`): `bigquery_list_datasets`, `bigquery_list_tables`, `bigquery_get_table_schema`, `bigquery_execute_sql` over the BigQuery REST API with the **user's** token. Read-only by default (a single `SELECT`/`WITH` statement, confirmed by a dry run); `BIGQUERY_READ_ONLY=false` allows DML. Default project `GOOGLE_CLOUD_PROJECT`, overridable per call with `project_id`. The service account needs no BigQuery permissions; users need `bigquery.jobs.create` on the project they query. |
-| `google_genai` | `get_info_about_youtube_video`, `generate_image` (Imagen) and `generate_video` (Veo long-running operation) through the Vertex AI backend; results are saved as session artifacts. |
-| always on | Python execution (below), `list_user_files`, adk-rust's `load_artifacts` and `preload_memory`, progressive skills (`list_skills`, `load_skill`, `load_skill_resource`, `reload_skills`), and `adk-ui` generative UI tools (`render_chart`, `render_table`, `render_layout`, `render_card`, `render_form`, `render_confirm`, `render_modal`, `render_alert`, `render_progress`, `render_toast`) rendered live in the studio canvas. |
-| Gemini built-ins (`GEMINI_BUILTIN_TOOLS`) | `google_search`, `url_context`, `google_maps` by default. These run server-side inside Gemini, as does the default `gemini_code_execution`. |
+| Toolset key                                                                                                                                    | Implementation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `google_ads`, `display_video_360`, `drive`, `youtube`, `storage`, `search_ads_360`, `bid_manager`, `merchant_center_*`, `campaign_manager_360` | Discovery-document driven `GoogleApiToolset` (`src/google_api`) with the user's OAuth credentials. Responses are capped at 2 MiB (the model is told to narrow with `pageSize` / `fields`).                                                                                                                                                                                                                                                                                                                                                |
+| `campaign_manager_360` (additionally)                                                                                                          | `parse_sheet_tool` / `traffic_campaigns_in_cm360_tool` (`src/tools/cm360_trafficking`): validates a trafficking sheet, diffs it against CM360, stages the operations as a versioned artifact and executes them once approved. Each staged payload can be executed exactly once; re-parse to retry. The workflow instructions ship with the toolset — no separate skill is needed.                                                                                                                                                         |
+| `bigquery`                                                                                                                                     | Native `BigQueryToolset` (`src/tools/bigquery.rs`): `bigquery_list_datasets`, `bigquery_list_tables`, `bigquery_get_table_schema`, `bigquery_execute_sql` over the BigQuery REST API with the **user's** token. Read-only by default (a single `SELECT`/`WITH` statement, confirmed by a dry run); `BIGQUERY_READ_ONLY=false` allows DML. Default project `GOOGLE_CLOUD_PROJECT`, overridable per call with `project_id`. The service account needs no BigQuery permissions; users need `bigquery.jobs.create` on the project they query. |
+| `google_genai`                                                                                                                                 | `get_info_about_youtube_video`, `generate_image` (Imagen) and `generate_video` (Veo long-running operation) through the Vertex AI backend; results are saved as session artifacts.                                                                                                                                                                                                                                                                                                                                                        |
+| always on                                                                                                                                      | Python execution (below), `list_user_files`, adk-rust's `load_artifacts` and `preload_memory`, progressive skills (`list_skills`, `load_skill`, `load_skill_resource`, `reload_skills`), and `adk-ui` generative UI tools (`render_chart`, `render_table`, `render_layout`, `render_card`, `render_form`, `render_confirm`, `render_modal`, `render_alert`, `render_progress`, `render_toast`) rendered live in the studio canvas.                                                                                                        |
+| Gemini built-ins (`GEMINI_BUILTIN_TOOLS`)                                                                                                      | `google_search`, `url_context`, `google_maps` by default. These run server-side inside Gemini, as does the default `gemini_code_execution`.                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ### Python data analysis
 
 Model-written Python runs through adk-rust built-ins only; `PYTHON_EXECUTOR`
 selects which:
 
-| Value | Tool | Notes |
-|---|---|---|
-| `gemini` (default) | `gemini_code_execution` | Gemini writes and runs the code server-side (numpy, pandas, matplotlib, scikit-learn, … available). No infrastructure; stateless per turn. |
-| `vertex` | `vertex_sandbox_code_execution` | Vertex AI Agent Engine managed sandbox (`VERTEX_SANDBOX_NAME` or `VERTEX_AGENT_ENGINE`). Stateful per session. |
-| `docker` | `python_code` | Container-backed CPython (`PYTHON_DOCKER_IMAGE`) run with `--network=none`, `--cap-drop=ALL`, `--read-only`, a memory and pid limit. Needs a Docker daemon. |
-| `monty` | `monty_python_code` | In-process Monty interpreter (Python subset, no third-party packages). Requires `cargo build --features monty`. |
+| Value              | Tool                            | Notes                                                                                                                                                       |
+| ------------------ | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gemini` (default) | `gemini_code_execution`         | Gemini writes and runs the code server-side (numpy, pandas, matplotlib, scikit-learn, … available). No infrastructure; stateless per turn.                  |
+| `vertex`           | `vertex_sandbox_code_execution` | Vertex AI Agent Engine managed sandbox (`VERTEX_SANDBOX_NAME` or `VERTEX_AGENT_ENGINE`). Stateful per session.                                              |
+| `docker`           | `python_code`                   | Container-backed CPython (`PYTHON_DOCKER_IMAGE`) run with `--network=none`, `--cap-drop=ALL`, `--read-only`, a memory and pid limit. Needs a Docker daemon. |
+| `monty`            | `monty_python_code`             | In-process Monty interpreter (Python subset, no third-party packages). Requires `cargo build --features monty`.                                             |
 
 ## Skills
 
@@ -502,16 +503,16 @@ needed because code execution happens server-side in Gemini by default.
 
 ## Troubleshooting
 
-| Symptom | Cause / fix |
-|---|---|
-| CI or a Linux build fails in `libdbus-sys` (`pkg_config failed`) | adk-cli's `keyring` links libdbus. Install `pkg-config libdbus-1-dev libssl-dev`. |
-| `redirect_uri_mismatch` in the consent popup | `${PUBLIC_BASE_URL}/oauth2/callback` is not registered on the OAuth client, or `PUBLIC_BASE_URL` differs from the URL in the browser. |
-| The consent popup does not open | The browser blocked `window.open`; on localhost the server falls back to the OS browser. On Cloud Run make sure `--session-affinity` is set so the SSE stream and the tool call share an instance. |
-| A tool returns `AUTH_REQUIRED` although the user already consented | The grant is per user and per scope: the tool needs a scope that has not been granted yet. Run `list-tools … --scopes` to see which. |
-| `Only administrators (ADMIN_EMAILS) may change the server-wide models` | Add the account to `ADMIN_EMAILS`. The studio hides the model selector for non-admins. |
-| BigQuery returns `403` | The *user* lacks `bigquery.jobs.create` (or dataset access) on the project; the service account's permissions do not apply. |
-| `gcloud run deploy --source .` times out | Use `gcloud builds submit --config cloudbuild.yaml`, then deploy the image (see [Build the image](#build-the-image)). |
-| The model never sees a toolset's tools | It is listed in `LAZY_TOOLSETS`: the model must call `enable_toolsets` first, or remove it from the list. |
+| Symptom                                                                | Cause / fix                                                                                                                                                                                        |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CI or a Linux build fails in `libdbus-sys` (`pkg_config failed`)       | adk-cli's `keyring` links libdbus. Install `pkg-config libdbus-1-dev libssl-dev`.                                                                                                                  |
+| `redirect_uri_mismatch` in the consent popup                           | `${PUBLIC_BASE_URL}/oauth2/callback` is not registered on the OAuth client, or `PUBLIC_BASE_URL` differs from the URL in the browser.                                                              |
+| The consent popup does not open                                        | The browser blocked `window.open`; on localhost the server falls back to the OS browser. On Cloud Run make sure `--session-affinity` is set so the SSE stream and the tool call share an instance. |
+| A tool returns `AUTH_REQUIRED` although the user already consented     | The grant is per user and per scope: the tool needs a scope that has not been granted yet. Run `list-tools … --scopes` to see which.                                                               |
+| `Only administrators (ADMIN_EMAILS) may change the server-wide models` | Add the account to `ADMIN_EMAILS`. The studio hides the model selector for non-admins.                                                                                                             |
+| BigQuery returns `403`                                                 | The _user_ lacks `bigquery.jobs.create` (or dataset access) on the project; the service account's permissions do not apply.                                                                        |
+| `gcloud run deploy --source .` times out                               | Use `gcloud builds submit --config cloudbuild.yaml`, then deploy the image (see [Build the image](#build-the-image)).                                                                              |
+| The model never sees a toolset's tools                                 | It is listed in `LAZY_TOOLSETS`: the model must call `enable_toolsets` first, or remove it from the list.                                                                                          |
 
 ## Differences from the Python agent
 

@@ -1,0 +1,67 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# rumdl configuration - Google developer documentation style
+# Based on https://google.github.io/styleguide/docguide/style.html
+
+[global]
+exclude = [
+  ".git",
+  ".github",
+  "node_modules",
+  "vendor",
+  "dist",
+  "build",
+  "CHANGELOG.md",
+  "LICENSE.md",
+]
+respect-gitignore = true
+
+# ATX-style headings required
+[MD003]
+style = "atx"
+
+# Unordered list style: dash
+[MD004]
+style = "dash"
+
+# 4-space indent for nested lists
+[MD007]
+indent = 4
+
+# Strict mode: no trailing spaces allowed (Google uses backslash for line breaks)
+[MD009]
+strict = true
+
+# 80-character line length
+[MD013]
+line-length = 80
+code-blocks = false
+tables = false
+
+# No trailing punctuation in headings
+[MD026]
+punctuation = ".,;:!。，；：！"
+
+# Fenced code blocks only (no indented code blocks)
+[MD046]
+style = "fenced"
+
+# Emphasis with underscores
+[MD049]
+style = "underscore"
+
+# Strong with asterisks
+[MD050]
+style = "asterisk"

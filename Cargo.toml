@@ -17,10 +17,9 @@ name = "adspace-agent"
 version = "0.13.0"
 edition = "2024"
 rust-version = "1.99"
-license = "Apache-2.0"
 description = "AdSpace Agent is designed to provide a standardized way to integrate an LLM with Google Ads, YouTube, Google Cloud, and Google Search to form a more comprehensive campaign and marketing plan for agencies."
-authors = ["Tony Coconate <coconate@google.com>", "Brian Craft <bcraft@google.com>"]
 readme = "README.md"
+license = "Apache-2.0"
 publish = false
 
 [lib]
@@ -32,49 +31,57 @@ name = "adspace-agent"
 path = "src/main.rs"
 
 [dependencies]
-adk-rust = { version = "2.3.0", default-features = false, features = [
-    "minimal",
+adk-gemini = { version = "2.3.0", features = ["vertex"] }
+adk-rust = {
+  version = "2.3.0",
+  default-features = false,
+  features = [
+    "artifacts",
+    "cli",
+    "code-tools",
+    "gcs-artifacts",
     "gemini-vertex",
-    "tools",
     "memory",
     "memory-tools",
-    "artifacts",
-    "gcs-artifacts",
+    "minimal",
     "plugin",
     "server",
     "skills",
     "skills-progressive-disclosure",
     "telemetry",
-    "code-tools",
+    "tools",
     "vertex-sandbox",
-    "cli",
-] }
-axum = "0.8.9"
-adk-session = { version = "2.3.0", features = ["sqlite", "firestore", "encrypted-session"] }
-adk-gemini = { version = "2.3.0", features = ["vertex"] }
+  ]
+}
+adk-session = { version = "2.3.0", features = ["encrypted-session", "firestore", "sqlite"] }
 adk-ui = { version = "2.2.0", features = ["adk-core"] }
+axum = "0.8.9"
 
 anyhow = "1.0.104"
 async-trait = "0.1.92"
-futures = "0.3.34"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["preserve_order"] }
-tokio = { version = "1.53.3", features = ["full"] }
-tracing = "0.1.44"
-dotenvy = "0.15.7"
-reqwest = { version = "0.13.5", default-features = false, features = ["form", "json", "query", "rustls", "stream"] }
-google-cloud-auth = { version = "1.17.0", default-features = false, features = ["default-rustls-provider"] }
-thiserror = "2.0.21"
-chrono = { version = "0.4.45", features = ["serde"] }
-regex = "1.13.1"
-csv = "1.4.0"
-uuid = { version = "1.28.0", features = ["v4"] }
-clap = { version = "4.6.7", features = ["derive", "env"] }
-url = "2.5.8"
 base64 = "0.23.1"
-sha2 = "0.11.1"
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+csv = "1.4.0"
+dotenvy = "0.15.7"
+futures = "0.3.34"
+google-cloud-auth = { version = "1.17.0", default-features = false, features = ["default-rustls-provider"] }
 hmac = "0.13.0"
 indexmap = { version = "2.14.2", features = ["serde"] }
+regex = "1.13.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["form", "json", "query", "rustls", "stream"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+tokio = { version = "1.53.3", features = ["full"] }
+tracing = "0.1.44"
+url = "2.5.8"
+uuid = { version = "1.28.0", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tower = { version = "0.5.3", features = ["util"] }
 
 [features]
 default = []
@@ -82,7 +89,3 @@ default = []
 # backend. Off by default because its dependency chain (monty → jiter → pyo3)
 # does not currently resolve against crates.io.
 monty = ["adk-rust/code-embedded-python"]
-
-[dev-dependencies]
-tempfile = "3.27.0"
-tower = { version = "0.5.3", features = ["util"] }

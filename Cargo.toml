@@ -22,6 +22,10 @@ readme = "README.md"
 license = "Apache-2.0"
 publish = false
 
+# `package.authors` is deprecated; Cargo ignores this table, so no warning.
+[package.metadata]
+authors = ["Tony Coconate <coconate@google.com>", "Brian Craft <bcraft@google.com>"]
+
 [lib]
 name = "adspace_agent"
 path = "src/lib.rs"

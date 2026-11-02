@@ -13,7 +13,11 @@
 # limitations under the License.
 """Tests for the cm360_trafficking utilities module."""
 
+from zoneinfo import ZoneInfoNotFoundError
+
 import numpy as np
+import pandas as pd
+import pytest
 
 from adspace_agent.tools.cm360_trafficking import utilities
 
@@ -37,9 +41,35 @@ def test_format_date() -> None:
 
 def test_format_date_time() -> None:
     """Tests format_date_time converts datetimes to ISO-8601 strings."""
-    assert utilities.format_date_time("2026-06-15") == "2026-06-15T00:00:00Z"
-    assert utilities.format_date_time(np.nan) is None
-    assert utilities.format_date_time("not-a-date") == "not-a-date"
+    assert (
+        utilities.format_date_time("2026-06-15", time_zone="UTC")
+        == "2026-06-15T00:00:00Z"
+    )
+    assert utilities.format_date_time(np.nan, time_zone="UTC") is None
+    assert (
+        utilities.format_date_time("not-a-date", time_zone="UTC")
+        == "not-a-date"
+    )
+    assert (
+        utilities.format_date_time("11/03/2026", time_zone="America/New_York")
+        == "2026-11-03T05:00:00Z"
+    )
+    assert (
+        utilities.format_date_time(
+            "11/20/2026", time_zone="America/New_York", is_end_date=True
+        )
+        == "2026-11-21T04:59:59Z"
+    )
+    assert (
+        utilities.format_date_time(
+            "2026-10-16T13:29:48.910Z", time_zone="America/New_York"
+        )
+        == "2026-10-16T13:29:48Z"
+    )
+    with pytest.raises(ValueError, match="Time zone must be provided"):
+        utilities.format_date_time("11/03/2026", time_zone="")
+    with pytest.raises(ZoneInfoNotFoundError):
+        utilities.format_date_time("11/03/2026", time_zone="Invalid/Zone")
 
 
 def test_normalize_iso_datetime() -> None:
@@ -51,3 +81,110 @@ def test_normalize_iso_datetime() -> None:
     assert utilities.normalize_iso_datetime(None) is None
     assert utilities.normalize_iso_datetime("null") is None
     assert utilities.normalize_iso_datetime("invalid-date") == "invalid-date"
+
+
+def test_prepare_data_with_timezone() -> None:
+    """Tests prepare_data extracts metadata and Time Zone correctly."""
+    raw_data = [
+        [
+            "Network",
+            "Profile ID",
+            "Advertiser ID",
+            "Campaign ID",
+            "Campaign Name",
+            "Time Zone",
+        ],
+        [
+            "Digitas",
+            "12345",
+            "67890",
+            "99999",
+            "Test Campaign",
+            "America/Chicago",
+        ],
+        [
+            "Trafficking Status",
+            "Placement Name",
+            "Ad Name",
+            "Placement ID",
+            "Ad ID",
+        ],
+        ["New", "Placement 1", "Ad 1", "", ""],
+    ]
+    df_raw = pd.DataFrame(raw_data)
+    df, profile_id, advertiser_id, campaign_id, campaign_name = (
+        utilities.prepare_data(df_raw)
+    )
+
+    assert profile_id == "12345"
+    assert advertiser_id == "67890"
+    assert campaign_id == "99999"
+    assert campaign_name == "Test Campaign"
+    assert "Time Zone" in df.columns
+    assert df["Time Zone"].iloc[0] == "America/Chicago"
+
+
+def test_prepare_data_missing_timezone() -> None:
+    """Tests prepare_data raises ValueError when Time Zone is missing."""
+    raw_data = [
+        [
+            "Network",
+            "Profile ID",
+            "Advertiser ID",
+            "Campaign ID",
+            "Campaign Name",
+        ],
+        [
+            "Digitas",
+            "12345",
+            "67890",
+            "99999",
+            "Test Campaign",
+        ],
+        [
+            "Trafficking Status",
+            "Placement Name",
+            "Ad Name",
+            "Placement ID",
+            "Ad ID",
+        ],
+        ["New", "Placement 1", "Ad 1", "", ""],
+    ]
+    df_raw = pd.DataFrame(raw_data)
+    with pytest.raises(
+        ValueError, match="Missing required campaign metadata field: Time Zone"
+    ):
+        utilities.prepare_data(df_raw)
+
+
+def test_prepare_data_invalid_timezone() -> None:
+    """Tests prepare_data raises ValueError when Time Zone is invalid."""
+    raw_data = [
+        [
+            "Network",
+            "Profile ID",
+            "Advertiser ID",
+            "Campaign ID",
+            "Campaign Name",
+            "Time Zone",
+        ],
+        [
+            "Digitas",
+            "12345",
+            "67890",
+            "99999",
+            "Test Campaign",
+            "Invalid/Time_Zone",
+        ],
+        [
+            "Trafficking Status",
+            "Placement Name",
+            "Ad Name",
+            "Placement ID",
+            "Ad ID",
+        ],
+        ["New", "Placement 1", "Ad 1", "", ""],
+    ]
+    df_raw = pd.DataFrame(raw_data)
+    with pytest.raises(ValueError, match="Invalid Time Zone"):
+        utilities.prepare_data(df_raw)

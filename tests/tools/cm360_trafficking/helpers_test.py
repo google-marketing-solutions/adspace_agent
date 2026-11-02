@@ -51,20 +51,33 @@ def test_resolve_placement_ids() -> None:
 
 
 def test_resolve_creative_ids() -> None:
-    """Tests resolving creative names to CM360 IDs."""
+    """Tests resolving creative names to CM360 IDs and exit overrides."""
     ads = {
         "Test Ad": {
             "name": "Test Ad",
             "creativeRotation": {
                 "creativeAssignments": [
-                    {"creativeId": "TEST_ACG~300x250", "active": True}
+                    {
+                        "creativeId": "TEST_ACG~300x250",
+                        "active": True,
+                        "clickThroughUrl": {
+                            "defaultLandingPage": False,
+                            "customClickThroughUrl": "https://www.test.com",
+                        },
+                    }
                 ]
             },
         }
     }
     with mock.patch(
         "adspace_agent.tools.cm360_trafficking.helpers.list_cm_creatives",
-        return_value=[{"name": "TEST_ACG~300x250", "id": "999123"}],
+        return_value=[
+            {
+                "name": "TEST_ACG~300x250",
+                "id": "999123",
+                "exitCustomEvents": [{"id": "exit_123"}],
+            }
+        ],
     ):
         helpers._resolve_creative_ids(  # ruff: ignore[private-member-access]
             ads=ads,
@@ -73,12 +86,18 @@ def test_resolve_creative_ids() -> None:
             campaign_id="30535365",
             tool_context=None,
         )
-    assert (
-        ads["Test Ad"]["creativeRotation"]["creativeAssignments"][0][
-            "creativeId"
-        ]
-        == "999123"
-    )
+    ca = ads["Test Ad"]["creativeRotation"]["creativeAssignments"][0]
+    assert ca["creativeId"] == "999123"
+    assert ca["richMediaExitOverrides"] == [
+        {
+            "exitId": "exit_123",
+            "enabled": True,
+            "clickThroughUrl": {
+                "defaultLandingPage": False,
+                "customClickThroughUrl": "https://www.test.com",
+            },
+        }
+    ]
 
 
 def test_resolve_and_build_operations_with_existing_entities() -> None:
@@ -439,3 +458,191 @@ def test_diff_placement_aligns_pricing_periods() -> None:
             "rateOrCostNanos": "5000000000",
         }
     ]
+
+
+def test_diff_ad_creative_rotation_and_click_through_url() -> None:
+    """Tests _diff_ad detects creativeRotation and clickThroughUrl diffs."""
+    sheet_ad = {
+        "name": "Test Ad A",
+        "type": "AD_SERVING_STANDARD_AD",
+        "startTime": "2026-11-03T00:00:00Z",
+        "endTime": "2026-11-20T00:00:00Z",
+        "creativeRotation": {
+            "type": "CREATIVE_ROTATION_TYPE_RANDOM",
+            "weightCalculationStrategy": "WEIGHT_STRATEGY_CUSTOM",
+            "creativeAssignments": [
+                {
+                    "creativeId": "258745636",
+                    "active": True,
+                    "weight": 100,
+                    "clickThroughUrl": {
+                        "defaultLandingPage": False,
+                        "customClickThroughUrl": "http://google.com",
+                    },
+                }
+            ],
+        },
+    }
+    cm_ad_optimized_default_lp = {
+        "name": "Test Ad A",
+        "type": "AD_SERVING_STANDARD_AD",
+        "startTime": "2026-11-03T00:00:00.000Z",
+        "endTime": "2026-11-20T00:00:00.000Z",
+        "creativeRotation": {
+            "type": "CREATIVE_ROTATION_TYPE_RANDOM",
+            "weightCalculationStrategy": "WEIGHT_STRATEGY_OPTIMIZED",
+            "creativeAssignments": [
+                {
+                    "creativeId": "258745636",
+                    "active": True,
+                    "clickThroughUrl": {
+                        "defaultLandingPage": True,
+                        "computedClickThroughUrl": "http://google.com",
+                    },
+                }
+            ],
+        },
+    }
+    patch_payload, diff_fields = helpers._diff_ad(  # ruff: ignore[private-member-access]
+        sheet_ad=sheet_ad,
+        cm_ad=cm_ad_optimized_default_lp,
+    )
+    assert "creativeRotation" in diff_fields
+    assert "creative_level_clickThroughUrl" in diff_fields
+    assert patch_payload["creativeRotation"] == sheet_ad["creativeRotation"]
+
+    cm_ad_matching = {
+        "name": "Test Ad A",
+        "type": "AD_SERVING_STANDARD_AD",
+        "startTime": "2026-11-03T00:00:00.000Z",
+        "endTime": "2026-11-20T00:00:00.000Z",
+        "creativeRotation": {
+            "type": "CREATIVE_ROTATION_TYPE_RANDOM",
+            "weightCalculationStrategy": "WEIGHT_STRATEGY_CUSTOM",
+            "creativeAssignments": [
+                {
+                    "creativeId": "258745636",
+                    "active": True,
+                    "weight": 100,
+                    "clickThroughUrl": {
+                        "defaultLandingPage": False,
+                        "customClickThroughUrl": "http://google.com",
+                        "computedClickThroughUrl": "http://google.com",
+                    },
+                }
+            ],
+        },
+    }
+    patch_payload_match, diff_fields_match = helpers._diff_ad(  # ruff: ignore[private-member-access]
+        sheet_ad=sheet_ad,
+        cm_ad=cm_ad_matching,
+    )
+    assert diff_fields_match == []
+    assert patch_payload_match == {}
+
+
+def test_diff_ad_rich_media_exit_overrides() -> None:
+    """Tests _diff_ad handles richMediaExitOverrides for HTML5 creatives."""
+    sheet_ad = {
+        "name": "Test Ad B",
+        "type": "AD_SERVING_STANDARD_AD",
+        "creativeRotation": {
+            "type": "CREATIVE_ROTATION_TYPE_RANDOM",
+            "weightCalculationStrategy": "WEIGHT_STRATEGY_CUSTOM",
+            "creativeAssignments": [
+                {
+                    "creativeId": "258745636",
+                    "active": True,
+                    "weight": 66,
+                    "clickThroughUrl": {
+                        "defaultLandingPage": False,
+                        "customClickThroughUrl": "https://www.test.com?utm_medium=test",
+                    },
+                }
+            ],
+        },
+    }
+    cm_ad_with_default_exit = {
+        "name": "Test Ad B",
+        "type": "AD_SERVING_STANDARD_AD",
+        "creativeRotation": {
+            "type": "CREATIVE_ROTATION_TYPE_RANDOM",
+            "weightCalculationStrategy": "WEIGHT_STRATEGY_CUSTOM",
+            "creativeAssignments": [
+                {
+                    "creativeId": "258745636",
+                    "active": True,
+                    "weight": 66,
+                    "clickThroughUrl": {
+                        "defaultLandingPage": False,
+                        "customClickThroughUrl": "https://www.test.com?utm_medium=test",
+                        "computedClickThroughUrl": "https://www.test.com?utm_medium=test",
+                    },
+                    "richMediaExitOverrides": [
+                        {
+                            "exitId": "103788887",
+                            "enabled": True,
+                            "clickThroughUrl": {
+                                "defaultLandingPage": True,
+                                "computedClickThroughUrl": "http://google.com",
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    patch_payload, diff_fields = helpers._diff_ad(  # ruff: ignore[private-member-access]
+        sheet_ad=sheet_ad,
+        cm_ad=cm_ad_with_default_exit,
+    )
+    assert "creative_level_clickThroughUrl" in diff_fields
+    ca_patch = patch_payload["creativeRotation"]["creativeAssignments"][0]
+    assert ca_patch["richMediaExitOverrides"] == [
+        {
+            "exitId": "103788887",
+            "enabled": True,
+            "clickThroughUrl": {
+                "defaultLandingPage": False,
+                "customClickThroughUrl": "https://www.test.com?utm_medium=test",
+            },
+        }
+    ]
+
+    cm_ad_matching_exit = {
+        "name": "Test Ad B",
+        "type": "AD_SERVING_STANDARD_AD",
+        "creativeRotation": {
+            "type": "CREATIVE_ROTATION_TYPE_RANDOM",
+            "weightCalculationStrategy": "WEIGHT_STRATEGY_CUSTOM",
+            "creativeAssignments": [
+                {
+                    "creativeId": "258745636",
+                    "active": True,
+                    "weight": 66,
+                    "clickThroughUrl": {
+                        "defaultLandingPage": False,
+                        "customClickThroughUrl": "https://www.test.com?utm_medium=test",
+                        "computedClickThroughUrl": "https://www.test.com?utm_medium=test",
+                    },
+                    "richMediaExitOverrides": [
+                        {
+                            "exitId": "103788887",
+                            "enabled": True,
+                            "clickThroughUrl": {
+                                "defaultLandingPage": False,
+                                "customClickThroughUrl": "https://www.test.com?utm_medium=test",
+                                "computedClickThroughUrl": "https://www.test.com?utm_medium=test",
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    patch_payload_match, diff_fields_match = helpers._diff_ad(  # ruff: ignore[private-member-access]
+        sheet_ad=sheet_ad,
+        cm_ad=cm_ad_matching_exit,
+    )
+    assert diff_fields_match == []
+    assert patch_payload_match == {}

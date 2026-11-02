@@ -16,3 +16,4 @@ adspace_agent_tmp*
 requirements.txt
 sessions.db
 skills/**
+.vscode

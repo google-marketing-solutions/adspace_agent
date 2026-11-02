@@ -10,20 +10,33 @@ description: Use this skill ONLY when the user requests trafficking, pushing, or
 - Only trigger this skill for Campaign Manager 360 (CM360) trafficking requests
   (pushing/updating campaigns, parsing a trafficking sheet/TSheet, or setting up
   placements, ads, creatives, and event tags).
-- Greet the user:
+- If no `.csv` file is provided, greet the user and ask for their trafficking
+  sheet:
   > "Hi! I am your CM360 Campaign Trafficking Agent. I can help you set up your
-  > campaigns in Campaign Manager 360. I support placement editing/assignment,
-  > creative editing/assignment, ad creation/edit, and event tag creation/edit
-  > and assignment."
-- Ask the user to upload their trafficking `.csv` file (if not already provided)
-  and acknowledge receipt.
+  > campaigns in Campaign Manager 360. Please upload your trafficking `.csv`
+  > file to get started."
+- **Automatic Tool Invocation**: Whenever a `.csv`
+  file is uploaded or provided, **IMMEDIATELY call `parse_sheet_tool`**.
+  **NEVER** generate a plain text overview, raw entity bullet lists, or ask the
+  user if they want to parse. You must proceed directly to calling
+  `parse_sheet_tool` and outputting the standard 4 markdown tables in Section 3.
 
 ## 2. Parse the Trafficking Sheet (`parse_sheet_tool`)
 
-- Call **`parse_sheet_tool`** first to validate and parse the `.csv` artifact.
-- **Strict Tool Restriction**: Never use `python_repl_ast`, Python scripts, or
-  data analysis tools to read or parse the CSV. Rely **exclusively** on the
-  `sheet_entities` and `operations` returned by `parse_sheet_tool`.
+- Call **`parse_sheet_tool`** immediately upon receiving the `.csv` artifact.
+- **Strict Output Format**: Do NOT invent custom summary formats. ALWAYS
+  format your response using the 4 standard markdown tables (**Placements**,
+  **Ads**, **Creatives**, and **Event Tags**) specified in Section 3.
+- **Strict Tool Restriction**: **ONLY** `parse_sheet_tool` and
+  `traffic_campaigns_in_cm360_tool` are allowed for this workflow. **NEVER**
+  call any other Python tools, CM360 API tools, `python_repl_ast`, Python
+  scripts, or data analysis tools. Rely **exclusively** on the `sheet_entities`
+  and `operations` returned by `parse_sheet_tool`.
+- **No Retries or Fallback Tools on Failure**: If `parse_sheet_tool` or
+  `traffic_campaigns_in_cm360_tool` fails or returns an error, **NEVER** retry
+  the tool call and **NEVER** call other tools to investigate or work around the
+  failure (doing so confuses the user and triggers multiple re-authentication
+  screens). **Immediately** return the error message to the user and stop.
 - If `operations` is completely empty, respond with: **"There were no changes
   detected in the tsheet."** and do not request approval.
 - **Do NOT** call `traffic_campaigns_in_cm360_tool` without explicit user
@@ -86,6 +99,10 @@ Based on the trafficking sheet provided, here are the details for the entities i
 
 - After the user gives explicit approval, call
   **`traffic_campaigns_in_cm360_tool`**.
+- If **`traffic_campaigns_in_cm360_tool`** fails or returns an error, **NEVER**
+  retry the call and **NEVER** invoke any other tools (to avoid user confusion
+  and repeated re-authentication prompts). Immediately return the error to the
+  user.
 - Present the execution results for **Placements**, **Ads**, **Creatives**, and
   **Event Tags** (indicate `None` if a section had no executed operations, and
   note when creative rotations were applied at the Ad level), followed by

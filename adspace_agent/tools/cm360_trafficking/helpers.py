@@ -17,6 +17,7 @@ import io
 import json
 import logging
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
@@ -153,7 +154,34 @@ def _resolve_creative_ids(
         ):
             name = assignment.get("creativeId")
             if name in creative_name_to_id:
-                assignment["creativeId"] = creative_name_to_id[name]
+                clean_name = str(name).strip()
+                assignment["creativeId"] = creative_name_to_id[clean_name]
+                cm_creative = existing_creatives_by_name.get(clean_name, {})
+                s_url = (
+                    assignment
+                    .get("clickThroughUrl", {})
+                    .get("customClickThroughUrl", "")
+                    .strip()
+                )
+                # For HTML5 creatives, populate exit overrides so CM360
+                # sets the custom URL per clickTag on create. Video and audio
+                # creatives have no exitCustomEvents, leaving
+                # richMediaExitOverrides unset and preserving standard
+                # assignment-level clickThroughUrl.
+                exit_events = cm_creative.get("exitCustomEvents", [])
+                if s_url and exit_events:
+                    assignment["richMediaExitOverrides"] = [
+                        {
+                            "exitId": str(ev["id"]).strip(),
+                            "enabled": True,
+                            "clickThroughUrl": {
+                                "defaultLandingPage": False,
+                                "customClickThroughUrl": s_url,
+                            },
+                        }
+                        for ev in exit_events
+                        if ev.get("id")
+                    ]
             else:
                 msg = f"Creative '{name}' not found in Campaign Manager 360."
                 raise ValueError(msg)
@@ -181,7 +209,7 @@ def _extract_assigned_placement_ids(
     return assigned_ids
 
 
-def _diff_placement(  # ruff: ignore[too-many-locals]
+def _diff_placement(  # ruff: ignore[too-many-locals, too-many-statements]
     sheet_placement: dict[str, Any],
     cm_placement: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
@@ -242,6 +270,13 @@ def _diff_placement(  # ruff: ignore[too-many-locals]
                     "endDate": new_end,
                 }
             ]
+
+        # In CM360, testingStartDate must be <= startDate.
+        # When startDate is moved earlier, testingStartDate must also be moved.
+        cm_testing_start = format_date(cm_pricing.get("testingStartDate"))
+        if new_start and (not cm_testing_start or cm_testing_start > new_start):
+            pricing_patch["testingStartDate"] = new_start
+            diff_fields.append("pricingSchedule.testingStartDate")
 
     if pricing_patch:
         patch_payload["pricingSchedule"] = pricing_patch
@@ -305,6 +340,96 @@ def _diff_creative(
     return patch_payload, diff_fields
 
 
+def _has_creative_assignment_url_diff(
+    s_ca: dict[str, Any],
+    c_ca: dict[str, Any],
+) -> bool:
+    """Checks if creative assignment clickThroughUrl or exit overrides differ.
+
+    Args:
+        s_ca: Sheet creative assignment dictionary.
+        c_ca: Existing CM360 creative assignment dictionary.
+
+    Returns:
+        True if there is a URL difference requiring an update, False otherwise.
+    """
+    s_url = (
+        s_ca.get("clickThroughUrl", {}).get("customClickThroughUrl", "").strip()
+    )
+    if not s_url:
+        return False
+
+    c_ctu = c_ca.get("clickThroughUrl", {})
+    if c_ctu.get("defaultLandingPage", True):
+        return True
+
+    c_url = (
+        c_ctu.get("customClickThroughUrl")
+        or c_ctu.get("computedClickThroughUrl")
+        or ""
+    ).strip()
+    if s_url != c_url:
+        return True
+
+    for ov in c_ca.get("richMediaExitOverrides", []):
+        ov_ctu = ov.get("clickThroughUrl", {})
+        if ov_ctu.get("defaultLandingPage", True):
+            return True
+        ov_url = (
+            ov_ctu.get("customClickThroughUrl")
+            or ov_ctu.get("computedClickThroughUrl")
+            or ""
+        ).strip()
+        if ov_url != s_url:
+            return True
+
+    return False
+
+
+def _build_patched_creative_assignments(
+    s_assignments: list[dict[str, Any]],
+    c_ca_map: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Builds patched creative assignments preserving richMediaExitOverrides.
+
+    Args:
+        s_assignments: List of creative assignments from the sheet.
+        c_ca_map: Mapping from creativeId to existing CM360 creative assignment.
+
+    Returns:
+        List of creative assignments with populated richMediaExitOverrides.
+    """
+    new_assignments = []
+    for s_ca_item in s_assignments:
+        cid = str(s_ca_item.get("creativeId", "")).strip()
+        ca_dict = dict(s_ca_item)
+        c_ca_match = c_ca_map.get(cid, {})
+        s_url_val = (
+            s_ca_item
+            .get("clickThroughUrl", {})
+            .get("customClickThroughUrl", "")
+            .strip()
+        )
+        c_overrides_list = c_ca_match.get("richMediaExitOverrides", [])
+        # For HTML5 banners, override exit tags so CM360 does not revert to
+        # the campaign default landing page URL.
+        if s_url_val and c_overrides_list:
+            ca_dict["richMediaExitOverrides"] = [
+                {
+                    "exitId": ov["exitId"],
+                    "enabled": True,
+                    "clickThroughUrl": {
+                        "defaultLandingPage": False,
+                        "customClickThroughUrl": s_url_val,
+                    },
+                }
+                for ov in c_overrides_list
+                if "exitId" in ov
+            ]
+        new_assignments.append(ca_dict)
+    return new_assignments
+
+
 def _diff_ad(  # ruff: ignore[complex-structure, too-many-branches, too-many-locals, too-many-statements]
     sheet_ad: dict[str, Any],
     cm_ad: dict[str, Any],
@@ -337,13 +462,36 @@ def _diff_ad(  # ruff: ignore[complex-structure, too-many-branches, too-many-loc
     # 1. Diff ad dates
     sheet_start = normalize_iso_datetime(sheet_ad.get("startTime"))
     cm_start = normalize_iso_datetime(cm_ad.get("startTime"))
-    if sheet_start and sheet_start != cm_start:
+    ad_tz_name = sheet_ad.get("timeZone")
+    if sheet_start and cm_start:
+        if ad_tz_name:
+            tz = ZoneInfo(ad_tz_name)
+            sheet_start_date = pd.to_datetime(sheet_start).tz_convert(tz).date()
+            cm_start_date = pd.to_datetime(cm_start).tz_convert(tz).date()
+            if sheet_start_date != cm_start_date:
+                patch_payload["startTime"] = sheet_start
+                diff_fields.append("startTime")
+        elif sheet_start != cm_start:
+            patch_payload["startTime"] = sheet_start
+            diff_fields.append("startTime")
+    elif sheet_start and sheet_start != cm_start:
         patch_payload["startTime"] = sheet_start
         diff_fields.append("startTime")
 
     sheet_end = normalize_iso_datetime(sheet_ad.get("endTime"))
     cm_end = normalize_iso_datetime(cm_ad.get("endTime"))
-    if sheet_end and sheet_end != cm_end:
+    if sheet_end and cm_end:
+        if ad_tz_name:
+            tz = ZoneInfo(ad_tz_name)
+            sheet_end_date = pd.to_datetime(sheet_end).tz_convert(tz).date()
+            cm_end_date = pd.to_datetime(cm_end).tz_convert(tz).date()
+            if sheet_end_date != cm_end_date:
+                patch_payload["endTime"] = sheet_end
+                diff_fields.append("endTime")
+        elif sheet_end != cm_end:
+            patch_payload["endTime"] = sheet_end
+            diff_fields.append("endTime")
+    elif sheet_end and sheet_end != cm_end:
         patch_payload["endTime"] = sheet_end
         diff_fields.append("endTime")
 
@@ -406,13 +554,11 @@ def _diff_ad(  # ruff: ignore[complex-structure, too-many-branches, too-many-loc
     # 6. Diff creativeRotation (only for other ads)
     s_ad_type = sheet_ad.get("type")
     if s_ad_type != "AD_SERVING_CLICK_TRACKER":
-        s_assignments = sheet_ad.get("creativeRotation", {}).get(
-            "creativeAssignments", []
-        )
+        s_rot = sheet_ad.get("creativeRotation", {})
+        s_assignments = s_rot.get("creativeAssignments", [])
         if s_assignments:
-            c_assignments = cm_ad.get("creativeRotation", {}).get(
-                "creativeAssignments", []
-            )
+            c_rot = cm_ad.get("creativeRotation", {})
+            c_assignments = c_rot.get("creativeAssignments", [])
             s_ca_map = {
                 str(ca.get("creativeId", "")).strip(): ca
                 for ca in s_assignments
@@ -426,6 +572,17 @@ def _diff_ad(  # ruff: ignore[complex-structure, too-many-branches, too-many-loc
 
             rotation_changed = False
             creative_rotation_url_changed = False
+
+            s_rot_type = str(s_rot.get("type", "")).strip()
+            c_rot_type = str(c_rot.get("type", "")).strip()
+            s_strategy = str(s_rot.get("weightCalculationStrategy", "")).strip()
+            c_strategy = str(c_rot.get("weightCalculationStrategy", "")).strip()
+
+            if (s_rot_type and s_rot_type != c_rot_type) or (
+                s_strategy and s_strategy != c_strategy
+            ):
+                rotation_changed = True
+
             if set(s_ca_map.keys()) != set(c_ca_map.keys()):
                 rotation_changed = True
 
@@ -434,29 +591,27 @@ def _diff_ad(  # ruff: ignore[complex-structure, too-many-branches, too-many-loc
                 c_ca = c_ca_map[cid]
                 s_weight = s_ca.get("weight")
                 c_weight = c_ca.get("weight")
-                # When there is 1 creative in the rotation
-                # weight is not assigned in CM and it's None,
-                # add this or this would always lead to unnecessary diffs.
-                if len(c_ca_map) > 1 and int(s_weight) != int(c_weight):
+                if (
+                    (not s_strategy or s_strategy == "WEIGHT_STRATEGY_CUSTOM")
+                    and s_weight is not None
+                    and (c_weight is None or int(s_weight) != int(c_weight))
+                ):
                     rotation_changed = True
 
-                s_url = (
-                    s_ca
-                    .get("clickThroughUrl", {})
-                    .get("customClickThroughUrl", "")
-                    .strip()
-                )
-                c_url = (
-                    c_ca
-                    .get("clickThroughUrl", {})
-                    .get("customClickThroughUrl", "")
-                    .strip()
-                )
-                if s_url and s_url != c_url:
+                if _has_creative_assignment_url_diff(s_ca, c_ca):
                     creative_rotation_url_changed = True
 
             if rotation_changed or creative_rotation_url_changed:
-                patch_payload["creativeRotation"] = sheet_ad["creativeRotation"]
+                rot_payload = dict(sheet_ad["creativeRotation"])
+                # Preserves and updates richMediaExitOverrides to prevent CM360
+                # from reverting HTML5 creatives to campaign default URLs.
+                rot_payload["creativeAssignments"] = (
+                    _build_patched_creative_assignments(
+                        s_assignments=s_assignments,
+                        c_ca_map=c_ca_map,
+                    )
+                )
+                patch_payload["creativeRotation"] = rot_payload
                 if rotation_changed:
                     diff_fields.append("creativeRotation")
                 if (

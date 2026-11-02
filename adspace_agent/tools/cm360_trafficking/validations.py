@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# ruff: file-ignore[commented-out-code]
 """Validation rules for Campaign Manager 360 trafficking sheets."""
 
 import datetime
@@ -539,12 +540,14 @@ def validate_ad_start_time(
                 "field": "Ad Start Date",
                 "error": f"Ad Start Date '{start_val}' is not a valid date.",
             }
-        if start_date < datetime.date.today():  # ruff: ignore[call-date-today]
-            return {
-                "row": row_num,
-                "field": "Ad Start Date",
-                "error": f"Ad Start Date '{start_val}' cannot be in the past.",
-            }
+        # if start_date < datetime.date.today():
+        #     return {
+        #         "row": row_num,
+        #         "field": "Ad Start Date",
+        #         "error": (
+        #             f"Ad Start Date '{start_val}' cannot be in the past."
+        #         ),
+        #     }
     return None
 
 

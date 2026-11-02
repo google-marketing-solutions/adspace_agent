@@ -220,3 +220,51 @@ def test_cm360_actions_grouping_and_list_helpers() -> None:
             )
             == 1
         )
+
+
+def test_group_ads_creative_rotation_and_click_through_url() -> None:
+    """Tests _group_ads sets creativeRotation and defaultLandingPage=False."""
+    expected_weight = 60
+    df_default = pd.DataFrame([
+        {
+            "Placement Name": "P1",
+            "Ad Name": "Ad1",
+            "Ad Start Date": "2026-01-01",
+            "Ad End Date": "2026-02-01",
+            "Ad Type": "AD_SERVING_STANDARD_AD",
+            "Creative Name": "C1",
+            "Creative Rotation": "60%",
+            "Final Trafficking URL": "https://example.com/landing",
+        }
+    ])
+    ads_default = actions._group_ads(  # ruff: ignore[private-member-access]
+        df_default, advertiser_id="1", campaign_id="2"
+    )
+    rot_default = ads_default["Ad1"]["creativeRotation"]
+    assert rot_default["type"] == "CREATIVE_ROTATION_TYPE_RANDOM"
+    assert rot_default["weightCalculationStrategy"] == "WEIGHT_STRATEGY_CUSTOM"
+    assert rot_default["creativeAssignments"][0]["weight"] == expected_weight
+    assert rot_default["creativeAssignments"][0]["clickThroughUrl"] == {
+        "defaultLandingPage": False,
+        "customClickThroughUrl": "https://example.com/landing",
+    }
+
+    df_override = pd.DataFrame([
+        {
+            "Placement Name": "P1",
+            "Ad Name": "Ad2",
+            "Ad Start Date": "2026-01-01",
+            "Ad End Date": "2026-02-01",
+            "Ad Type": "AD_SERVING_CLICK_TRACKER",
+            "Creative Name": "",
+            "Ad Dynamic Click Tracker": "TRUE",
+            "Final Trafficking URL": "https://example.com/click",
+        }
+    ])
+    ads_override = actions._group_ads(  # ruff: ignore[private-member-access]
+        df_override, advertiser_id="1", campaign_id="2"
+    )
+    assert ads_override["Ad2"]["clickThroughUrl"] == {
+        "defaultLandingPage": False,
+        "customClickThroughUrl": "https://example.com/click",
+    }

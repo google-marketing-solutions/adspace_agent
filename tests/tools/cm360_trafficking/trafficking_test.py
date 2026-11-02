@@ -133,18 +133,18 @@ def make_test_csv(**overrides: str) -> str:
         "base_url": "https://www.test.com",
         "final_url": "https://www.test.com?utm_medium=test",
         "placement_status": "PLACEMENT_STATUS_ACTIVE",
+        "time_zone": "America/New_York",
     }
     defaults.update(overrides)
 
     r1 = (
-        "Digitas-DFA 609,Profile ID,Advertiser ID,Campaign ID,Campaign Name"
-        + "," * 41
-        + "\n"
+        "Digitas-DFA 609,Profile ID,Advertiser ID,Campaign ID,Campaign Name,"
+        "Time Zone" + "," * 40 + "\n"
     )
     r2 = (
         f",{defaults['profile_id']},{defaults['advertiser_id']},"
-        f"{defaults['campaign_id']},{defaults['campaign_name']}"
-        + "," * 41
+        f"{defaults['campaign_id']},{defaults['campaign_name']},{defaults['time_zone']}"
+        + "," * 40
         + "\n"
     )
     r3 = (

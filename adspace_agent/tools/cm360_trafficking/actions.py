@@ -24,6 +24,7 @@ import pandas as pd
 from .utilities import extract_site_identifier
 from .utilities import format_date
 from .utilities import format_date_time
+from .utilities import normalize_iso_datetime
 from .utilities import parse_size
 from .utilities import parse_weight
 
@@ -106,6 +107,7 @@ def _group_placements(
                 "pricingSchedule": {
                     "startDate": format_date(placement_start),
                     "endDate": format_date(placement_end),
+                    "testingStartDate": format_date(placement_start),
                     "pricingType": pricing_type,
                 },
                 "tagFormats": tag_formats,
@@ -307,6 +309,18 @@ def _group_ads(  # ruff: ignore[complex-structure, too-many-branches, too-many-l
         ):
             ad_type_val = str(row["Ad Type"]).strip()
 
+        ad_tz = str(row.get("Time Zone") or "").strip()
+        start_time_val = (
+            format_date_time(ad_start, time_zone=ad_tz, is_end_date=False)
+            if ad_tz
+            else normalize_iso_datetime(ad_start)
+        )
+        end_time_val = (
+            format_date_time(ad_end, time_zone=ad_tz, is_end_date=True)
+            if ad_tz
+            else normalize_iso_datetime(ad_end)
+        )
+
         if ad_name not in ads:
             ad_payload = {
                 "name": ad_name,
@@ -314,21 +328,52 @@ def _group_ads(  # ruff: ignore[complex-structure, too-many-branches, too-many-l
                 "advertiserId": advertiser_id,
                 "campaignId": campaign_id,
                 "type": ad_type_val,
-                "startTime": format_date_time(ad_start),
-                "endTime": format_date_time(ad_end),
+                "startTime": start_time_val,
+                "endTime": end_time_val,
                 "placementAssignments": [],
                 "eventTagOverrides": [],
             }
+            if ad_tz:
+                ad_payload["timeZone"] = ad_tz
             if ad_type_val == "AD_SERVING_CLICK_TRACKER":
                 val = row.get("Ad Dynamic Click Tracker")
                 val_str = str(val).strip().upper() if not pd.isna(val) else ""
                 ad_payload["dynamicClickTracker"] = val_str == "TRUE"
                 if creative_url:
                     ad_payload["clickThroughUrl"] = {
+                        "defaultLandingPage": False,
                         "customClickThroughUrl": creative_url,
                     }
             else:
+                # Default to CREATIVE_ROTATION_TYPE_RANDOM and
+                # WEIGHT_STRATEGY_CUSTOM when these columns are absent or empty
+                # in the sheet, ensuring custom creative weights are applied
+                # while remaining backwards-compatible if added later.
+                rotation_type = "CREATIVE_ROTATION_TYPE_RANDOM"
+                if (
+                    "Creative Rotation Type" in row
+                    and not pd.isna(row["Creative Rotation Type"])
+                    and str(row["Creative Rotation Type"]).strip()
+                ):
+                    rotation_type = (
+                        str(row["Creative Rotation Type"]).strip().upper()
+                    )
+
+                weight_strategy = "WEIGHT_STRATEGY_CUSTOM"
+                if (
+                    "Creative Rotation Weight Strategy" in row
+                    and not pd.isna(row["Creative Rotation Weight Strategy"])
+                    and str(row["Creative Rotation Weight Strategy"]).strip()
+                ):
+                    weight_strategy = (
+                        str(row["Creative Rotation Weight Strategy"])
+                        .strip()
+                        .upper()
+                    )
+
                 ad_payload["creativeRotation"] = {
+                    "type": rotation_type,
+                    "weightCalculationStrategy": weight_strategy,
                     "creativeAssignments": [],
                 }
             if ad_type_val in {
@@ -382,6 +427,7 @@ def _group_ads(  # ruff: ignore[complex-structure, too-many-branches, too-many-l
                 }
                 if creative_url:
                     creative_assignment["clickThroughUrl"] = {
+                        "defaultLandingPage": False,
                         "customClickThroughUrl": creative_url,
                     }
                 creative_assignments.append(creative_assignment)
@@ -574,7 +620,9 @@ def list_cm_creatives(
             "maxResults": 1000,
             "active": True,
             "archived": False,
-            "fields": "nextPageToken,creatives(id,name,size,type,active)",
+            "fields": (
+                "nextPageToken,creatives(id,name,size,type,active,exitCustomEvents)"
+            ),
         }
         if advertiser_id:
             kwargs["advertiserId"] = advertiser_id

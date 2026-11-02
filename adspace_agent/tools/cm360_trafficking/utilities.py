@@ -13,8 +13,11 @@
 # limitations under the License.
 """Utility functions for Campaign Manager 360 trafficking operations."""
 
+import datetime
 import io
 import logging
+from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfoNotFoundError
 
 from google.adk.tools.tool_context import ToolContext
 from google.cloud import storage
@@ -64,22 +67,61 @@ def format_date(val: object) -> str | None:
         return str(val).split()[0]
 
 
-def format_date_time(val: object) -> str | None:
-    """Formats datetime values into an ISO-8601 date-time string.
+def format_date_time(
+    val: object,
+    time_zone: str,
+    *,
+    is_end_date: bool = False,
+) -> str | None:
+    """Formats datetime values into an ISO-8601 UTC date-time string.
 
     Args:
         val: The raw datetime value to format.
+        time_zone: IANA time zone string (e.g. 'America/New_York').
+            Localizes the date to this time zone before converting to UTC.
+        is_end_date: Whether this represents an end date. If True and no time
+            is explicitly given, sets time to 23:59:59. Otherwise sets to
+            00:00:00.
 
     Returns:
         The formatted date-time string in ISO-8601 format, or None if missing.
+
+    Raises:
+        ValueError: If time_zone is empty or not a valid IANA time zone.
     """
-    if pd.isna(val):
+    if pd.isna(val) or val is None:
         return None
+    val_str = str(val).strip()
+    if not val_str or val_str.lower() in {"none", "nan", "null"}:
+        return None
+
+    if not time_zone or not str(time_zone).strip():
+        msg = "Time zone must be provided and cannot be empty."
+        raise ValueError(msg)
+
+    tz = ZoneInfo(str(time_zone).strip())
+
     try:
-        parsed = pd.to_datetime(str(val))
-        return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+        parsed = pd.to_datetime(val_str)
     except (ValueError, TypeError, KeyError):
-        return str(val)
+        return val_str
+
+    # If already formatted with 'T' and timezone indicator
+    if "T" in val_str and (
+        "Z" in val_str or "+" in val_str or "-" in val_str[10:]
+    ):
+        if parsed.tzinfo is None:
+            parsed = parsed.tz_localize("UTC")
+        else:
+            parsed = parsed.tz_convert("UTC")
+        return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    time_part = (
+        datetime.time(23, 59, 59) if is_end_date else datetime.time(0, 0, 0)
+    )
+    local_dt = datetime.datetime.combine(parsed.date(), time_part, tzinfo=tz)
+    utc_dt = local_dt.astimezone(datetime.UTC)
+    return utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def normalize_iso_datetime(val: object) -> str | None:
@@ -289,7 +331,7 @@ async def load_raw_dataframe(
     return df_raw, target_filename
 
 
-def prepare_data(  # ruff: ignore[complex-structure]
+def prepare_data(  # ruff: ignore[complex-structure, too-many-branches, too-many-statements]
     df_raw: pd.DataFrame,
 ) -> tuple[pd.DataFrame, str, str, str, str | None]:
     """Extracts metadata from header rows and cleans the trafficking data.
@@ -326,8 +368,9 @@ def prepare_data(  # ruff: ignore[complex-structure]
             return None
         return val_str.removesuffix(".0")
 
-    # Extract Profile ID, Advertiser ID, Campaign ID, and Campaign Name
-    # from the first two rows (global config)
+    time_zone = ""
+    # Extract Profile ID, Advertiser ID, Campaign ID, Campaign Name,
+    # and Time Zone from the first two rows (global config)
     for row_idx in range(len(df_raw) - 1):
         header_row = df_raw.iloc[row_idx]
         values_row = df_raw.iloc[row_idx + 1]
@@ -345,6 +388,12 @@ def prepare_data(  # ruff: ignore[complex-structure]
                     val_str = str(val).strip()
                     if val_str.lower() not in {"", "none", "nan", "null"}:
                         campaign_name = val_str
+            elif "time zone" in col_str or "timezone" in col_str:
+                val = values_row.iloc[col_idx]
+                if val is not None and not pd.isna(val):
+                    val_str = str(val).strip()
+                    if val_str.lower() not in {"", "none", "nan", "null"}:
+                        time_zone = val_str
         break
 
     if not profile_id:
@@ -368,6 +417,33 @@ def prepare_data(  # ruff: ignore[complex-structure]
 
     # Clean and parse data rows
     df = clean_dataframe(df_raw)
+    if "Time Zone" in df.columns:
+        valid_tz_series = df["Time Zone"].dropna()
+        if not time_zone and not valid_tz_series.empty:
+            time_zone = str(valid_tz_series.iloc[0]).strip()
+        if time_zone:
+            df["Time Zone"] = df["Time Zone"].fillna(time_zone)
+    elif time_zone:
+        df["Time Zone"] = time_zone
+    else:
+        df["Time Zone"] = ""
+
+    if not time_zone:
+        msg = (
+            "Missing required campaign metadata field: Time Zone in the"
+            " first two rows or as a column in the sheet."
+        )
+        raise ValueError(msg)
+
+    try:
+        ZoneInfo(time_zone)
+    except (ZoneInfoNotFoundError, ValueError, KeyError) as exc:
+        msg = (
+            f"Invalid Time Zone '{time_zone}'. Must be a valid IANA time zone"
+            " identifier (e.g. 'America/New_York', 'America/Chicago',"
+            " 'America/Los_Angeles')."
+        )
+        raise ValueError(msg) from exc
 
     return df, profile_id, advertiser_id, campaign_id, campaign_name
 

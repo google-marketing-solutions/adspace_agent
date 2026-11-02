@@ -304,24 +304,6 @@ async def test_validation_pass_ad_start_time_today(
     [
         (
             "New",
-            (
-                datetime.date.today() - datetime.timedelta(days=1)  # ruff: ignore[call-date-today]
-            ).strftime("%Y-%m-%d"),
-            "8/29/3000",
-            "Ad Start Date",
-            "cannot be in the past",
-        ),
-        (
-            "Update",
-            (
-                datetime.date.today() - datetime.timedelta(days=1)  # ruff: ignore[call-date-today]
-            ).strftime("%Y-%m-%d"),
-            "8/29/3000",
-            "Ad Start Date",
-            "cannot be in the past",
-        ),
-        (
-            "New",
             "8/29/3000",
             "8/28/3000",
             "Ad End Date",

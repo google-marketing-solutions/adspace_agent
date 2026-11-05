@@ -21,6 +21,7 @@ import pandas as pd
 
 MAX_PLACEMENT_NAME_LENGTH = 512
 MAX_AD_NAME_LENGTH = 256
+ACTIVE_CREATION_STATUSES: set[str] = {"new", "partially_failed", "failed"}
 
 
 def _is_empty(val: str | float | None) -> bool:
@@ -89,7 +90,7 @@ def validate_placement_name(
 
     is_empty = _is_empty(placement_name)
 
-    if status == "new" and is_empty:
+    if status in ACTIVE_CREATION_STATUSES and is_empty:
         return {
             "row": row_num,
             "field": "Placement Name",
@@ -97,7 +98,10 @@ def validate_placement_name(
                 "Placement Name is required when Trafficking Status is 'New'."
             ),
         }
-    if status == "new" and len(str(placement_name)) > MAX_PLACEMENT_NAME_LENGTH:
+    if (
+        status in ACTIVE_CREATION_STATUSES
+        and len(str(placement_name)) > MAX_PLACEMENT_NAME_LENGTH
+    ):
         return {
             "row": row_num,
             "field": "Placement Name",
@@ -242,7 +246,7 @@ def validate_payment_source(
 
     is_empty = _is_empty(payment_source)
 
-    if status == "new" and is_empty:
+    if status in ACTIVE_CREATION_STATUSES and is_empty:
         return {
             "row": row_num,
             "field": "Payment Source",
@@ -271,7 +275,7 @@ def validate_compatibility(
         compatibility = row.get("Placement Type")
     is_empty = _is_empty(compatibility)
 
-    if status == "new" and is_empty:
+    if status in ACTIVE_CREATION_STATUSES and is_empty:
         return {
             "row": row_num,
             "field": "Compatibility",
@@ -280,7 +284,7 @@ def validate_compatibility(
             ),
         }
 
-    if status == "new":
+    if status in ACTIVE_CREATION_STATUSES:
         val = str(compatibility).strip().upper()
         if val in {"APP", "APP_INTERSTITIAL"}:
             return {
@@ -327,7 +331,7 @@ def validate_placement_size(
     size = row.get("Placement Size")
     is_empty = _is_empty(size)
 
-    if status == "new" and is_empty:
+    if status in ACTIVE_CREATION_STATUSES and is_empty:
         return {
             "row": row_num,
             "field": "Placement Size",
@@ -363,7 +367,7 @@ def validate_pricing_schedule(
     if _is_empty(pricing_type):
         missing.append("pricingType")
 
-    if status == "new" and missing:
+    if status in ACTIVE_CREATION_STATUSES and missing:
         return {
             "row": row_num,
             "field": "Pricing Schedule",
@@ -389,7 +393,7 @@ def validate_tag_formats(row: pd.Series, row_num: int) -> dict[str, Any] | None:
     tag_formats_val = row.get("Placement Tag Formats")
     is_empty = _is_empty(tag_formats_val)
 
-    if status == "new" and is_empty:
+    if status in ACTIVE_CREATION_STATUSES and is_empty:
         return {
             "row": row_num,
             "field": "Placement Tag Formats",
@@ -399,7 +403,7 @@ def validate_tag_formats(row: pd.Series, row_num: int) -> dict[str, Any] | None:
             ),
         }
 
-    if status == "new":
+    if status in ACTIVE_CREATION_STATUSES:
         allowed_tag_formats = {
             "PLACEMENT_TAG_STANDARD",
             "PLACEMENT_TAG_IFRAME_JAVASCRIPT",
@@ -474,13 +478,16 @@ def validate_ad_name(row: pd.Series, row_num: int) -> dict[str, Any] | None:
     ad_name = row.get("Ad Name")
     is_empty = _is_empty(ad_name)
 
-    if status == "new" and is_empty:
+    if status in ACTIVE_CREATION_STATUSES and is_empty:
         return {
             "row": row_num,
             "field": "Ad Name",
             "error": "Ad Name is required when Trafficking Status is 'New'.",
         }
-    if status == "new" and len(str(ad_name)) > MAX_AD_NAME_LENGTH:
+    if (
+        status in ACTIVE_CREATION_STATUSES
+        and len(str(ad_name)) > MAX_AD_NAME_LENGTH
+    ):
         return {
             "row": row_num,
             "field": "Ad Name",
@@ -650,7 +657,7 @@ def validate_ad_type(row: pd.Series, row_num: int) -> dict[str, Any] | None:
                 " 'Update'."
             ),
         }
-    if status == "new":
+    if status in ACTIVE_CREATION_STATUSES:
         val = str(ad_type).strip().upper()
         if val == "AD_SERVING_DEFAULT_AD":
             return {

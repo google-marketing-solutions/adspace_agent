@@ -15,6 +15,7 @@
 
 import dataclasses
 import json
+import os
 import typing
 from unittest import mock
 
@@ -457,6 +458,7 @@ def test_before_callback_exchanged_credentials() -> None:
         mock_context.state[CREDENTIALS_CACHE_KEY]["refresh_token"]
         == "mock_exchanged_refresh"  # ruff: ignore[hardcoded-password-string]
     )
+    assert "expiry" in mock_context.state[CREDENTIALS_CACHE_KEY]
 
 
 def test_before_callback_request_credential() -> None:
@@ -578,3 +580,30 @@ async def test_traffic_campaigns_in_cm360_tool_execution(monkeypatch) -> None:
             )
         )
         assert res_ok["status"] == "SUCCESS"
+
+
+@pytest.mark.asyncio
+async def test_parse_sheet_tool_clears_cache_on_auth_failure() -> None:
+    """Tests parse_sheet_tool clears cache when auth error occurs."""
+    ctx = MockToolContext("test.csv")
+    ctx.state = {
+        CREDENTIALS_CACHE_KEY: {
+            "token": "expired_token",
+            "refresh_token": None,
+        }
+    }
+    with (
+        mock.patch(
+            "adspace_agent.tools.cm360_trafficking.trafficking.load_raw_dataframe",
+            side_effect=Exception(
+                "The credentials do not contain the necessary fields needed to"
+                " refresh the access token."
+            ),
+        ),
+        mock.patch.dict(os.environ, {"SKILLS_BUCKET_NAME": "test-bucket"}),
+    ):
+        res = json.loads(
+            await trafficking.parse_sheet_tool(typing.cast("typing.Any", ctx))
+        )
+        assert res["status"] == "ERROR"
+        assert ctx.state[CREDENTIALS_CACHE_KEY] is None

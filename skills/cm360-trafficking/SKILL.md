@@ -37,16 +37,23 @@ description: Use this skill ONLY when the user requests trafficking, pushing, or
   the tool call and **NEVER** call other tools to investigate or work around the
   failure (doing so confuses the user and triggers multiple re-authentication
   screens). **Immediately** return the error message to the user and stop.
-- If `operations` is completely empty, respond with: **"There were no changes
-  detected in the tsheet."** and do not request approval.
 - **Do NOT** call `traffic_campaigns_in_cm360_tool` without explicit user
   approval.
 
 ## 3. Present the Parsed Sheet Summary & Request Approval
 
-Build four Markdown tables (**Placements**, **Ads**, **Creatives**, and **Event
-Tags**) from `sheet_entities` (`placements`, `ads`, `creatives`, `event_tags`)
-and `operations`:
+**Mandatory Summary Header**: Every parsed sheet summary (including when no changes are detected) MUST display this metadata block at the very top:
+
+- **Parsed Artifact**: `{artifact_name}`
+- **Profile ID**: `{profile_id}`
+- **Advertiser ID**: `{advertiser_id}`
+- **Campaign ID**: `{campaign_id}`
+- **Campaign Name**: `{campaign_name}`
+- **Time Zone**: `{time_zone}`
+
+If `operations` is completely empty, display the header above followed by: **"There were no changes detected in the tsheet."** and do not request approval.
+
+When operations are present, build four Markdown tables (**Placements**, **Ads**, **Creatives**, and **Event Tags**) from `sheet_entities` (`placements`, `ads`, `creatives`, `event_tags`) and `operations`:
 
 - **`insert` operation**: Operation = `Create`, Changes / Diffs =
   `N/A (New {entity})`.
@@ -58,6 +65,13 @@ and `operations`:
 Use this template:
 
 ```markdown
+- **Parsed Artifact**: {artifact_name}
+- **Profile ID**: {profile_id}
+- **Advertiser ID**: {advertiser_id}
+- **Campaign ID**: {campaign_id}
+- **Campaign Name**: {campaign_name}
+- **Time Zone**: {time_zone}
+
 Based on the trafficking sheet provided, here are the details for the entities in CM360:
 
 ### Placements
@@ -103,13 +117,29 @@ Based on the trafficking sheet provided, here are the details for the entities i
   retry the call and **NEVER** invoke any other tools (to avoid user confusion
   and repeated re-authentication prompts). Immediately return the error to the
   user.
+- **MANDATORY HEADER**: ALL execution responses (whether `SUCCESS`, `PARTIAL_SUCCESS`, or `ERROR`) **MUST** start with the 6-line metadata list at the very top before any text or tables. NEVER omit this header, even on errors or partial errors:
+  ```markdown
+  - **Parsed Artifact**: {artifact_name}
+  - **Profile ID**: {profile_id}
+  - **Advertiser ID**: {advertiser_id}
+  - **Campaign ID**: {campaign_id}
+  - **Campaign Name**: {campaign_name}
+  - **Time Zone**: {time_zone}
+  ```
 - Present the execution results for **Placements**, **Ads**, **Creatives**, and
   **Event Tags** (indicate `None` if a section had no executed operations, and
-  note when creative rotations were applied at the Ad level), followed by
-  instructions to download the updated `Trafficked` CSV artifact:
+  note when creative rotations were applied at the Ad level), followed by instructions to download the updated
+  `Trafficked` CSV artifact:
 
 ```markdown
-Campaign Manager 360 trafficking execution completed successfully for campaign **{campaign_name}** (ID: `{ID}`, Advertiser ID: `{advertiser_id}`, Profile ID: `{profile_id}`).
+- **Parsed Artifact**: {artifact_name}
+- **Profile ID**: {profile_id}
+- **Advertiser ID**: {advertiser_id}
+- **Campaign ID**: {campaign_id}
+- **Campaign Name**: {campaign_name}
+- **Time Zone**: {time_zone}
+
+Campaign Manager 360 trafficking execution completed successfully for campaign **{campaign_name}** (ID: `{campaign_id}`, Advertiser ID: `{advertiser_id}`, Profile ID: `{profile_id}`).
 
 ### Placements
 | Placement Name | Operation | CM360 ID | Status |
@@ -136,7 +166,12 @@ Campaign Manager 360 trafficking execution completed successfully for campaign *
 ---
 
 ### Updated Trafficking Sheet Artifact
-The trafficking sheet artifact has been updated in your session with the **`Trafficked`** status for all successfully created/edited entities.
+The trafficking sheet artifact has been updated in your session with the execution status for each row:
+- **`Trafficked`**: All entities associated with the row were successfully created or edited.
+- **`Partially_failed`**: At least one entity on the row encountered an error, while other entities succeeded.
+- **`Failed`**: All attempted operations for the entities on this row encountered errors.
+
+Rows with `Partially_failed` or `Failed` status can be corrected and re-uploaded without manually resetting the status column.
 
 To download the updated trafficking sheet:
 - **Step 1**: Open the **Artifacts** panel on the right sidebar of the Web UI.

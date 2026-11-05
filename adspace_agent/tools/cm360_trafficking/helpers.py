@@ -1412,6 +1412,8 @@ def _build_trafficking_summary_response(  # ruff: ignore[too-many-arguments, too
     advertiser_id: str | None = None,
     campaign_id: str | None = None,
     campaign_name: str | None = None,
+    artifact_name: str | None = None,
+    time_zone: str | None = None,
 ) -> str:
     """Builds a JSON summary string from trafficking operation results.
 
@@ -1422,6 +1424,8 @@ def _build_trafficking_summary_response(  # ruff: ignore[too-many-arguments, too
         advertiser_id: Optional advertiser ID.
         campaign_id: Optional campaign ID.
         campaign_name: Optional campaign name.
+        artifact_name: Optional artifact filename.
+        time_zone: Optional campaign time zone.
 
     Returns:
         A JSON-formatted string summarizing status and results.
@@ -1465,6 +1469,8 @@ def _build_trafficking_summary_response(  # ruff: ignore[too-many-arguments, too
         ),
     }
 
+    if artifact_name:
+        response_payload["artifact_name"] = artifact_name
     if profile_id:
         response_payload["profile_id"] = profile_id
     if advertiser_id:
@@ -1473,6 +1479,8 @@ def _build_trafficking_summary_response(  # ruff: ignore[too-many-arguments, too
         response_payload["campaign_id"] = campaign_id
     if campaign_name:
         response_payload["campaign_name"] = campaign_name
+    if time_zone:
+        response_payload["time_zone"] = time_zone
 
     response_payload["results"] = clean_results
 
@@ -1483,33 +1491,85 @@ async def _update_trafficking_sheet_status(  # ruff: ignore[complex-structure, t
     tool_context: ToolContext,
     results: list[dict[str, Any]],
 ) -> None:
-    """Updates the trafficking sheet artifact with 'Trafficked' status.
+    """Updates the trafficking sheet artifact with row-level execution statuses.
 
-    Locates the latest trafficking CSV artifact, identifies rows matching
-    successfully trafficked ads (matching on Placement Name + Ad Name),
-    updates their Trafficking Status to 'Trafficked', and saves the updated
-    file as a new artifact version in the session.
+    Locates the latest trafficking CSV artifact, evaluates the execution
+    results for each row across placements, ads, creatives, and event tags, and
+    updates the row's Trafficking Status to:
+    - 'Trafficked': if all associated entities succeeded.
+    - 'Partially_failed': if some entities succeeded and some failed.
+    - 'Failed': if all associated entities with attempted operations failed.
 
     Args:
         tool_context: Active tool context containing session artifacts.
         results: List of execution results from CM360 trafficking push.
     """
-    successful_ads = {
-        str(r.get("name")).strip()
+    failed_placements = {
+        str(r.get("name", "")).strip()
         for r in results
-        if r.get("status") == "SUCCESS"
-        and str(r.get("operation", "")).startswith("dfareporting.ads.")
+        if r.get("status") == "ERROR"
+        and str(r.get("operation", "")).startswith("dfareporting.placements.")
     }
     successful_placements = {
-        str(r.get("name")).strip()
+        str(r.get("name", "")).strip()
         for r in results
         if r.get("status") == "SUCCESS"
         and str(r.get("operation", "")).startswith("dfareporting.placements.")
     }
-    if not successful_ads and not successful_placements:
+
+    failed_creatives = {
+        str(r.get("name", "")).strip()
+        for r in results
+        if r.get("status") == "ERROR"
+        and str(r.get("operation", "")).startswith("dfareporting.creatives.")
+    }
+    successful_creatives = {
+        str(r.get("name", "")).strip()
+        for r in results
+        if r.get("status") == "SUCCESS"
+        and str(r.get("operation", "")).startswith("dfareporting.creatives.")
+    }
+
+    failed_event_tags = {
+        str(r.get("name", "")).strip()
+        for r in results
+        if r.get("status") == "ERROR"
+        and str(r.get("operation", "")).startswith("dfareporting.eventTags.")
+    }
+    successful_event_tags = {
+        str(r.get("name", "")).strip()
+        for r in results
+        if r.get("status") == "SUCCESS"
+        and str(r.get("operation", "")).startswith("dfareporting.eventTags.")
+    }
+
+    failed_ads = {
+        str(r.get("name", "")).strip()
+        for r in results
+        if r.get("status") == "ERROR"
+        and str(r.get("operation", "")).startswith("dfareporting.ads.")
+    }
+    successful_ads = {
+        str(r.get("name", "")).strip()
+        for r in results
+        if r.get("status") == "SUCCESS"
+        and str(r.get("operation", "")).startswith("dfareporting.ads.")
+    }
+
+    has_any_results = bool(
+        failed_placements
+        or successful_placements
+        or failed_creatives
+        or successful_creatives
+        or failed_event_tags
+        or successful_event_tags
+        or failed_ads
+        or successful_ads
+    )
+    if not has_any_results:
         logger.info(
-            "ℹ️ [traffic_campaigns_in_cm360_tool] - No successful ad or"  # ruff: ignore[ambiguous-unicode-character-string]
-            " placement operations to update in trafficking sheet."
+            "ℹ️ [traffic_campaigns_in_cm360_tool] - No operation results to"  # ruff: ignore[ambiguous-unicode-character-string]
+            " update in trafficking sheet."
         )
         return
 
@@ -1555,6 +1615,8 @@ async def _update_trafficking_sheet_status(  # ruff: ignore[complex-structure, t
     status_col_idx: int | None = None
     ad_name_col_idx: int | None = None
     placement_name_col_idx: int | None = None
+    creative_name_col_idx: int | None = None
+    event_tags_col_idx: int | None = None
 
     for col_idx, col_name in enumerate(header_row):
         col_str = str(col_name).strip().lower()
@@ -1564,6 +1626,10 @@ async def _update_trafficking_sheet_status(  # ruff: ignore[complex-structure, t
             ad_name_col_idx = col_idx
         elif col_str == "placement name":
             placement_name_col_idx = col_idx
+        elif col_str == "creative name":
+            creative_name_col_idx = col_idx
+        elif col_str in {"event tag names", "event tag name"}:
+            event_tags_col_idx = col_idx
 
     if (
         status_col_idx is None
@@ -1578,23 +1644,90 @@ async def _update_trafficking_sheet_status(  # ruff: ignore[complex-structure, t
         )
         return
 
-    updated_count = 0
+    trafficked_count = 0
+    partially_failed_count = 0
+    failed_count_total = 0
+
     for row_idx in range(header_row_idx + 1, len(df_raw)):
+        status_val = df_raw.iloc[row_idx, status_col_idx]
+        current_status = (
+            str(status_val).strip().lower() if not pd.isna(status_val) else ""
+        )
+
+        if current_status == "trafficked":
+            continue
+
         ad_name_val = df_raw.iloc[row_idx, ad_name_col_idx]
         placement_val = df_raw.iloc[row_idx, placement_name_col_idx]
 
-        if pd.isna(ad_name_val) or pd.isna(placement_val):
+        if pd.isna(ad_name_val) and pd.isna(placement_val):
             continue
 
-        ad_name = str(ad_name_val).strip()
-        placement_name = str(placement_val).strip()
+        ad_name = str(ad_name_val).strip() if not pd.isna(ad_name_val) else ""
+        placement_name = (
+            str(placement_val).strip() if not pd.isna(placement_val) else ""
+        )
 
-        if not ad_name or not placement_name:
+        if not ad_name and not placement_name:
             continue
 
-        if ad_name in successful_ads or placement_name in successful_placements:
+        creative_name = ""
+        if creative_name_col_idx is not None:
+            c_val = df_raw.iloc[row_idx, creative_name_col_idx]
+            if not pd.isna(c_val):
+                creative_name = str(c_val).strip()
+
+        row_tags: list[str] = []
+        if event_tags_col_idx is not None:
+            t_val = df_raw.iloc[row_idx, event_tags_col_idx]
+            if not pd.isna(t_val):
+                row_tags = [
+                    t.strip()
+                    for t in str(t_val).split(",")
+                    if t.strip() and t.strip().lower() != "none"
+                ]
+
+        failed_count = 0
+        success_count = 0
+
+        # 1. Placement outcome
+        if placement_name:
+            if placement_name in failed_placements:
+                failed_count += 1
+            elif placement_name in successful_placements:
+                success_count += 1
+
+        # 2. Ad outcome
+        if ad_name:
+            if ad_name in failed_ads:
+                failed_count += 1
+            elif ad_name in successful_ads:
+                success_count += 1
+
+        # 3. Creative outcome
+        if creative_name:
+            if creative_name in failed_creatives:
+                failed_count += 1
+            elif creative_name in successful_creatives:
+                success_count += 1
+
+        # 4. Event tags outcome
+        for tag in row_tags:
+            if tag in failed_event_tags:
+                failed_count += 1
+            elif tag in successful_event_tags:
+                success_count += 1
+
+        # Determine row status based on entity outcomes
+        if failed_count == 0:
             df_raw.iloc[row_idx, status_col_idx] = "Trafficked"
-            updated_count += 1
+            trafficked_count += 1
+        elif success_count > 0:
+            df_raw.iloc[row_idx, status_col_idx] = "Partially_failed"
+            partially_failed_count += 1
+        else:
+            df_raw.iloc[row_idx, status_col_idx] = "Failed"
+            failed_count_total += 1
 
     csv_buffer = io.StringIO()
     df_raw.to_csv(csv_buffer, index=False, header=False)
@@ -1605,8 +1738,10 @@ async def _update_trafficking_sheet_status(  # ruff: ignore[complex-structure, t
         filename=target_filename, artifact=artifact
     )
     logger.info(
-        "📄 [traffic_campaigns_in_cm360_tool] - Successfully updated %d"
-        " row(s) to 'Trafficked' in artifact '%s'.",
-        updated_count,
+        "📄 [traffic_campaigns_in_cm360_tool] - Updated status in artifact"
+        " '%s': %d Trafficked, %d Partially_failed, %d Failed.",
         target_filename,
+        trafficked_count,
+        partially_failed_count,
+        failed_count_total,
     )

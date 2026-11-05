@@ -13,9 +13,14 @@
 # limitations under the License.
 """Utility functions for Campaign Manager 360 trafficking operations."""
 
+import asyncio
 import datetime
 import io
 import logging
+import operator
+import pathlib
+import re
+import urllib.parse
 from zoneinfo import ZoneInfo
 from zoneinfo import ZoneInfoNotFoundError
 
@@ -256,7 +261,7 @@ def clean_dataframe(  # ruff: ignore[complex-structure]
             .astype(str)
             .str.strip()
             .str.lower()
-            .isin(["new", "update"])
+            .isin(["new", "update", "partially_failed", "failed"])
         ]
 
     return df
@@ -276,13 +281,129 @@ def extract_site_identifier(row: pd.Series) -> str:
     return ""
 
 
+def _find_latest_artifact_from_events(
+    session: object | None,
+    matching_set: set[str],
+) -> str | None:
+    """Finds the most recently referenced artifact filename from session events.
+
+    Args:
+        session: Active session object if available.
+        matching_set: Set of valid matching filenames.
+
+    Returns:
+        The matched artifact filename or None.
+    """
+    if not session:
+        return None
+    events = getattr(session, "events", []) or []
+    for event in reversed(events):
+        content = getattr(event, "content", None)
+        parts = getattr(content, "parts", []) if content else []
+        for part in parts:
+            fn_call = getattr(part, "function_call", None)
+            if fn_call and getattr(fn_call, "name", "") == "load_artifacts":
+                args = getattr(fn_call, "args", {}) or {}
+                for name in args.get("artifact_names", []):
+                    if name in matching_set:
+                        return name
+
+            text = getattr(part, "text", "") or ""
+            if "[Uploaded Artifact:" in text:
+                matches = re.findall(r'\[Uploaded Artifact: "([^"]+)"\]', text)
+                for name in matches:
+                    if name in matching_set:
+                        return name
+    return None
+
+
+def _extract_artifact_mtime(canonical_uri: str | None) -> float:
+    """Extracts local file mtime from canonical URI if available.
+
+    Args:
+        canonical_uri: Canonical file URI string.
+
+    Returns:
+        File mtime float or 0.0.
+    """
+    if not canonical_uri:
+        return 0.0
+    parsed = urllib.parse.urlparse(canonical_uri)
+    local_path = urllib.parse.unquote(parsed.path)
+    p = pathlib.Path(local_path)
+    if p.exists():
+        return p.stat().st_mtime
+    return 0.0
+
+
+async def get_latest_csv_artifact(
+    tool_context: ToolContext,
+    matching_files: list[str],
+) -> str:
+    """Finds the most recently uploaded CSV artifact in the session.
+
+    Determines the latest uploaded artifact using session upload events and
+    artifact modification timestamps on disk, regardless of filename.
+
+    Args:
+        tool_context: Active tool context containing session artifacts.
+        matching_files: List of CSV filenames available in session artifacts.
+
+    Returns:
+        The filename of the most recently uploaded CSV artifact.
+    """
+    if len(matching_files) == 1:
+        return matching_files[0]
+
+    matching_set = set(matching_files)
+
+    # 1. Check session events in reverse order for recent upload references
+    session = getattr(tool_context, "session", None)
+    event_match = _find_latest_artifact_from_events(session, matching_set)
+    if event_match:
+        logger.info(
+            "🎯 Found latest artifact from session event: %s", event_match
+        )
+        return event_match
+
+    # 2. Check artifact creation / modification timestamps from artifact storage
+    file_timestamps: list[tuple[float, str]] = []
+    for filename in matching_files:
+        mtime = 0.0
+        try:
+            ver = await tool_context.get_artifact_version(filename)
+            if ver and ver.canonical_uri:
+                mtime = await asyncio.to_thread(
+                    _extract_artifact_mtime, ver.canonical_uri
+                )
+            elif ver and getattr(ver, "create_time", None):
+                mtime = float(ver.create_time)
+        except (OSError, ValueError, TypeError) as exc:
+            logger.debug(
+                "Could not determine timestamp for artifact '%s': %s",
+                filename,
+                exc,
+            )
+        file_timestamps.append((mtime, filename))
+
+    # Sort by timestamp ascending; the highest timestamp (latest) is last
+    file_timestamps.sort(key=operator.itemgetter(0))
+    latest_file = file_timestamps[-1][1]
+    logger.info(
+        "🎯 Selected latest uploaded artifact by timestamp: %s", latest_file
+    )
+    return latest_file
+
+
 async def load_raw_dataframe(
     tool_context: ToolContext,
+    target_filename: str | None = None,
 ) -> tuple[pd.DataFrame, str]:
     """Lists, loads, and parses the trafficking CSV file from session artifacts.
 
     Args:
         tool_context: Active tool context containing session artifacts.
+        target_filename: Optional specific CSV artifact filename to load.
 
     Returns:
         A tuple of (df_raw, target_filename) where df_raw is the loaded
@@ -309,7 +430,11 @@ async def load_raw_dataframe(
         raise ValueError(msg)
 
     # Select the latest uploaded matching CSV file
-    target_filename = matching_files[-1]
+    if not target_filename or target_filename not in matching_files:
+        target_filename = await get_latest_csv_artifact(
+            tool_context, matching_files
+        )
+
     logger.info("🎯 Selecting target campaign file: %s", target_filename)
 
     # 3. Load the selected artifact content

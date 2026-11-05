@@ -13,6 +13,7 @@
 # limitations under the License.
 """Tests for the cm360_trafficking utilities module."""
 
+from unittest import mock
 from zoneinfo import ZoneInfoNotFoundError
 
 import numpy as np
@@ -188,3 +189,144 @@ def test_prepare_data_invalid_timezone() -> None:
     df_raw = pd.DataFrame(raw_data)
     with pytest.raises(ValueError, match="Invalid Time Zone"):
         utilities.prepare_data(df_raw)
+
+
+def test_clean_dataframe_status_filtering() -> None:
+    """Tests clean_dataframe retains New, Update, Partially_failed, Failed."""
+    raw_data = [
+        ["Meta1", "Val1", "", "", ""],
+        ["Meta2", "Val2", "", "", ""],
+        [
+            "Trafficking Status",
+            "Placement Name",
+            "Ad Name",
+            "Placement ID",
+            "Ad ID",
+        ],
+        ["New", "P1", "Ad1", "", ""],
+        ["Update", "P2", "Ad2", "123", "456"],
+        ["Partially_failed", "P3", "Ad3", "", ""],
+        ["Failed", "P4", "Ad4", "", ""],
+        ["Trafficked", "P5", "Ad5", "789", "101"],
+        ["OtherStatus", "P6", "Ad6", "", ""],
+    ]
+    df_raw = pd.DataFrame(raw_data)
+    cleaned_df = utilities.clean_dataframe(df_raw)
+
+    statuses = cleaned_df["Trafficking Status"].tolist()
+    assert statuses == ["New", "Update", "Partially_failed", "Failed"]
+
+
+@pytest.mark.asyncio
+async def test_get_latest_csv_artifact_single_file() -> None:
+    """Tests get_latest_csv_artifact immediately returns single match."""
+    mock_context = mock.MagicMock()
+    result = await utilities.get_latest_csv_artifact(
+        mock_context, ["single.csv"]
+    )
+    assert result == "single.csv"
+
+
+@pytest.mark.asyncio
+async def test_get_latest_csv_artifact_session_events() -> None:
+    """Tests get_latest_csv_artifact discovers latest file from events."""
+    mock_context = mock.MagicMock()
+    event1 = mock.MagicMock()
+    event1.content.parts = [
+        mock.MagicMock(
+            function_call=mock.MagicMock(
+                name="load_artifacts",
+                args={"artifact_names": ["first_sheet.csv"]},
+            ),
+            text=None,
+        )
+    ]
+    event2 = mock.MagicMock()
+    event2.content.parts = [
+        mock.MagicMock(
+            function_call=None,
+            text='[Uploaded Artifact: "my_arbitrary_name.csv"]',
+        )
+    ]
+    mock_context.session.events = [event1, event2]
+
+    result = await utilities.get_latest_csv_artifact(
+        mock_context, ["first_sheet.csv", "my_arbitrary_name.csv", "old.csv"]
+    )
+    assert result == "my_arbitrary_name.csv"
+
+
+@pytest.mark.asyncio
+async def test_get_latest_csv_artifact_by_timestamp(tmp_path) -> None:
+    """Tests get_latest_csv_artifact orders by timestamp when events empty."""
+    file_old = tmp_path / "older.csv"
+    file_old.write_text("a,b")
+    file_new = tmp_path / "newest.csv"
+    file_new.write_text("a,b")
+
+    mock_context = mock.MagicMock()
+    mock_context.session.events = []
+
+    ver_old = mock.MagicMock()
+    ver_old.canonical_uri = file_old.as_uri()
+
+    ver_new = mock.MagicMock()
+    ver_new.canonical_uri = file_new.as_uri()
+
+    def mock_version(filename: str) -> mock.MagicMock:
+        return ver_new if filename == "newest.csv" else ver_old
+
+    mock_context.get_artifact_version = mock.AsyncMock(side_effect=mock_version)
+
+    result = await utilities.get_latest_csv_artifact(
+        mock_context, ["older.csv", "newest.csv"]
+    )
+    assert result == "newest.csv"
+
+
+@pytest.mark.asyncio
+async def test_load_raw_dataframe_latest_upload() -> None:
+    """Tests load_raw_dataframe selects the latest uploaded artifact."""
+    mock_context = mock.MagicMock()
+    mock_context.list_artifacts = mock.AsyncMock(
+        return_value=["first.csv", "second.csv"]
+    )
+    event = mock.MagicMock()
+    event.content.parts = [
+        mock.MagicMock(
+            function_call=None,
+            text='[Uploaded Artifact: "second.csv"]',
+        )
+    ]
+    mock_context.session.events = [event]
+    mock_part = mock.MagicMock()
+    mock_part.text = "col1,col2\nval1,val2\n"
+    mock_part.inline_data = None
+    mock_context.load_artifact = mock.AsyncMock(return_value=mock_part)
+
+    df, filename = await utilities.load_raw_dataframe(mock_context)
+    assert filename == "second.csv"
+    assert not df.empty
+    mock_context.load_artifact.assert_called_once_with("second.csv")
+
+
+@pytest.mark.asyncio
+async def test_load_raw_dataframe_explicit_filename() -> None:
+    """Tests load_raw_dataframe honors explicit target_filename."""
+    mock_context = mock.MagicMock()
+    mock_context.list_artifacts = mock.AsyncMock(
+        return_value=[
+            "TSheet (10).csv",
+            "TSheet (8).csv",
+        ]
+    )
+    mock_part = mock.MagicMock()
+    mock_part.text = "col1,col2\nval1,val2\n"
+    mock_part.inline_data = None
+    mock_context.load_artifact = mock.AsyncMock(return_value=mock_part)
+
+    _, filename = await utilities.load_raw_dataframe(
+        mock_context, target_filename="TSheet (8).csv"
+    )
+    assert filename == "TSheet (8).csv"
+    mock_context.load_artifact.assert_called_once_with("TSheet (8).csv")

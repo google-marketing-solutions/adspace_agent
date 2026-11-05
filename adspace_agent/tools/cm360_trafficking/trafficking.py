@@ -13,6 +13,7 @@
 # limitations under the License.
 """Tool for parsing campaign sheets and executing CM360 trafficking."""
 
+import datetime
 import json
 import logging
 import os
@@ -129,6 +130,7 @@ auth_credential = AuthCredential(
 
 async def parse_sheet_tool(  # ruff: ignore[too-many-locals]
     tool_context: ToolContext,
+    filename: str | None = None,
 ) -> str:
     """Parses a CM360 trafficking sheet and uploads payload to GCS.
 
@@ -139,6 +141,7 @@ async def parse_sheet_tool(  # ruff: ignore[too-many-locals]
 
     Args:
         tool_context: Active tool context containing session artifacts.
+        filename: Optional explicit filename of the CSV artifact to parse.
 
     Returns:
         A JSON-formatted string summarizing the parsing and upload results,
@@ -172,20 +175,28 @@ async def parse_sheet_tool(  # ruff: ignore[too-many-locals]
             raise ValueError(msg)  # ruff: ignore[raise-within-try]
 
         # 1. Load the raw DataFrame
-        df_raw, _ = await load_raw_dataframe(tool_context)
+        df_raw, target_filename = await load_raw_dataframe(
+            tool_context, target_filename=filename
+        )
 
         # 2. Extract metadata and clean data rows
         df, profile_id, advertiser_id, campaign_id, campaign_name = (
             prepare_data(df_raw)
         )
+        time_zone = (
+            str(df["Time Zone"].iloc[0]).strip()
+            if not df.empty and "Time Zone" in df.columns
+            else ""
+        )
 
         logger.info(
             "🆔 [parse_sheet_tool] - Extracted IDs: Profile=%s, Advertiser=%s,"
-            " Campaign=%s, Campaign Name=%s",
+            " Campaign=%s, Campaign Name=%s, Time Zone=%s",
             profile_id,
             advertiser_id,
             campaign_id,
             campaign_name,
+            time_zone,
         )
 
         # 3. Run validations
@@ -268,10 +279,12 @@ async def parse_sheet_tool(  # ruff: ignore[too-many-locals]
         object_path = f"cm360_trafficking/{session_id}/payloads.json"
         parsed_data = {
             "status": "success",
+            "artifact_name": target_filename,
             "profile_id": profile_id,
             "advertiser_id": advertiser_id,
             "campaign_id": campaign_id,
             "campaign_name": campaign_name,
+            "time_zone": time_zone,
             "operations": operations,
         }
         parsed_data_str = json.dumps(parsed_data, indent=2)
@@ -297,11 +310,13 @@ async def parse_sheet_tool(  # ruff: ignore[too-many-locals]
                 "message": (
                     "The trafficking sheet has been successfully parsed."
                 ),
+                "artifact_name": target_filename,
                 "parsed_payload_gcs_url": parsed_payload_gcs_url,
                 "profile_id": profile_id,
                 "advertiser_id": advertiser_id,
                 "campaign_id": campaign_id,
                 "campaign_name": campaign_name,
+                "time_zone": time_zone,
                 "sheet_entities": sheet_entities,
                 "operations": operations,
             },
@@ -312,6 +327,22 @@ async def parse_sheet_tool(  # ruff: ignore[too-many-locals]
             "❌ [parse_sheet_tool] - Error parsing the tsheet to generate"
             " payloads."
         )
+        if tool_context and getattr(tool_context, "state", None) is not None:
+            err_str = str(e).lower()
+            auth_keywords = (
+                "refresh",
+                "credential",
+                "invalid_grant",
+                "401",
+                "unauthorized",
+            )
+            if any(kw in err_str for kw in auth_keywords):
+                tool_context.state[CREDENTIALS_CACHE_KEY] = None
+                logger.info(
+                    "Cleared cached credentials due to authentication"
+                    " failure: %s",
+                    e,
+                )
         return json.dumps(
             {
                 "status": "ERROR",
@@ -324,7 +355,7 @@ async def parse_sheet_tool(  # ruff: ignore[too-many-locals]
         )
 
 
-async def traffic_campaigns_in_cm360_tool(  # ruff: ignore[too-many-locals]
+async def traffic_campaigns_in_cm360_tool(  # ruff: ignore[too-many-locals, too-many-statements]
     tool_context: ToolContext,
 ) -> str:
     """Pushes resolved campaign trafficking payloads from GCS to CM360.
@@ -404,6 +435,8 @@ async def traffic_campaigns_in_cm360_tool(  # ruff: ignore[too-many-locals]
         advertiser_id = payload_data.get("advertiser_id")
         campaign_id = payload_data.get("campaign_id")
         campaign_name = payload_data.get("campaign_name")
+        artifact_name = payload_data.get("artifact_name")
+        time_zone = payload_data.get("time_zone")
         operations = payload_data.get("operations", [])
 
         logger.info(
@@ -501,6 +534,8 @@ async def traffic_campaigns_in_cm360_tool(  # ruff: ignore[too-many-locals]
             advertiser_id=advertiser_id,
             campaign_id=campaign_id,
             campaign_name=campaign_name,
+            artifact_name=artifact_name,
+            time_zone=time_zone,
         )
 
     except Exception as e:
@@ -508,6 +543,22 @@ async def traffic_campaigns_in_cm360_tool(  # ruff: ignore[too-many-locals]
             "❌ [traffic_campaigns_in_cm360_tool] - Error executing CM360"
             " trafficking push."
         )
+        if tool_context and getattr(tool_context, "state", None) is not None:
+            err_str = str(e).lower()
+            auth_keywords = (
+                "refresh",
+                "credential",
+                "invalid_grant",
+                "401",
+                "unauthorized",
+            )
+            if any(kw in err_str for kw in auth_keywords):
+                tool_context.state[CREDENTIALS_CACHE_KEY] = None
+                logger.info(
+                    "Cleared cached credentials due to authentication"
+                    " failure: %s",
+                    e,
+                )
         return json.dumps(
             {
                 "status": "ERROR",
@@ -609,10 +660,27 @@ def before_traffic_campaigns_in_cm360_tool_callback(
             logger.info("Successfully exchanged credentials via tool context.")
             oauth: OAuth2Auth = exchanged_credential.oauth2
 
-            client_id = os.getenv("CLIENT_ID")
-            client_secret = os.getenv("CLIENT_SECRET")
+            client_id = getattr(oauth, "client_id", None) or os.getenv(
+                "CLIENT_ID"
+            )
+            client_secret = getattr(oauth, "client_secret", None) or os.getenv(
+                "CLIENT_SECRET"
+            )
 
             token_uri = auth_scheme.flows.authorizationCode.tokenUrl
+
+            now = datetime.datetime.now(datetime.UTC)
+            expires_at = getattr(oauth, "expires_at", None)
+            expires_in = getattr(oauth, "expires_in", None)
+
+            if isinstance(expires_at, (int, float)) and expires_at > 0:
+                expiry_dt = datetime.datetime.fromtimestamp(
+                    expires_at, tz=datetime.UTC
+                )
+            elif isinstance(expires_in, (int, float)) and expires_in > 0:
+                expiry_dt = now + datetime.timedelta(seconds=expires_in)
+            else:
+                expiry_dt = now + datetime.timedelta(hours=1)
 
             tool_context.state[CREDENTIALS_CACHE_KEY] = {
                 "client_id": client_id,
@@ -620,6 +688,7 @@ def before_traffic_campaigns_in_cm360_tool_callback(
                 "token": oauth.access_token,
                 "token_uri": token_uri,
                 "refresh_token": oauth.refresh_token,
+                "expiry": expiry_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
             logger.info("Saved exchanged credentials to cache.")
 

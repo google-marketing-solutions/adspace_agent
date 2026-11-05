@@ -268,3 +268,48 @@ def test_group_ads_creative_rotation_and_click_through_url() -> None:
         "defaultLandingPage": False,
         "customClickThroughUrl": "https://example.com/click",
     }
+
+
+def test_get_cm360_service_credentials_handling() -> None:
+    """Tests _get_cm360_service handles missing expiry and refresh tokens."""
+    mock_context = mock.MagicMock()
+
+    # Case 1: Missing refresh token and expiry -> constructs directly
+    mock_context.state = {
+        actions.CREDENTIALS_CACHE_KEY: {
+            "token": "valid_token_123",
+            "refresh_token": None,
+        }
+    }
+    with mock.patch(
+        "adspace_agent.tools.cm360_trafficking.actions.build"
+    ) as mock_build:
+        actions._get_cm360_service(mock_context)  # ruff: ignore[private-member-access]
+        assert mock_build.called
+        creds = mock_build.call_args[1]["credentials"]
+        assert (
+            creds.token == "valid_token_123"  # ruff: ignore[hardcoded-password-string]
+        )
+
+    # Case 2: Has refresh token and client info -> uses authorized user info
+    mock_context.state = {
+        actions.CREDENTIALS_CACHE_KEY: {
+            "token": "valid_token_456",
+            "refresh_token": "valid_refresh",
+            "client_id": "test_client_id",
+            "client_secret": "test_client_secret",
+        }
+    }
+    with mock.patch(
+        "adspace_agent.tools.cm360_trafficking.actions.build"
+    ) as mock_build:
+        actions._get_cm360_service(mock_context)  # ruff: ignore[private-member-access]
+        assert mock_build.called
+        creds = mock_build.call_args[1]["credentials"]
+        assert (
+            creds.token == "valid_token_456"  # ruff: ignore[hardcoded-password-string]
+        )
+        assert (
+            creds.refresh_token == "valid_refresh"  # ruff: ignore[hardcoded-password-string]
+        )
+        assert creds.expiry is not None

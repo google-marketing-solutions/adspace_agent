@@ -670,3 +670,38 @@ def test_validate_event_tags_all_branches() -> None:
         1,
     )
     assert valid == []
+
+
+def test_validations_failed_and_partially_failed_statuses() -> None:
+    """Tests validation behavior for Partially_failed and Failed rows."""
+    # IDs are not required for Partially_failed / Failed
+    row_partially_failed = pd.Series({
+        "Trafficking Status": "Partially_failed",
+        "Placement ID": "",
+        "Ad ID": "",
+        "Placement Name": "Valid Placement",
+        "Ad Name": "Valid Ad",
+        "Placement Size": "300x250",
+        "Compatibility": "DISPLAY",
+        "Placement Payment Source": "PLACEMENT_AGENCY_PAID",
+        "Pricing Schedule Start Date": "11/01/2026",
+        "Pricing Schedule End Date": "11/30/2026",
+        "Pricing Schedule Type": "PRICING_TYPE_CPM",
+        "Placement Tag Formats": "PLACEMENT_TAG_STANDARD",
+        "Ad Start Date": "11/01/2026",
+        "Ad End Date": "11/30/2026",
+        "Ad Type": "AD_SERVING_STANDARD_AD",
+    })
+    assert validations.validate_placement_id(row_partially_failed, 1) is None
+    assert validations.validate_ad_id(row_partially_failed, 1) is None
+    assert validations.validate_placement_name(row_partially_failed, 1) is None
+    assert validations.validate_ad_name(row_partially_failed, 1) is None
+
+    # Missing placement name triggers validation error
+    row_missing_name = pd.Series({
+        "Trafficking Status": "Failed",
+        "Placement Name": "",
+    })
+    err = validations.validate_placement_name(row_missing_name, 1)
+    assert err is not None
+    assert "Placement Name is required" in err["error"]

@@ -13,7 +13,11 @@
 # limitations under the License.
 """Tests for the helpers module."""
 
+import io
 from unittest import mock
+
+import pandas as pd
+import pytest
 
 from adspace_agent.tools.cm360_trafficking import helpers
 
@@ -646,3 +650,115 @@ def test_diff_ad_rich_media_exit_overrides() -> None:
     )
     assert diff_fields_match == []
     assert patch_payload_match == {}
+
+
+@pytest.mark.asyncio
+async def test_update_trafficking_sheet_status_row_statuses() -> None:
+    """Tests setting Trafficked, Partially_failed, and Failed per row."""
+    # Construct raw DataFrame with 2 metadata rows + header + 4 data rows
+    raw_data = [
+        ["Meta1", "Val1", "", "", ""],
+        ["Meta2", "Val2", "", "", ""],
+        [
+            "Trafficking Status",
+            "Placement Name",
+            "Ad Name",
+            "Creative Name",
+            "Event Tag Names",
+        ],
+        ["New", "P_Success", "Ad_Success", "C_Success", "tag_success"],
+        ["New", "P_Failed", "Ad_Success2", "C_Success2", ""],
+        ["New", "P_AllFail", "Ad_AllFail", "C_AllFail", "tag_fail"],
+        ["Trafficked", "P_AlreadyDone", "Ad_AlreadyDone", "", ""],
+    ]
+    df_raw = pd.DataFrame(raw_data)
+
+    mock_tool_context = mock.MagicMock()
+    mock_tool_context.save_artifact = mock.AsyncMock()
+
+    results = [
+        {
+            "name": "P_Success",
+            "operation": "dfareporting.placements.patch",
+            "status": "SUCCESS",
+        },
+        {
+            "name": "Ad_Success",
+            "operation": "dfareporting.ads.insert",
+            "status": "SUCCESS",
+        },
+        {
+            "name": "C_Success",
+            "operation": "dfareporting.creatives.patch",
+            "status": "SUCCESS",
+        },
+        {
+            "name": "tag_success",
+            "operation": "dfareporting.eventTags.insert",
+            "status": "SUCCESS",
+        },
+        # Row 4: P_Failed errors, but Ad_Success2 succeeds
+        {
+            "name": "P_Failed",
+            "operation": "dfareporting.placements.patch",
+            "status": "ERROR",
+        },
+        {
+            "name": "Ad_Success2",
+            "operation": "dfareporting.ads.insert",
+            "status": "SUCCESS",
+        },
+        # Row 5: All attempted operations error
+        {
+            "name": "P_AllFail",
+            "operation": "dfareporting.placements.patch",
+            "status": "ERROR",
+        },
+        {
+            "name": "Ad_AllFail",
+            "operation": "dfareporting.ads.patch",
+            "status": "ERROR",
+        },
+        {
+            "name": "tag_fail",
+            "operation": "dfareporting.eventTags.insert",
+            "status": "ERROR",
+        },
+    ]
+
+    with mock.patch(
+        "adspace_agent.tools.cm360_trafficking.helpers.load_raw_dataframe",
+        new=mock.AsyncMock(return_value=(df_raw, "test.csv")),
+    ):
+        await helpers._update_trafficking_sheet_status(  # ruff: ignore[private-member-access]
+            tool_context=mock_tool_context,
+            results=results,
+        )
+
+    # Verify save_artifact was called with updated DataFrame
+    assert mock_tool_context.save_artifact.called
+    saved_part = mock_tool_context.save_artifact.call_args[1]["artifact"]
+    saved_csv = saved_part.text
+    saved_df = pd.read_csv(io.StringIO(saved_csv), header=None)
+
+    # Row 3 (P_Success) -> Trafficked
+    assert saved_df.iloc[3, 0] == "Trafficked"
+    # Row 4 (P_Failed + Ad_Success2) -> Partially_failed
+    assert saved_df.iloc[4, 0] == "Partially_failed"
+    # Row 5 (P_AllFail + Ad_AllFail + tag_fail) -> Failed
+    assert saved_df.iloc[5, 0] == "Failed"
+    # Row 6 (already Trafficked) -> remains Trafficked
+    assert saved_df.iloc[6, 0] == "Trafficked"
+
+
+@pytest.mark.asyncio
+async def test_update_trafficking_sheet_status_no_results() -> None:
+    """Tests that no status update occurs when results are empty."""
+    mock_tool_context = mock.MagicMock()
+    mock_tool_context.save_artifact = mock.AsyncMock()
+
+    await helpers._update_trafficking_sheet_status(  # ruff: ignore[private-member-access]
+        tool_context=mock_tool_context,
+        results=[],
+    )
+    assert not mock_tool_context.save_artifact.called

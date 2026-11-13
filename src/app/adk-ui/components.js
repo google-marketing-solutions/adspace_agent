@@ -27,8 +27,20 @@ import { closeModalOverlay } from "./modal.js";
 let uiTabsSeq = 0;
 
 // `input_type` values a `text_input` component may request; anything else
-// (it comes from tool output) falls back to "text".
-const SAFE_INPUT_TYPES = ["text", "email", "url", "tel", "password", "search", "number"];
+// (it comes from tool output) falls back to "text". `render_form` has no
+// date component of its own: it tags a text input with the field's type.
+const SAFE_INPUT_TYPES = [
+  "text",
+  "email",
+  "url",
+  "tel",
+  "password",
+  "search",
+  "number",
+  "date",
+  "time",
+  "datetime-local",
+];
 
 // Late binding: `sendMessage` (sse.js) sits above this module (sse.js renders
 // through transcript.js → adk-ui), so app.js injects it via `bindSendMessage`.
@@ -899,7 +911,15 @@ export const renderInnerComponent = (comp, surfaceRoot, ctx = {}) => {
       return sk;
     }
 
-    default:
-      return document.createTextNode("");
+    default: {
+      if (!type) return document.createTextNode("");
+      // Say so instead of drawing nothing: a blank card hides a typo in a
+      // component's `type`, or a component this renderer has no case for.
+      const note = document.createElement("p");
+      note.className = "dm-unsupported";
+      note.textContent = `Unsupported component: ${type}`;
+      style(note, { margin: "0", fontSize: "12.5px", color: "var(--text-muted)" });
+      return note;
+    }
   }
 };

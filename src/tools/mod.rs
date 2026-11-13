@@ -16,6 +16,7 @@
 
 pub mod bigquery;
 pub mod cm360_trafficking;
+pub mod custom_ui;
 pub mod data_analysis;
 pub mod gemini_builtins;
 pub mod genai;

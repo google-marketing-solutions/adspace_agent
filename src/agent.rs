@@ -48,6 +48,7 @@ use crate::google_api::{DiscoveryFetcher, GoogleApiToolset, GoogleApiToolsetConf
 use crate::services;
 use crate::tools::bigquery::BigQueryToolset;
 use crate::tools::cm360_trafficking::{Cm360Services, Cm360TraffickingToolset};
+use crate::tools::custom_ui::custom_ui_toolset;
 use crate::tools::data_analysis::{PythonExecutorKind, data_analysis_toolset};
 use crate::tools::gemini_builtins::{GeminiBuiltinTool, gemini_builtin_toolset};
 use crate::tools::genai::google_genai_toolset_with_controller;
@@ -1343,6 +1344,7 @@ pub async fn create_agent(
     }
     toolsets.push(Arc::new(utilities_toolset()));
     toolsets.push(Arc::new(ui_toolset()));
+    toolsets.push(Arc::new(custom_ui_toolset()));
     toolsets.push(Arc::new(
         SkillsToolset::load(SkillSources::from_env(gcs_client.clone())).await,
     ));
@@ -1697,6 +1699,31 @@ impl adk_rust::ReadonlyContext for ListingContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_render_tools_are_compacted_like_the_library_ones() {
+        // A render tool defined in this repo keeps the full component in the
+        // session and the stream; the model only gets the confirmation.
+        let mut fr = adk_rust::FunctionResponseData::new(
+            "render_band_chart",
+            serde_json::json!({
+                "components": [{
+                    "type": "chart",
+                    "kind": "band",
+                    "x_key": "date",
+                    "y_keys": ["spend"],
+                    "lower_key": "low",
+                    "upper_key": "high",
+                    "data": [{ "date": "2026-11-01", "spend": 100, "low": 80, "high": 120 }]
+                }]
+            }),
+        );
+        compact_ui_function_response(&mut fr);
+        assert_eq!(
+            fr.response,
+            serde_json::json!({ "status": "rendered", "components": 1 })
+        );
+    }
 
     #[test]
     fn routing_instruction_is_built_from_the_loaded_collections() {

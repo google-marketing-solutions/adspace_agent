@@ -28,11 +28,88 @@ export const PALETTE = [
   "#f472b6",
 ];
 
+// Points outside their range on a `band` chart.
+const OUTSIDE_COLOR = "var(--accent-error, #d93025)";
+// How many out-of-range points are listed under a `band` chart.
+const MAX_LISTED_OUTSIDE = 10;
+
+// The smallest "round" step (1, 2, 2.5, 5 or 10 times a power of ten) that is
+// at least `x`.
+const niceStep = (x) => {
+  if (!(x > 0)) return 1;
+  const pow = 10 ** Math.floor(Math.log10(x));
+  const f = x / pow;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * pow;
+};
+
+// A date or timestamp as epoch milliseconds, or NaN. A date without a time
+// ("2026-11-03") is read as local midnight: `Date` reads it as UTC midnight,
+// which prints as the day before anywhere west of Greenwich.
+const toTime = (value) => {
+  if (typeof value === "number") return value;
+  const text = String(value ?? "").trim();
+  const day = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (day) return new Date(Number(day[1]), Number(day[2]) - 1, Number(day[3])).getTime();
+  return new Date(text).getTime();
+};
+
+// Writes the x values of a `time` axis. `format` is the component's
+// `time_format` (`date`, `time` or `iso`); without one, values that all fall
+// on midnight are written as dates, values within one day as times, and
+// anything else as date and time.
+const timeFormatter = (times, format) => {
+  const dates = times.filter(Number.isFinite).map((t) => new Date(t));
+  const wholeDays = dates.every(
+    (d) => d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0
+  );
+  const oneYear = new Set(dates.map((d) => d.getFullYear())).size <= 1;
+  const oneDay = new Set(dates.map((d) => d.toDateString())).size <= 1;
+  const mode = ["date", "time", "iso"].includes(format)
+    ? format
+    : wholeDays
+      ? "date"
+      : oneDay
+        ? "time"
+        : "both";
+  const day = { month: "short", day: "numeric", ...(oneYear ? {} : { year: "numeric" }) };
+  const clock = { hour: "numeric", minute: "2-digit" };
+  const two = (v) => String(v).padStart(2, "0");
+  return (t) => {
+    const d = new Date(t);
+    if (mode === "iso") {
+      return wholeDays
+        ? `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`
+        : d.toISOString();
+    }
+    if (mode === "time") return d.toLocaleTimeString(undefined, clock);
+    if (mode === "date") return d.toLocaleDateString(undefined, day);
+    return d.toLocaleString(undefined, { ...day, ...clock });
+  };
+};
+
+// An axis label, cut to `max` characters with the full text as its tooltip.
+const axisLabel = (text, max, attrs) => {
+  const label = svgEl("text", {
+    "text-anchor": "middle",
+    fill: "var(--dm-text-secondary)",
+    "font-size": "11",
+    ...attrs,
+  });
+  label.textContent = text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  const full = svgEl("title");
+  full.textContent = text;
+  label.appendChild(full);
+  return label;
+};
+
 export const renderChartInner = (comp) => {
   const wrap = document.createElement("div");
   style(wrap, { display: "flex", flexDirection: "column", gap: "10px" });
 
-  const data = Array.isArray(comp.data) ? comp.data : [];
+  const rows = Array.isArray(comp.data) ? comp.data : [];
+  // `window`: draw only the last N rows.
+  const windowSize = Number(comp.window);
+  const data = Number.isInteger(windowSize) && windowSize > 0 ? rows.slice(-windowSize) : rows;
   const xKey = comp.x_key || (data[0] ? Object.keys(data[0])[0] : "x");
   const yKeys =
     Array.isArray(comp.y_keys) && comp.y_keys.length
@@ -210,25 +287,68 @@ export const renderChartInner = (comp) => {
   }
 
   const isSpark = kind === "sparkline";
+  const xAxisLabel = !isSpark && comp.x_label ? String(comp.x_label).trim() : "";
+  const yAxisLabel = !isSpark && comp.y_label ? String(comp.y_label).trim() : "";
   const W = 680;
   const H = isSpark ? 84 : 250;
-  const padL = isSpark ? 8 : 52;
+  // A y-axis label takes a strip to the left of the tick values.
+  const padL = isSpark ? 8 : yAxisLabel ? 70 : 52;
   const padR = isSpark ? 8 : 16;
   const padT = isSpark ? 8 : 16;
   const padB = isSpark ? 10 : 44;
   const plotW = W - padL - padR;
   const plotH = H - padT - padB;
 
-  let minVal = 0;
-  let maxVal = 0;
+  // `band`: one series (the first y key) against a lower and an upper bound
+  // per row (`lower_key` / `upper_key`), with an optional note (`note_key`)
+  // shown on the points that fall outside their range. Nothing here knows
+  // what the range means; it can be an expected range, a forecast interval,
+  // a pacing corridor or a benchmark.
+  const isBand = kind === "band";
+  const seriesKeys = isBand ? yKeys.slice(0, 1) : yKeys;
+  // The row's bounds in order, or null when either is missing.
+  const boundsOf = (row) => {
+    const a = toNumber(row?.[comp.lower_key]);
+    const b = toNumber(row?.[comp.upper_key]);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+    return a <= b ? { lo: a, hi: b } : { lo: b, hi: a };
+  };
+
+  // Horizontal grid intervals. Fixed for the other kinds; a band chart picks
+  // its own so the lines land on round values.
+  let gridSteps = 4;
+  let minVal = isBand ? Infinity : 0;
+  let maxVal = isBand ? -Infinity : 0;
   for (const row of data) {
-    for (const yk of yKeys) {
+    for (const yk of seriesKeys) {
       const v = toNumber(row[yk]);
       if (Number.isFinite(v)) {
         if (v < minVal) minVal = v;
         if (v > maxVal) maxVal = v;
       }
     }
+    const bounds = isBand ? boundsOf(row) : null;
+    if (bounds) {
+      if (bounds.lo < minVal) minVal = bounds.lo;
+      if (bounds.hi > maxVal) maxVal = bounds.hi;
+    }
+  }
+  if (isBand) {
+    // Fit the axis to the series and its range instead of anchoring it at
+    // zero: what matters is where the values sit against the band.
+    if (!Number.isFinite(minVal)) {
+      minVal = 0;
+      maxVal = 1;
+    }
+    const pad = (maxVal - minVal) * 0.08 || Math.abs(maxVal) * 0.08 || 1;
+    const lo = minVal >= 0 ? Math.max(0, minVal - pad) : minVal - pad;
+    const hi = maxVal + pad;
+    // Snap the axis to round steps, aiming for about five intervals.
+    let step = niceStep((hi - lo) / 5);
+    while (Math.ceil(hi / step) - Math.floor(lo / step) > 6) step = niceStep(step * 1.01);
+    minVal = Math.floor(lo / step) * step;
+    maxVal = Math.ceil(hi / step) * step;
+    gridSteps = Math.max(1, Math.round((maxVal - minVal) / step));
   }
   if (maxVal === minVal) maxVal = minVal + 1;
   const span = maxVal - minVal;
@@ -245,7 +365,7 @@ export const renderChartInner = (comp) => {
   });
 
   if (!isSpark) {
-    const steps = 4;
+    const steps = gridSteps;
     for (let i = 0; i <= steps; i++) {
       const val = minVal + (span * i) / steps;
       const y = yToPx(val);
@@ -269,7 +389,30 @@ export const renderChartInner = (comp) => {
     }
   }
 
+  if (yAxisLabel) {
+    const cy = padT + plotH / 2;
+    svg.appendChild(axisLabel(yAxisLabel, 34, { x: 12, y: cy, transform: `rotate(-90 12 ${cy})` }));
+  }
+  if (xAxisLabel) {
+    svg.appendChild(axisLabel(xAxisLabel, 90, { x: padL + plotW / 2, y: H - 5 }));
+  }
+
   const n = data.length;
+  // `x_type`: `time` and `numeric` x values are read as such; the default is
+  // a category, shown as given.
+  const xType = String(comp.x_type || "category").toLowerCase();
+  const xValues =
+    xType === "time"
+      ? data.map((row) => toTime(row[xKey]))
+      : xType === "numeric"
+        ? data.map((row) => toNumber(row[xKey]))
+        : null;
+  const formatTime = xType === "time" ? timeFormatter(xValues, comp.time_format) : null;
+  // The text of an x tick: dates and times in the axis format, the rest as given.
+  const xText = (row, i) =>
+    formatTime && Number.isFinite(xValues[i]) ? formatTime(xValues[i]) : String(row[xKey] ?? "");
+  // Points of a `band` chart that fall outside their range, in row order.
+  const outside = [];
   if (kind === "bar") {
     const groupStep = plotW / Math.max(1, n);
     const groupW = groupStep * 0.72;
@@ -316,7 +459,7 @@ export const renderChartInner = (comp) => {
       });
 
       if (i % stepEvery === 0) {
-        const rawLbl = String(row[xKey] ?? "");
+        const rawLbl = xText(row, i);
         const shortLbl = rawLbl.length > 13 ? `${rawLbl.slice(0, 12)}…` : rawLbl;
         const xTxt = svgEl("text", {
           x: padL + (i + 0.5) * groupStep,
@@ -333,16 +476,70 @@ export const renderChartInner = (comp) => {
       }
     });
   } else {
-    const xForIdx = (i) => (n === 1 ? padL + plotW / 2 : padL + (i / (n - 1)) * plotW);
+    // Numeric and time x values are placed by value, so an uneven gap shows
+    // as one. Categories, and values that cannot all be read, are spaced
+    // evenly in row order.
+    const xMin = xValues ? Math.min(...xValues) : NaN;
+    const xMax = xValues ? Math.max(...xValues) : NaN;
+    const byValue = Number.isFinite(xMin) && Number.isFinite(xMax) && xMax > xMin;
+    const xForIdx = (i) =>
+      byValue
+        ? padL + ((xValues[i] - xMin) / (xMax - xMin)) * plotW
+        : n === 1
+          ? padL + plotW / 2
+          : padL + (i / (n - 1)) * plotW;
     const baseY = yToPx(Math.max(0, minVal));
 
-    yKeys.forEach((yk, sIdx) => {
+    if (isBand) {
+      // Shade the range wherever both bounds are known; a row without bounds
+      // (the start of a rolling window, say) splits the band.
+      const bandColor = colors[0];
+      let run = [];
+      const flush = () => {
+        if (run.length > 1) {
+          const upper = run.map((r) => `${r.x},${r.hi}`);
+          const lower = run.map((r) => `${r.x},${r.lo}`);
+          svg.appendChild(
+            svgEl("polygon", {
+              points: [...upper, ...lower.slice().reverse()].join(" "),
+              fill: bandColor,
+              "fill-opacity": "0.14",
+              stroke: "none",
+            })
+          );
+          for (const edge of [upper, lower]) {
+            svg.appendChild(
+              svgEl("polyline", {
+                points: edge.join(" "),
+                fill: "none",
+                stroke: bandColor,
+                "stroke-opacity": "0.45",
+                "stroke-width": "1",
+                "stroke-dasharray": "3 3",
+              })
+            );
+          }
+        }
+        run = [];
+      };
+      data.forEach((row, i) => {
+        const bounds = boundsOf(row);
+        if (!bounds) {
+          flush();
+          return;
+        }
+        run.push({ x: xForIdx(i), lo: yToPx(bounds.lo), hi: yToPx(bounds.hi) });
+      });
+      flush();
+    }
+
+    seriesKeys.forEach((yk, sIdx) => {
       const color = colors[sIdx % colors.length];
       const pts = [];
       data.forEach((row, i) => {
         const v = toNumber(row[yk]);
         if (Number.isFinite(v)) {
-          pts.push({ x: xForIdx(i), y: yToPx(v), raw: row[yk], label: row[xKey] ?? i });
+          pts.push({ x: xForIdx(i), y: yToPx(v), raw: row[yk], label: row[xKey] ?? i, value: v, row });
         }
       });
       if (!pts.length) return;
@@ -378,16 +575,33 @@ export const renderChartInner = (comp) => {
 
       if (!isSpark) {
         for (const p of pts) {
+          const bounds = isBand ? boundsOf(p.row) : null;
+          const side = !bounds ? null : p.value > bounds.hi ? "above" : p.value < bounds.lo ? "below" : null;
+          const note = side && comp.note_key ? String(p.row[comp.note_key] ?? "").trim() : "";
+          if (side) {
+            outside.push({
+              label: p.label,
+              raw: p.raw,
+              side,
+              bound: side === "above" ? bounds.hi : bounds.lo,
+              note,
+            });
+          }
           const dot = svgEl("circle", {
             cx: p.x,
             cy: p.y,
-            r: kind === "scatter" ? "4.5" : "3.2",
-            fill: color,
+            r: side ? "5" : isBand ? "2.4" : kind === "scatter" ? "4.5" : "3.2",
+            fill: side ? OUTSIDE_COLOR : color,
             stroke: "var(--surface-card)",
             "stroke-width": "1.5",
           });
           const t = svgEl("title");
           t.textContent = `${p.label} · ${yk}: ${formatCellValue(p.raw)}`;
+          if (bounds) {
+            t.textContent += ` · range ${formatCellValue(bounds.lo)} – ${formatCellValue(bounds.hi)}`;
+            if (side) t.textContent += ` · ${side} range`;
+            if (note) t.textContent += ` · ${note}`;
+          }
           dot.appendChild(t);
           svg.appendChild(dot);
         }
@@ -396,10 +610,29 @@ export const renderChartInner = (comp) => {
 
     if (!isSpark) {
       const stepEvery = Math.max(1, Math.ceil(n / 8));
-      data.forEach((row, i) => {
-        if (i % stepEvery !== 0 && i !== n - 1) return;
-        const rawLbl = String(row[xKey] ?? "");
-        const shortLbl = rawLbl.length > 13 ? `${rawLbl.slice(0, 12)}…` : rawLbl;
+      let labelled;
+      if (byValue) {
+        // Placed by value, points can bunch up: label one only where it
+        // clears the label before it. Dates and times are written in full,
+        // so the room a label needs follows from the longest one.
+        const widest = formatTime ? Math.max(...data.map((row, i) => xText(row, i).length)) : 0;
+        const minGap = Math.max(plotW / 9, widest * 6 + 14);
+        let lastX = -Infinity;
+        labelled = data
+          .map((_, i) => i)
+          .sort((a, b) => xValues[a] - xValues[b])
+          .filter((i) => {
+            if (xForIdx(i) - lastX < minGap) return false;
+            lastX = xForIdx(i);
+            return true;
+          });
+      } else {
+        labelled = data.map((_, i) => i).filter((i) => i % stepEvery === 0 || i === n - 1);
+      }
+      for (const i of labelled) {
+        const rawLbl = xText(data[i], i);
+        const shortLbl =
+          rawLbl.length > 13 && !(byValue && formatTime) ? `${rawLbl.slice(0, 12)}…` : rawLbl;
         const xTxt = svgEl("text", {
           x: xForIdx(i),
           y: H - padB + 17,
@@ -409,7 +642,7 @@ export const renderChartInner = (comp) => {
         });
         xTxt.textContent = shortLbl;
         svg.appendChild(xTxt);
-      });
+      }
     }
   }
 
@@ -425,22 +658,86 @@ export const renderChartInner = (comp) => {
       fontSize: "12.5px",
       color: "var(--dm-text-secondary)",
     });
-    yKeys.forEach((yk, sIdx) => {
+    const legendItem = (label, swatchStyle) => {
       const item = document.createElement("span");
       style(item, { display: "inline-flex", alignItems: "center", gap: "7px" });
       const dot = document.createElement("span");
-      style(dot, {
+      style(dot, { width: "8px", height: "8px", borderRadius: "999px", ...swatchStyle });
+      const txt = document.createElement("span");
+      txt.textContent = label;
+      item.append(dot, txt);
+      legend.appendChild(item);
+    };
+    seriesKeys.forEach((yk, sIdx) => {
+      legendItem(yk, { background: colors[sIdx % colors.length] });
+    });
+    if (isBand) {
+      legendItem(String(comp.band_label || "Expected range"), {
+        width: "14px",
+        borderRadius: "3px",
+        background: `color-mix(in srgb, ${colors[0]} 24%, transparent)`,
+        border: `1px dashed color-mix(in srgb, ${colors[0]} 55%, transparent)`,
+      });
+      if (outside.length) legendItem("Outside range", { background: OUTSIDE_COLOR });
+    }
+    wrap.appendChild(legend);
+  }
+
+  // Hover alone would hide the notes on touch screens and from assistive
+  // technology, so the out-of-range points are also listed under the chart.
+  if (isBand && outside.length) {
+    const list = document.createElement("ul");
+    list.className = "dm-band-outside";
+    style(list, {
+      listStyle: "none",
+      margin: "4px 0 0",
+      padding: "0",
+      display: "flex",
+      flexDirection: "column",
+      gap: "10px",
+      fontSize: "13px",
+      color: "var(--dm-text-primary)",
+    });
+    for (const point of outside.slice(0, MAX_LISTED_OUTSIDE)) {
+      const li = document.createElement("li");
+      style(li, { display: "flex", gap: "10px", alignItems: "baseline" });
+      const marker = document.createElement("span");
+      style(marker, {
         width: "8px",
         height: "8px",
         borderRadius: "999px",
-        background: colors[sIdx % colors.length],
+        background: OUTSIDE_COLOR,
+        flexShrink: "0",
+        transform: "translateY(-1px)",
       });
-      const txt = document.createElement("span");
-      txt.textContent = yk;
-      item.append(dot, txt);
-      legend.appendChild(item);
-    });
-    wrap.appendChild(legend);
+      const body = document.createElement("div");
+      style(body, { display: "flex", flexDirection: "column", gap: "2px", minWidth: "0" });
+      const head = document.createElement("span");
+      const when = document.createElement("strong");
+      when.textContent = String(point.label);
+      style(when, { fontWeight: "500" });
+      const what = document.createElement("span");
+      what.textContent = ` ${formatCellValue(point.raw)}, ${point.side} the range (${
+        point.side === "above" ? "upper" : "lower"
+      } bound ${formatCellValue(point.bound)})`;
+      style(what, { color: "var(--dm-text-secondary)" });
+      head.append(when, what);
+      body.appendChild(head);
+      if (point.note) {
+        const noteEl = document.createElement("span");
+        noteEl.textContent = point.note;
+        body.appendChild(noteEl);
+      }
+      li.append(marker, body);
+      list.appendChild(li);
+    }
+    if (outside.length > MAX_LISTED_OUTSIDE) {
+      const more = document.createElement("li");
+      more.textContent = `+${outside.length - MAX_LISTED_OUTSIDE} more outside the range`;
+      style(more, { color: "var(--dm-text-secondary)" });
+      list.appendChild(more);
+    }
+    wrap.appendChild(list);
   }
 
   return wrap;

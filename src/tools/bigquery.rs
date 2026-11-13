@@ -55,8 +55,15 @@ pub const DEFAULT_BASE_URL: &str = "https://bigquery.googleapis.com/bigquery/v2"
 pub const DEFAULT_MAX_RESULTS: u64 = 200;
 /// Hard cap on `max_results`, whatever the caller asks for.
 pub const MAX_RESULT_ROWS: u64 = 10_000;
-/// Largest single API response body handed to the model (per page).
+/// Most data a tool call hands to the model: the largest listing or metadata
+/// response read, and the most row data `bigquery_execute_sql` returns over
+/// all its pages.
 pub const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+/// Largest page of query results read. BigQuery ends a page at about 10 MB
+/// however many rows were asked for, so a page fits; its rows are then cut
+/// to what [`MAX_RESPONSE_BYTES`] leaves room for. Reading the page and
+/// trimming it beats refusing it: by then the query has run and been billed.
+const MAX_QUERY_PAGE_BYTES: usize = 16 * 1024 * 1024;
 /// Most datasets / tables returned by the listing tools.
 const MAX_LISTED_ITEMS: usize = 1000;
 /// How long one `jobs.query` / `jobs.getQueryResults` call waits for the
@@ -143,6 +150,7 @@ impl BigQueryShared {
         path: &str,
         query: &[(&str, String)],
         body: Option<&Value>,
+        limit: usize,
     ) -> anyhow::Result<Value> {
         let url = format!("{}/{}", self.base_url.trim_end_matches('/'), path);
         let mut req = self
@@ -166,13 +174,13 @@ impl BigQueryShared {
         tracing::info!("Calling {method} {url}");
         let resp = req.send().await?;
         let status = resp.status();
-        let bytes = read_body_limited(resp, MAX_RESPONSE_BYTES)
+        let bytes = read_body_limited(resp, limit)
             .await?
             .ok_or_else(|| ApiFailure {
                 status: Some(status.as_u16()),
                 message: format!(
-                    "{method} {url} returned more than {MAX_RESPONSE_BYTES} bytes, which is too much \
-                     to hand to the model. Ask for fewer rows (max_results) or narrow the query."
+                    "{method} {url} returned more than {limit} bytes, which is too much to read. \
+                     Ask for fewer rows (max_results) or narrow the query."
                 ),
                 details: None,
             })?;
@@ -202,13 +210,58 @@ impl BigQueryShared {
         path: &str,
         query: &[(&str, String)],
     ) -> anyhow::Result<Value> {
-        self.request(token, reqwest::Method::GET, path, query, None)
-            .await
+        self.request(
+            token,
+            reqwest::Method::GET,
+            path,
+            query,
+            None,
+            MAX_RESPONSE_BYTES,
+        )
+        .await
     }
 
     async fn post(&self, token: &str, path: &str, body: &Value) -> anyhow::Result<Value> {
-        self.request(token, reqwest::Method::POST, path, &[], Some(body))
-            .await
+        self.request(
+            token,
+            reqwest::Method::POST,
+            path,
+            &[],
+            Some(body),
+            MAX_RESPONSE_BYTES,
+        )
+        .await
+    }
+
+    /// `jobs.query`: runs a query and returns its first page of results.
+    async fn run_query(&self, token: &str, path: &str, body: &Value) -> anyhow::Result<Value> {
+        self.request(
+            token,
+            reqwest::Method::POST,
+            path,
+            &[],
+            Some(body),
+            MAX_QUERY_PAGE_BYTES,
+        )
+        .await
+    }
+
+    /// `jobs.getQueryResults`: a page of a query's results.
+    async fn query_page(
+        &self,
+        token: &str,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> anyhow::Result<Value> {
+        self.request(
+            token,
+            reqwest::Method::GET,
+            path,
+            query,
+            None,
+            MAX_QUERY_PAGE_BYTES,
+        )
+        .await
     }
 }
 
@@ -1011,7 +1064,7 @@ impl BigQueryExecuteSql {
         let deadline = tokio::time::Instant::now() + QUERY_DEADLINE;
         let mut response = self
             .shared
-            .post(&token, &format!("projects/{project_id}/queries"), &{
+            .run_query(&token, &format!("projects/{project_id}/queries"), &{
                 let mut request = json!({
                     "query": sql,
                     "useLegacySql": false,
@@ -1039,6 +1092,10 @@ impl BigQueryExecuteSql {
         let mut rows: Vec<Value> = Vec::new();
         let mut schema_fields: Vec<Value> = Vec::new();
         let mut truncated = false;
+        // Bytes of row data collected, and the size of the row that did not
+        // fit in `MAX_RESPONSE_BYTES`, if one did not.
+        let mut bytes_used = 0usize;
+        let mut did_not_fit: Option<usize> = None;
         loop {
             if response["jobComplete"].as_bool() != Some(true) {
                 let Some(path) = &results_path else {
@@ -1053,7 +1110,7 @@ impl BigQueryExecuteSql {
                 }
                 response = self
                     .shared
-                    .get(&token, path, &results_query(&location, max_results, None))
+                    .query_page(&token, path, &results_query(&location, max_results, None))
                     .await?;
                 continue;
             }
@@ -1067,10 +1124,19 @@ impl BigQueryExecuteSql {
                 if page.len() > remaining {
                     truncated = true;
                 }
-                rows.extend(rows_to_json(
-                    &schema_fields,
-                    &page[..page.len().min(remaining)],
-                ));
+                for row in rows_to_json(&schema_fields, &page[..page.len().min(remaining)]) {
+                    let size = serde_json::to_string(&row).map_or(0, |text| text.len() + 1);
+                    if bytes_used + size > MAX_RESPONSE_BYTES {
+                        did_not_fit = Some(size);
+                        break;
+                    }
+                    bytes_used += size;
+                    rows.push(row);
+                }
+            }
+            if did_not_fit.is_some() {
+                truncated = true;
+                break;
             }
             let next = response["pageToken"].as_str().map(str::to_string);
             if rows.len() >= max_results as usize {
@@ -1088,7 +1154,7 @@ impl BigQueryExecuteSql {
             }
             response = self
                 .shared
-                .get(
+                .query_page(
                     &token,
                     path,
                     &results_query(&location, max_results - rows.len() as u64, Some(&next)),
@@ -1096,9 +1162,10 @@ impl BigQueryExecuteSql {
                 .await?;
         }
 
+        let rows_returned = rows.len();
         let mut result = json!({
             "rows": rows,
-            "total_rows": rows.len(),
+            "total_rows": rows_returned,
             "truncated": truncated,
         });
         for (key, source) in [
@@ -1113,6 +1180,22 @@ impl BigQueryExecuteSql {
         }
         if let Some(id) = job_id {
             result["job_id"] = json!(id);
+        }
+        if let Some(size) = did_not_fit {
+            let limit = human_bytes(MAX_RESPONSE_BYTES as u64);
+            result["note"] = json!(if rows_returned == 0 {
+                format!(
+                    "No rows are returned: the first row alone is {}, over the {limit} a result \
+                     may hold. Select fewer or shorter columns.",
+                    human_bytes(size as u64)
+                )
+            } else {
+                format!(
+                    "Stopped after {rows_returned} rows: the next one would take the result past \
+                     the {limit} it may hold. Select fewer columns, aggregate, or read the rest \
+                     with LIMIT and OFFSET."
+                )
+            });
         }
         Ok(result)
     }

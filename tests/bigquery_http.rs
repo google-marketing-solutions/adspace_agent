@@ -170,6 +170,21 @@ struct Fake {
     forced: Mutex<Option<(StatusCode, Value)>>,
     /// How many `jobs.getQueryResults` polls report `jobComplete: false`.
     pending_polls: Mutex<usize>,
+    /// When above zero, every row's `label` is this many bytes long.
+    label_bytes: Mutex<usize>,
+}
+
+/// `body`, with each row's `label` padded to the fake's `label_bytes`.
+fn widened(fake: &Fake, mut body: Value) -> Value {
+    let width = *fake.label_bytes.lock().unwrap();
+    if width > 0
+        && let Some(rows) = body["rows"].as_array_mut()
+    {
+        for row in rows {
+            row["f"][1]["v"] = json!("x".repeat(width));
+        }
+    }
+    body
 }
 
 fn bearer(headers: &HeaderMap) -> String {
@@ -390,7 +405,7 @@ async fn query(
     if pending > 0 {
         return axum::Json(page(&[], None, false)).into_response();
     }
-    axum::Json(page(&[1, 2], Some("next-1"), true)).into_response()
+    axum::Json(widened(&fake, page(&[1, 2], Some("next-1"), true))).into_response()
 }
 
 async fn query_results(
@@ -417,10 +432,11 @@ async fn query_results(
             return axum::Json(page(&[], None, false)).into_response();
         }
     }
+    let wide = |body: Value| axum::Json(widened(&fake, body)).into_response();
     match query.get("pageToken").map(String::as_str) {
-        None => axum::Json(page(&[1, 2], Some("next-1"), true)).into_response(),
-        Some("next-1") => axum::Json(page(&[3, 4], Some("next-2"), true)).into_response(),
-        Some("next-2") => axum::Json(page(&[5], None, true)).into_response(),
+        None => wide(page(&[1, 2], Some("next-1"), true)),
+        Some("next-1") => wide(page(&[3, 4], Some("next-2"), true)),
+        Some("next-2") => wide(page(&[5], None, true)),
         Some(other) => (StatusCode::BAD_REQUEST, format!("bad page token {other}")).into_response(),
     }
 }
@@ -794,6 +810,71 @@ async fn a_cap_on_bytes_billed_is_sent_and_checked_against_the_dry_run() {
                 .is_none()
         );
     }
+}
+
+#[tokio::test]
+async fn results_are_cut_to_the_size_limit_and_never_refused_for_their_size() {
+    let ctx = SessionToolContext::with_scopes(&[BIGQUERY_READ_ONLY_SCOPE]);
+    let query = json!({ "query": "SELECT n, label FROM sales.orders", "max_results": 5 });
+    let kib = 1024;
+
+    // Five rows of 700 KiB over three pages, each page under the limit: the
+    // limit applies to the whole result, so two rows fit and the third stops it.
+    let h = Harness::new(true).await;
+    *h.fake.label_bytes.lock().unwrap() = 700 * kib;
+    let result = h
+        .call("bigquery_execute_sql", ctx.clone(), query.clone())
+        .await;
+    assert_eq!(result["total_rows"], 2, "{}", result["note"]);
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["rows"][1]["n"], 2);
+    assert_eq!(result["rows_available"], "5");
+    let note = result["note"].as_str().unwrap();
+    assert!(
+        note.starts_with("Stopped after 2 rows") && note.contains("2.0 MiB"),
+        "{note}"
+    );
+    assert_eq!(
+        h.paths(),
+        vec![
+            "POST /projects/proj/queries",
+            "GET /projects/proj/queries/job-1"
+        ],
+        "the third page is not fetched"
+    );
+
+    // A first page of two 1.5 MiB rows is itself over the limit. It used to
+    // fail the call, after the query had run; now the row that fits comes back.
+    let h = Harness::new(true).await;
+    *h.fake.label_bytes.lock().unwrap() = 1536 * kib;
+    let result = h
+        .call("bigquery_execute_sql", ctx.clone(), query.clone())
+        .await;
+    assert!(result.get("error").is_none(), "{result}");
+    assert_eq!(result["total_rows"], 1);
+    assert_eq!(result["truncated"], true);
+    assert_eq!(h.paths(), vec!["POST /projects/proj/queries"]);
+
+    // One row bigger than the whole limit: nothing to return, and why.
+    let h = Harness::new(true).await;
+    *h.fake.label_bytes.lock().unwrap() = 2560 * kib;
+    let result = h
+        .call("bigquery_execute_sql", ctx.clone(), query.clone())
+        .await;
+    assert_eq!(result["total_rows"], 0);
+    assert_eq!(result["truncated"], true);
+    let note = result["note"].as_str().unwrap();
+    assert!(
+        note.starts_with("No rows are returned: the first row alone is 2.5 MiB"),
+        "{note}"
+    );
+
+    // A result within the limit is untouched and carries no note.
+    let h = Harness::new(true).await;
+    let result = h.call("bigquery_execute_sql", ctx, query).await;
+    assert_eq!(result["total_rows"], 5);
+    assert_eq!(result["truncated"], false);
+    assert!(result.get("note").is_none());
 }
 
 #[tokio::test]

@@ -39,6 +39,13 @@ pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 /// refused unread.
 pub const MAX_JSON_READ_BYTES: usize = 8 * 1024 * 1024;
 
+/// Largest file response read and saved to the session's files. A response
+/// that is not JSON (an export, a caption track, a media download) is a file.
+pub const MAX_FILE_BYTES: usize = 32 * 1024 * 1024;
+
+/// How much of a saved text file is also shown to the model.
+const FILE_PREVIEW_CHARS: usize = 2000;
+
 /// Room kept in a trimmed response for the note saying it was trimmed.
 const TRUNCATION_NOTE_BYTES: usize = 1024;
 
@@ -381,44 +388,167 @@ impl GoogleApiTool {
         tracing::info!("Calling {} {}", prepared.method, prepared.url);
         let resp = req.send().await?;
         let status = resp.status();
-        let bytes = match read_body_limited(resp, MAX_JSON_READ_BYTES).await {
+        let media_type = media_type(resp.headers());
+        // A file may be larger than a JSON response is allowed to be: it is
+        // saved, not handed to the model.
+        let read_limit = if media_type.as_deref().is_none_or(is_json_media_type) {
+            MAX_JSON_READ_BYTES
+        } else {
+            MAX_FILE_BYTES
+        };
+        let refused = |limit: usize| too_large(status, &prepared.method, &prepared.url, limit);
+        let bytes = match read_body_limited(resp, read_limit).await {
             Ok(bytes) => bytes,
-            Err(BodyError::TooLarge(limit)) => {
-                return Ok(too_large(status, &prepared.method, &prepared.url, limit));
-            }
+            Err(BodyError::TooLarge(limit)) => return Ok(refused(limit)),
             Err(BodyError::Transport(e)) => return Err(e.into()),
         };
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            // Too much to hand over as it is. A list from a successful call
-            // is cut to the items that fit; nothing else can be cut down.
-            if status.is_success()
-                && let Ok(mut body) = serde_json::from_slice::<Value>(&bytes)
-                && trim_to_fit(&mut body, MAX_RESPONSE_BYTES)
-            {
-                return Ok(body);
-            }
-            return Ok(too_large(
-                status,
-                &prepared.method,
-                &prepared.url,
-                MAX_RESPONSE_BYTES,
-            ));
-        }
-        let text = String::from_utf8_lossy(&bytes);
-        let body: Value =
-            serde_json::from_str(&text).unwrap_or_else(|_| json!({ "content": text.into_owned() }));
-        if status.is_success() {
-            Ok(body)
-        } else {
-            Ok(json!({
+        let oversized = bytes.len() > MAX_RESPONSE_BYTES;
+        let failed = |details: Value| {
+            json!({
                 "error": {
                     "status": status.as_u16(),
                     "message": format!("{} {} failed with HTTP {status}", prepared.method, prepared.url),
-                    "details": body,
+                    "details": details,
                 }
-            }))
+            })
+        };
+
+        // JSON, whatever the Content-Type says.
+        if let Ok(mut body) = serde_json::from_slice::<Value>(&bytes) {
+            if !status.is_success() {
+                return Ok(if oversized {
+                    refused(MAX_RESPONSE_BYTES)
+                } else {
+                    failed(body)
+                });
+            }
+            // Too much to hand over as it is? A list is cut to the items
+            // that fit; nothing else can be cut down.
+            if oversized && !trim_to_fit(&mut body, MAX_RESPONSE_BYTES) {
+                return Ok(refused(MAX_RESPONSE_BYTES));
+            }
+            return Ok(body);
+        }
+
+        if !status.is_success() {
+            return Ok(if oversized {
+                refused(MAX_RESPONSE_BYTES)
+            } else {
+                failed(json!({ "content": String::from_utf8_lossy(&bytes) }))
+            });
+        }
+        // A short piece of text is handed over as it is.
+        if !oversized && let Ok(text) = std::str::from_utf8(&bytes) {
+            return Ok(json!({ "content": text }));
+        }
+        // Anything else is a file: binary content, which text would mangle,
+        // or text too long to hand over.
+        match self.save_file(ctx, media_type.as_deref(), bytes).await? {
+            Saved::Yes(value) => Ok(value),
+            Saved::NoFileStore { bytes, media_type } if bytes > MAX_RESPONSE_BYTES => {
+                tracing::debug!("{media_type} response of {bytes} bytes has nowhere to be saved");
+                Ok(refused(MAX_RESPONSE_BYTES))
+            }
+            Saved::NoFileStore { bytes, media_type } => Ok(json!({
+                "error": {
+                    "code": "FILE_NOT_SAVED",
+                    "message": format!(
+                        "{} {} returned a file ({media_type}, {bytes} bytes), and this session \
+                         has no file store to save it in.",
+                        prepared.method, prepared.url
+                    ),
+                }
+            })),
         }
     }
+
+    /// Saves a file response to the session's files and describes it for the
+    /// model: its name, type and size, and the start of it when it is text.
+    async fn save_file(
+        &self,
+        ctx: &Arc<dyn ToolContext>,
+        media_type: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<Saved> {
+        let size = bytes.len();
+        let text = String::from_utf8(bytes);
+        // A text body sent without a type, or as a byte stream (caption
+        // tracks are), is text.
+        let media_type = match (media_type, &text) {
+            (None | Some("application/octet-stream"), Ok(_)) => "text/plain",
+            (None, Err(_)) => "application/octet-stream",
+            (Some(media_type), _) => media_type,
+        }
+        .to_string();
+        let Some(artifacts) = ctx.artifacts() else {
+            return Ok(Saved::NoFileStore {
+                bytes: size,
+                media_type,
+            });
+        };
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let filename = format!(
+            "{}-{}.{}",
+            self.name,
+            &id[..8],
+            crate::agent::extension_for(&media_type)
+        );
+        // Text is stored as text so loading the file gives readable content
+        // rather than base64; anything else keeps its bytes and its type.
+        let (part, preview) = match text {
+            Ok(text) => {
+                let preview: String = text.chars().take(FILE_PREVIEW_CHARS).collect();
+                (adk_rust::Part::Text { text }, Some(preview))
+            }
+            Err(not_text) => (
+                // Built directly, not via `Part::inline_data`, whose size
+                // check is meant for model requests.
+                adk_rust::Part::InlineData {
+                    mime_type: media_type.clone(),
+                    data: not_text.into_bytes(),
+                    uri: None,
+                    annotations: None,
+                },
+                None,
+            ),
+        };
+        let version = artifacts.save(&filename, &part).await?;
+        let mut actions = ctx.actions();
+        actions.artifact_delta.insert(filename.clone(), version);
+        ctx.set_actions(actions);
+        tracing::info!("Saved a {media_type} response of {size} bytes as '{filename}'");
+
+        let mut value = json!({
+            "file": { "saved_as": filename, "mime_type": media_type, "bytes": size },
+            "note": "The response was a file, not JSON, so it was saved to this session's \
+                     files under that name. Load it from there to read it.",
+        });
+        if let Some(preview) = preview {
+            value["preview"] = json!(preview);
+        }
+        Ok(Saved::Yes(value))
+    }
+}
+
+/// What became of a file response.
+enum Saved {
+    /// It was saved; this is what the model is told.
+    Yes(Value),
+    /// The session has no file store.
+    NoFileStore { bytes: usize, media_type: String },
+}
+
+/// The media type of a response: its `Content-Type` without parameters, in
+/// lower case.
+fn media_type(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let value = headers.get(reqwest::header::CONTENT_TYPE)?.to_str().ok()?;
+    let media_type = value.split(';').next()?.trim().to_ascii_lowercase();
+    (!media_type.is_empty()).then_some(media_type)
+}
+
+/// Whether a media type is JSON (`application/json`, `…+json`).
+fn is_json_media_type(media_type: &str) -> bool {
+    media_type == "application/json" || media_type.ends_with("+json")
 }
 
 /// Why a response body could not be read in full.

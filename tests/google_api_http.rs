@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use adk_rust::{
-    Artifacts, CallbackContext, Content, EventActions, MemoryEntry, ReadonlyContext, Session,
+    Artifacts, CallbackContext, Content, EventActions, MemoryEntry, Part, ReadonlyContext, Session,
     State, Tool, ToolContext,
 };
 use adspace_agent::auth::{
@@ -65,9 +65,53 @@ struct SessionToolContext {
     state: HashMap<String, Value>,
     actions: Mutex<EventActions>,
     content: Content,
+    /// The session's file store, when it has one.
+    files: Option<Arc<MemoryFiles>>,
+}
+
+/// An in-memory stand-in for the session's file store.
+#[derive(Default)]
+struct MemoryFiles {
+    saved: Mutex<Vec<(String, Part)>>,
+}
+
+#[async_trait]
+impl Artifacts for MemoryFiles {
+    async fn save(&self, name: &str, data: &Part) -> adk_rust::Result<i64> {
+        let mut saved = self.saved.lock().unwrap();
+        saved.push((name.to_string(), data.clone()));
+        Ok(saved.len() as i64 - 1)
+    }
+    async fn load(&self, name: &str) -> adk_rust::Result<Part> {
+        self.saved
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(saved, _)| saved == name)
+            .map(|(_, part)| part.clone())
+            .ok_or_else(|| adk_rust::AdkError::tool(format!("no file named {name}")))
+    }
+    async fn list(&self) -> adk_rust::Result<Vec<String>> {
+        Ok(self
+            .saved
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect())
+    }
 }
 
 impl SessionToolContext {
+    /// Like [`Self::with_token`], in a session that has a file store.
+    fn with_files() -> (Arc<Self>, Arc<MemoryFiles>) {
+        let files = Arc::new(MemoryFiles::default());
+        let mut ctx = Arc::into_inner(Self::with_token()).unwrap();
+        ctx.files = Some(files.clone());
+        (Arc::new(ctx), files)
+    }
+
     fn with_token() -> Arc<Self> {
         let token = OAuthToken {
             access_token: "ya29.test-token".into(),
@@ -82,6 +126,7 @@ impl SessionToolContext {
             )]),
             actions: Mutex::new(EventActions::default()),
             content: Content::new("user"),
+            files: None,
         })
     }
 }
@@ -143,7 +188,7 @@ impl Session for SessionToolContext {
 #[async_trait]
 impl CallbackContext for SessionToolContext {
     fn artifacts(&self) -> Option<Arc<dyn Artifacts>> {
-        None
+        self.files.clone().map(|files| files as Arc<dyn Artifacts>)
     }
 }
 
@@ -311,11 +356,45 @@ fn api_router(seen: Arc<Seen>) -> Router {
                     if id == "missing" {
                         return (StatusCode::NOT_FOUND, "plain text not found").into_response();
                     }
+                    let file = |media_type: &str, body: Vec<u8>| {
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", media_type)
+                            .body(Body::from(body))
+                            .unwrap()
+                    };
+                    match id.as_str() {
+                        // An export: binary, and small.
+                        "report" => return file("application/pdf", pdf_bytes()),
+                        // A caption track: text sent as a byte stream, over the cap.
+                        "captions" => {
+                            return file("application/octet-stream", captions().into_bytes());
+                        }
+                        // A short text body.
+                        "memo" => {
+                            return file("text/plain; charset=utf-8", b"hello there".to_vec());
+                        }
+                        _ => {}
+                    }
                     axum::Json(json!({"name": id})).into_response()
                 },
             ),
         )
         .with_state(seen)
+}
+
+/// A small body that is not text: a PDF header followed by bytes that are
+/// not valid UTF-8.
+fn pdf_bytes() -> Vec<u8> {
+    let mut bytes = b"%PDF-1.7\n".to_vec();
+    bytes.extend((0..2000u32).map(|i| 0x80 | (i % 0x40) as u8));
+    bytes
+}
+
+/// A caption track a little over the cap.
+fn captions() -> String {
+    let line = "00:00:01.000 --> 00:00:04.000\nA line of captions.\n\n";
+    line.repeat(MAX_RESPONSE_BYTES / line.len() + 200)
 }
 
 async fn toolset(base: &str) -> GoogleApiToolset {
@@ -446,6 +525,99 @@ async fn an_oversized_list_comes_back_trimmed_not_refused() {
     assert_eq!(out["truncated"]["dropped"], 750 - things.len());
     assert_eq!(out["nextPageToken"], "page-2");
     assert!(out.to_string().len() <= MAX_RESPONSE_BYTES);
+}
+
+#[tokio::test]
+async fn a_file_response_is_saved_to_the_sessions_files() {
+    let seen = Arc::new(Seen::default());
+    let base = spawn(api_router(seen)).await;
+    let ts = toolset(&base).await;
+    let get = tool(&ts, "demo_things_get");
+    let (session, files) = SessionToolContext::with_files();
+    let ctx = session.clone() as Arc<dyn ToolContext>;
+
+    // Binary content is saved byte for byte, with its type, and never
+    // handed to the model as text.
+    let out = get
+        .execute(ctx.clone(), json!({"thing_id": "report"}))
+        .await
+        .unwrap();
+    let name = out["file"]["saved_as"].as_str().unwrap().to_string();
+    assert!(
+        name.starts_with("demo_things_get-") && name.ends_with(".pdf"),
+        "{name}"
+    );
+    assert_eq!(out["file"]["mime_type"], "application/pdf");
+    assert_eq!(out["file"]["bytes"], pdf_bytes().len());
+    assert!(out.get("content").is_none() && out.get("preview").is_none());
+    assert!(
+        out["note"]
+            .as_str()
+            .unwrap()
+            .contains("saved to this session's files")
+    );
+    match files.load(&name).await.unwrap() {
+        Part::InlineData {
+            mime_type, data, ..
+        } => {
+            assert_eq!(mime_type, "application/pdf");
+            assert_eq!(data, pdf_bytes());
+        }
+        other => panic!("expected the bytes, got {other:?}"),
+    }
+    // The turn records the new file, as it does for generated media.
+    assert!(session.actions().artifact_delta.contains_key(&name));
+
+    // Text too long to hand over is saved as text, with its start shown.
+    let out = get
+        .execute(ctx.clone(), json!({"thing_id": "captions"}))
+        .await
+        .unwrap();
+    let name = out["file"]["saved_as"].as_str().unwrap().to_string();
+    assert!(name.ends_with(".txt"), "{name}");
+    assert_eq!(out["file"]["mime_type"], "text/plain");
+    assert_eq!(out["file"]["bytes"], captions().len());
+    let preview = out["preview"].as_str().unwrap();
+    assert_eq!(preview.len(), 2000);
+    assert!(captions().starts_with(preview));
+    assert!(
+        out.to_string().len() < 4_000,
+        "the file itself is not echoed"
+    );
+    match files.load(&name).await.unwrap() {
+        Part::Text { text } => assert_eq!(text, captions()),
+        other => panic!("expected text, got {other:?}"),
+    }
+
+    // A short text body still comes back inline, and nothing is saved for it.
+    let out = get.execute(ctx, json!({"thing_id": "memo"})).await.unwrap();
+    assert_eq!(out, json!({"content": "hello there"}));
+    assert_eq!(files.list().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_file_with_nowhere_to_go_is_reported_not_mangled() {
+    let seen = Arc::new(Seen::default());
+    let base = spawn(api_router(seen)).await;
+    let ts = toolset(&base).await;
+    let get = tool(&ts, "demo_things_get");
+    // A session with no file store.
+    let ctx = SessionToolContext::with_token() as Arc<dyn ToolContext>;
+
+    let out = get
+        .execute(ctx.clone(), json!({"thing_id": "report"}))
+        .await
+        .unwrap();
+    assert_eq!(out["error"]["code"], "FILE_NOT_SAVED", "{out}");
+    let message = out["error"]["message"].as_str().unwrap();
+    assert!(message.contains("application/pdf") && message.contains("no file store"));
+    assert!(out.get("content").is_none());
+
+    let out = get
+        .execute(ctx, json!({"thing_id": "captions"}))
+        .await
+        .unwrap();
+    assert_eq!(out["error"]["code"], "RESPONSE_TOO_LARGE", "{out}");
 }
 
 #[tokio::test]

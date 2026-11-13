@@ -1169,12 +1169,17 @@ pub fn is_text_mime(mime_type: &str) -> bool {
         )
 }
 
-/// File extension for a MIME type (used when uploads carry no name).
+/// File extension for a MIME type (used when an upload, or a file an API
+/// returned, carries no name).
 pub fn extension_for(mime_type: &str) -> &'static str {
     match mime_type.split(';').next().unwrap_or_default().trim() {
         "text/csv" | "application/csv" | "application/vnd.ms-excel" => "csv",
         "text/plain" => "txt",
         "text/markdown" => "md",
+        "text/html" => "html",
+        "text/tab-separated-values" => "tsv",
+        "text/vtt" => "vtt",
+        "application/x-subrip" => "srt",
         "application/json" => "json",
         "application/pdf" => "pdf",
         "image/png" => "png",
@@ -1184,6 +1189,10 @@ pub fn extension_for(mime_type: &str) -> &'static str {
         "video/mp4" => "mp4",
         "audio/mpeg" => "mp3",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "application/zip" => "zip",
+        "image/svg+xml" => "svg",
         _ => "bin",
     }
 }
@@ -1958,6 +1967,15 @@ mod tests {
         assert_eq!(extension_for("text/csv; charset=utf-8"), "csv");
         assert_eq!(extension_for("image/png"), "png");
         assert_eq!(extension_for("application/x-unknown"), "bin");
+        // What Drive exports and caption downloads come back as.
+        assert_eq!(extension_for("text/vtt"), "vtt");
+        assert_eq!(extension_for("application/zip"), "zip");
+        assert_eq!(
+            extension_for(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ),
+            "docx"
+        );
     }
 
     #[tokio::test]

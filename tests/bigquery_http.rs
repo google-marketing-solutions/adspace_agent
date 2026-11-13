@@ -477,12 +477,17 @@ impl Harness {
     }
 
     async fn build(read_only: bool, dry_run: bool) -> Self {
+        Self::build_capped(read_only, dry_run, None).await
+    }
+
+    async fn build_capped(read_only: bool, dry_run: bool, max_bytes_billed: Option<u64>) -> Self {
         let fake = Arc::new(Fake::default());
         let base = spawn(fake.clone()).await;
         let toolset = BigQueryToolset::new(credentials())
             .with_project(Some("proj".into()))
             .with_read_only(read_only)
             .with_dry_run(dry_run)
+            .with_max_bytes_billed(max_bytes_billed)
             .with_base_url(base);
         let ctx: Arc<dyn ReadonlyContext> = SessionToolContext::with_scopes(&[]);
         let tools = toolset
@@ -720,6 +725,75 @@ async fn optional_dry_run_mode_classifies_queries_via_jobs_endpoint() {
         h.paths(),
         vec!["POST /projects/proj/jobs", "POST /projects/proj/queries",]
     );
+}
+
+/// The body of the last request to `path`, as the fake saw it.
+fn last_body(h: &Harness, path: &str) -> Value {
+    h.fake
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(_, seen, ..)| seen == path)
+        .and_then(|(.., body)| body.clone())
+        .expect("a request with a body")
+}
+
+#[tokio::test]
+async fn a_cap_on_bytes_billed_is_sent_and_checked_against_the_dry_run() {
+    let ctx = SessionToolContext::with_scopes(&[BIGQUERY_READ_ONLY_SCOPE]);
+    let query = json!({ "query": "SELECT n, label FROM sales.orders", "max_results": 2 });
+
+    // The fake's dry run estimates 10 bytes: over a cap of 5, the query is
+    // refused without being sent.
+    let h = Harness::build_capped(true, true, Some(5)).await;
+    let refused = h
+        .call("bigquery_execute_sql", ctx.clone(), query.clone())
+        .await;
+    assert_eq!(refused["error"]["code"], "BYTES_BILLED_LIMIT", "{refused}");
+    assert_eq!(refused["error"]["estimated_bytes"], 10);
+    assert_eq!(refused["error"]["limit_bytes"], 5);
+    let message = refused["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("about 10 B") && message.contains("is 5 B"),
+        "{message}"
+    );
+    assert_eq!(h.paths(), vec!["POST /projects/proj/jobs"]);
+
+    // Under the cap it runs, and BigQuery is told the cap so it enforces it.
+    let h = Harness::build_capped(true, true, Some(100)).await;
+    let result = h
+        .call("bigquery_execute_sql", ctx.clone(), query.clone())
+        .await;
+    assert_eq!(result["total_rows"], 2);
+    assert_eq!(
+        last_body(&h, "/projects/proj/queries")["maximumBytesBilled"],
+        "100"
+    );
+
+    // Without a dry run there is no estimate; the cap still goes to BigQuery.
+    let h = Harness::build_capped(true, false, Some(5)).await;
+    let result = h
+        .call("bigquery_execute_sql", ctx.clone(), query.clone())
+        .await;
+    assert_eq!(result["total_rows"], 2);
+    assert_eq!(
+        last_body(&h, "/projects/proj/queries")["maximumBytesBilled"],
+        "5"
+    );
+
+    // No cap, or a cap of zero: the field is not sent.
+    for cap in [None, Some(0)] {
+        let h = Harness::build_capped(true, true, cap).await;
+        h.call("bigquery_execute_sql", ctx.clone(), query.clone())
+            .await;
+        assert!(
+            last_body(&h, "/projects/proj/queries")
+                .get("maximumBytesBilled")
+                .is_none()
+        );
+    }
 }
 
 #[tokio::test]

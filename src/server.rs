@@ -1270,6 +1270,12 @@ fn launcher(runtime: &AgentRuntime) -> Launcher {
     if let Some(cache_cfg) = runtime.context_cache_config_opt() {
         l = l.with_context_cache(cache_cfg, runtime.models.clone() as Arc<dyn CacheCapable>);
     }
+    if crate::logging::format() == crate::logging::LogFormat::Json {
+        // The JSON logger is already installed. Left to itself the launcher
+        // would install adk-rust's console logger and span exporter over it,
+        // which panics once a global logger exists.
+        l = l.with_telemetry(adk_cli::launcher::TelemetryConfig::None);
+    }
     l
 }
 

@@ -23,15 +23,22 @@
 #
 #   ./deploy.sh                                  # build + deploy
 #   ./deploy.sh --skip-build                     # redeploy the current :latest image
+#   TAG=897b08342f62 ./deploy.sh --skip-build    # deploy an earlier build again (roll back)
 #   ./deploy.sh -- --update-env-vars ADMIN_EMAILS=you@example.com
+#
+# Each build is pushed as :latest and under a tag naming what was built: the
+# commit (`git rev-parse --short=12 HEAD`), with `-dirty-<time>` appended when
+# the working tree has uncommitted changes, or `build-<time>` outside a git
+# checkout. The deploy uses that tag, so a revision names the build it runs and
+# any earlier build can be deployed again by its tag.
 #
 # Settings (environment variables, all optional):
 #   PROJECT_ID  Google Cloud project   (default: gcloud config project)
 #   REGION      Cloud Run / Cloud Build region   (default: us-central1)
 #   SERVICE     Cloud Run service name           (default: adspace-agent-rs)
 #   AR_REPO     Artifact Registry repository     (default: cloud-run-source-deploy)
-#   TAG         Image tag to deploy              (default: latest; cloudbuild.yaml
-#               always pushes :latest, so other tags only make sense with --skip-build)
+#   TAG         Image tag to build and deploy    (default: the commit, as above;
+#               with --skip-build: latest)
 #
 # REGION, SERVICE and AR_REPO must match the substitutions in cloudbuild.yaml.
 set -euo pipefail
@@ -42,7 +49,6 @@ PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null)}"
 REGION="${REGION:-us-central1}"
 SERVICE="${SERVICE:-adspace-agent-rs}"
 AR_REPO="${AR_REPO:-cloud-run-source-deploy}"
-TAG="${TAG:-latest}"
 
 skip_build=false
 extra_args=()
@@ -60,18 +66,41 @@ if [[ -z "$PROJECT_ID" ]]; then
   exit 2
 fi
 
+# The tag naming what is about to be built.
+build_tag() {
+  local stamp commit
+  stamp="$(date -u +%Y%m%d%H%M%S)"
+  if commit="$(git rev-parse --short=12 HEAD 2>/dev/null)"; then
+    if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+      echo "Note: the working tree has uncommitted changes; they will be built." >&2
+      echo "${commit}-dirty-${stamp}"
+    else
+      echo "$commit"
+    fi
+  else
+    echo "build-${stamp}"
+  fi
+}
+
+if [[ "$skip_build" == true ]]; then
+  TAG="${TAG:-latest}"
+else
+  TAG="${TAG:-$(build_tag)}"
+fi
+if [[ ! "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+  echo "TAG '${TAG}' is not a valid image tag." >&2
+  exit 2
+fi
+
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE}:${TAG}"
 
 if [[ "$skip_build" == false ]]; then
-  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
-    echo "Note: the working tree has uncommitted changes; they will be built." >&2
-  fi
   echo "==> Building ${IMAGE} with cloudbuild.yaml"
   gcloud builds submit \
     --project "$PROJECT_ID" \
     --region "$REGION" \
     --config cloudbuild.yaml \
-    --substitutions "_REGION=${REGION},_AR_REPO=${AR_REPO},_SERVICE=${SERVICE}" \
+    --substitutions "_REGION=${REGION},_AR_REPO=${AR_REPO},_SERVICE=${SERVICE},_TAG=${TAG}" \
     .
 fi
 

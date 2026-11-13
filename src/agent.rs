@@ -50,6 +50,7 @@ use crate::tools::bigquery::BigQueryToolset;
 use crate::tools::cm360_trafficking::{Cm360Services, Cm360TraffickingToolset};
 use crate::tools::custom_ui::custom_ui_toolset;
 use crate::tools::data_analysis::{PythonExecutorKind, data_analysis_toolset};
+use crate::tools::expected_range::analysis_toolset;
 use crate::tools::gemini_builtins::{GeminiBuiltinTool, gemini_builtin_toolset};
 use crate::tools::genai::google_genai_toolset_with_controller;
 use crate::tools::lazy::{EnableToolsetsTool, LazyToolset, LazyToolsetEntry};
@@ -1187,6 +1188,61 @@ pub fn extension_for(mime_type: &str) -> &'static str {
     }
 }
 
+/// Most characters of an error kept in a log line.
+const LOGGED_ERROR_CHARS: usize = 400;
+
+/// The error a tool response reports, cut to [`LOGGED_ERROR_CHARS`].
+///
+/// A failed call comes back as a response with an `error` member, a string
+/// or an object with a `message`: that is how the tools here report an API
+/// failure, and how adk-rust reports a tool that returned `Err` or that the
+/// model named but does not exist. A consent prompt (`status:
+/// "AUTH_REQUIRED"`) is not a failure and has no `error`.
+fn tool_error(response: &serde_json::Value) -> Option<String> {
+    let error = response.get("error").filter(|e| !e.is_null())?;
+    let text = match error {
+        serde_json::Value::String(text) => text.clone(),
+        other => other
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| other.to_string()),
+    };
+    Some(text.chars().take(LOGGED_ERROR_CHARS).collect())
+}
+
+/// Logs what went wrong in `event`: tool calls that failed and a model call
+/// that ended in an error. Without this a failed call is only visible in the
+/// stored session, and filtering the logs by severity finds nothing.
+fn log_failures(event: &adk_rust::Event, session_id: &str) {
+    if let Some(message) = &event.llm_response.error_message {
+        let error: String = message.chars().take(LOGGED_ERROR_CHARS).collect();
+        tracing::warn!(
+            session = %session_id,
+            code = event.llm_response.error_code.as_deref().unwrap_or(""),
+            error = %error,
+            "model call failed"
+        );
+    }
+    let Some(content) = event.content() else {
+        return;
+    };
+    for part in &content.parts {
+        if let Part::FunctionResponse {
+            function_response, ..
+        } = part
+            && let Some(error) = tool_error(&function_response.response)
+        {
+            tracing::warn!(
+                session = %session_id,
+                tool = %function_response.name,
+                error = %error,
+                "tool call failed"
+            );
+        }
+    }
+}
+
 /// Wraps an agent so that, after every invocation, the session conversation
 /// is written to the memory service (the counterpart of the Python
 /// `auto_save_session_to_memory_callback`).
@@ -1235,7 +1291,13 @@ impl Agent for MemorySavingAgent {
 
         let stream = self.inner.run(ctx).await?;
         let sink = collected.clone();
+        let logged_session = session_id.clone();
         let forwarded = stream.inspect(move |event| {
+            if let Ok(event) = event
+                && !event.llm_response.partial
+            {
+                log_failures(event, &logged_session);
+            }
             if let Ok(event) = event
                 && !event.llm_response.partial
                 && let Some(content) = event.content()
@@ -1342,6 +1404,7 @@ pub async fn create_agent(
         Ok(None) => {}
         Err(e) => tracing::warn!("Gemini built-in tools disabled: {e:#}"),
     }
+    toolsets.push(Arc::new(analysis_toolset()));
     toolsets.push(Arc::new(utilities_toolset()));
     toolsets.push(Arc::new(ui_toolset()));
     toolsets.push(Arc::new(custom_ui_toolset()));
@@ -1415,7 +1478,11 @@ pub async fn create_agent(
             BigQueryToolset::new(credentials.clone())
                 .with_project(settings.google_cloud_project.clone())
                 .with_read_only(config::env_bool_or("BIGQUERY_READ_ONLY", true))
-                .with_dry_run(config::env_bool_or("BIGQUERY_DRY_RUN", false)),
+                .with_dry_run(config::env_bool_or("BIGQUERY_DRY_RUN", true))
+                .with_max_bytes_billed(Some(config::env_u64_or(
+                    "BIGQUERY_MAX_BYTES_BILLED",
+                    crate::tools::bigquery::DEFAULT_MAX_BYTES_BILLED,
+                ))),
         );
         if settings.lazy_toolsets.iter().any(|n| n == "bigquery") {
             let (tool_count, declaration_bytes) =
@@ -1723,6 +1790,40 @@ mod tests {
             fr.response,
             serde_json::json!({ "status": "rendered", "components": 1 })
         );
+    }
+
+    #[test]
+    fn tool_errors_are_read_from_every_shape_a_failure_takes() {
+        use serde_json::json;
+        // adk-rust, for a tool the model named that does not exist.
+        assert_eq!(
+            tool_error(&json!({ "error": "Tool python_interpreter not found" })).as_deref(),
+            Some("Tool python_interpreter not found")
+        );
+        // An API failure reported by a tool here.
+        assert_eq!(
+            tool_error(&json!({ "error": { "status": 400, "message": "Bad Request" } })).as_deref(),
+            Some("Bad Request")
+        );
+        // An error object with no message is logged whole.
+        assert_eq!(
+            tool_error(&json!({ "error": { "code": "READ_ONLY_VIOLATION" } })).as_deref(),
+            Some(r#"{"code":"READ_ONLY_VIOLATION"}"#)
+        );
+        // Long errors are cut, on a character boundary.
+        let long = "é".repeat(LOGGED_ERROR_CHARS + 50);
+        assert_eq!(
+            tool_error(&json!({ "error": long }))
+                .unwrap()
+                .chars()
+                .count(),
+            LOGGED_ERROR_CHARS
+        );
+        // Not failures: a result, a null error, a consent prompt.
+        assert_eq!(tool_error(&json!({ "results": [] })), None);
+        assert_eq!(tool_error(&json!({ "error": null, "rows": 3 })), None);
+        assert_eq!(tool_error(&json!({ "status": "AUTH_REQUIRED" })), None);
+        assert_eq!(tool_error(&json!("plain text result")), None);
     }
 
     #[test]

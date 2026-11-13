@@ -24,6 +24,7 @@ pub mod config;
 pub mod gcs;
 pub mod genai;
 pub mod google_api;
+pub mod logging;
 pub mod server;
 pub mod services;
 pub mod tools;

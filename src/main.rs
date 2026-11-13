@@ -103,25 +103,6 @@ enum ListTarget {
     All,
 }
 
-/// Default `RUST_LOG` filter when the operator did not set one.
-const DEFAULT_LOG_FILTER: &str = "info,sqlx=warn,hyper=warn,h2=warn,reqwest=warn";
-
-/// Installs adk-rust's telemetry: a `tracing` console layer plus the
-/// in-process span exporter that backs the web UI's Trace tab.
-///
-/// The Launcher calls the same initializer again when building the server;
-/// that call is idempotent and reuses this exporter. Must run before the
-/// Tokio runtime starts because it may set `RUST_LOG`.
-fn init_tracing() {
-    if std::env::var_os("RUST_LOG").is_none() {
-        // SAFETY: called from `main` before any other thread exists.
-        unsafe { std::env::set_var("RUST_LOG", DEFAULT_LOG_FILTER) };
-    }
-    if let Err(e) = adk_rust::telemetry::init_with_adk_exporter("adspace-agent") {
-        eprintln!("warning: telemetry initialization failed: {e}");
-    }
-}
-
 async fn list_tools(target: ListTarget, sizes: bool, scopes: bool) -> anyhow::Result<()> {
     let settings = Settings::from_env()?;
     let credentials = build_credential_manager(&settings);
@@ -215,7 +196,8 @@ async fn list_tools(target: ListTarget, sizes: bool, scopes: bool) -> anyhow::Re
 
 fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    init_tracing();
+    // Before the Tokio runtime starts: it may set `RUST_LOG`.
+    adspace_agent::logging::init("adspace-agent");
     adk_rust::ensure_crypto_provider();
     let cli = Cli::parse();
     tokio::runtime::Builder::new_multi_thread()

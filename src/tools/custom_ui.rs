@@ -58,7 +58,7 @@ fn invalid(message: impl std::fmt::Display) -> AdkError {
 
 /// A number, or a string holding one (`"1,234.5"`, `"$12"`, `"8%"`), the way
 /// the renderer reads cell values.
-fn as_number(value: &Value) -> Option<f64> {
+pub(crate) fn as_number(value: &Value) -> Option<f64> {
     match value {
         Value::Number(n) => n.as_f64(),
         Value::String(s) => {

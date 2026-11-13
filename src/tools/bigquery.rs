@@ -27,9 +27,14 @@
 //! Read-only mode (the default, `BIGQUERY_READ_ONLY=true`) asks for the
 //! `bigquery.readonly` scope and lets `bigquery_execute_sql` run a single
 //! `SELECT` / `WITH … SELECT` statement only: a lexical check rejects anything
-//! else before any request is sent. With `BIGQUERY_DRY_RUN=true` a dry run must
-//! also classify the statement as `SELECT` before it executes; that preflight
-//! is off by default.
+//! else before any request is sent. With `BIGQUERY_DRY_RUN=true` (the server's
+//! default) a dry run must also classify the statement as `SELECT` before it
+//! executes, which costs one extra round trip per query and bills nothing.
+//!
+//! `BIGQUERY_MAX_BYTES_BILLED` caps what one query may bill
+//! ([`DEFAULT_MAX_BYTES_BILLED`] unless set; `0` removes the cap). BigQuery
+//! enforces it; when a dry run ran first, a query whose estimate is already
+//! over the cap is refused before it is sent.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,6 +67,12 @@ const QUERY_DEADLINE: Duration = Duration::from_secs(5 * 60);
 /// The statement type a BigQuery dry run reports for a query that only reads.
 const SELECT_STATEMENT_TYPE: &str = "SELECT";
 
+/// Most bytes one query may bill unless `BIGQUERY_MAX_BYTES_BILLED` says
+/// otherwise: 100 GiB, about $0.60 at on-demand rates. Enough for a scan of a
+/// large reporting table, and well short of an accidental scan of a whole
+/// multi-terabyte one.
+pub const DEFAULT_MAX_BYTES_BILLED: u64 = 100 * 1024 * 1024 * 1024;
+
 /// What the toolset's tools share: credentials, defaults and the HTTP client.
 #[derive(Clone)]
 struct BigQueryShared {
@@ -69,6 +80,8 @@ struct BigQueryShared {
     project_id: Option<String>,
     read_only: bool,
     dry_run: bool,
+    /// Most bytes a query may bill; `None` for no cap.
+    max_bytes_billed: Option<u64>,
     base_url: String,
     http: reqwest::Client,
 }
@@ -260,6 +273,16 @@ fn failure_json(e: &anyhow::Error) -> Value {
                         ),
                     );
                 }
+            }
+            if failure.message.contains("bytes billed") {
+                error.insert(
+                    "hint".into(),
+                    json!(
+                        "The query is over the limit on bytes billed per query. Narrow it \
+                         (fewer columns, a partition or date filter) or ask the user whether \
+                         the limit should be raised (BIGQUERY_MAX_BYTES_BILLED on the server)."
+                    ),
+                );
             }
             error.insert("message".into(), json!(failure.message));
             if let Some(details) = &failure.details {
@@ -559,6 +582,41 @@ fn read_only_violation(reason: &str) -> Value {
                 "bigquery_execute_sql is read-only and refused the query: {reason}. Send a single \
                  SELECT or WITH query (set BIGQUERY_READ_ONLY=false on the server to allow writes)."
             ),
+        }
+    })
+}
+
+/// A byte count the way a person reads it (`1.5 GiB`).
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// The error object returned for a query whose dry-run estimate is over the
+/// cap on bytes billed.
+fn over_bytes_limit(estimate: u64, limit: u64) -> Value {
+    json!({
+        "error": {
+            "code": "BYTES_BILLED_LIMIT",
+            "message": format!(
+                "The query was not run: it would read about {} and the limit per query is {}. \
+                 Narrow it (fewer columns, a partition or date filter) or ask the user whether \
+                 the limit should be raised (BIGQUERY_MAX_BYTES_BILLED on the server).",
+                human_bytes(estimate),
+                human_bytes(limit)
+            ),
+            "estimated_bytes": estimate,
+            "limit_bytes": limit,
         }
     })
 }
@@ -930,21 +988,42 @@ impl BigQueryExecuteSql {
                     statement_type.unwrap_or("no statement type")
                 )));
             }
+            // The dry run also says how much the query would read, so one
+            // that is already over the cap need not be sent to be refused.
+            let statistics = &job["statistics"];
+            let estimate = [
+                &statistics["query"]["totalBytesProcessed"],
+                &statistics["totalBytesProcessed"],
+            ]
+            .into_iter()
+            .find_map(|v| {
+                v.as_str()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .or(v.as_u64())
+            });
+            if let (Some(estimate), Some(limit)) = (estimate, self.shared.max_bytes_billed)
+                && estimate > limit
+            {
+                return Ok(over_bytes_limit(estimate, limit));
+            }
         }
 
         let deadline = tokio::time::Instant::now() + QUERY_DEADLINE;
         let mut response = self
             .shared
-            .post(
-                &token,
-                &format!("projects/{project_id}/queries"),
-                &json!({
+            .post(&token, &format!("projects/{project_id}/queries"), &{
+                let mut request = json!({
                     "query": sql,
                     "useLegacySql": false,
                     "maxResults": max_results,
                     "timeoutMs": QUERY_TIMEOUT_MS,
-                }),
-            )
+                });
+                if let Some(limit) = self.shared.max_bytes_billed {
+                    // An int64, which the API takes as a string.
+                    request["maximumBytesBilled"] = json!(limit.to_string());
+                }
+                request
+            })
             .await?;
         let job_id = response["jobReference"]["jobId"]
             .as_str()
@@ -1120,6 +1199,7 @@ impl BigQueryToolset {
                 project_id: None,
                 read_only: true,
                 dry_run: false,
+                max_bytes_billed: None,
                 base_url: DEFAULT_BASE_URL.to_string(),
                 http: http_client(),
             }),
@@ -1142,10 +1222,17 @@ impl BigQueryToolset {
         self.update(|s| s.read_only = read_only)
     }
 
-    /// Enables (`true`) or disables (`false`, the default) an extra
-    /// `jobs.insert(dryRun=true)` HTTP round-trip before read-only queries.
+    /// Enables (`true`) or disables (`false`, the constructor's default) an
+    /// extra `jobs.insert(dryRun=true)` HTTP round-trip before read-only
+    /// queries. The server turns it on unless `BIGQUERY_DRY_RUN=false`.
     pub fn with_dry_run(self, dry_run: bool) -> Self {
         self.update(|s| s.dry_run = dry_run)
+    }
+
+    /// Caps the bytes one query may bill (`maximumBytesBilled`); `None` or
+    /// `Some(0)` leaves queries uncapped, which is the constructor's default.
+    pub fn with_max_bytes_billed(self, max_bytes_billed: Option<u64>) -> Self {
+        self.update(|s| s.max_bytes_billed = max_bytes_billed.filter(|n| *n > 0))
     }
 
     /// Overrides the BigQuery API base URL (tests).

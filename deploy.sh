@@ -276,6 +276,15 @@ if matched:
     --region "$REGION" \
     --format=json 2>/dev/null || echo "{}")"
 
+  local resolved_sa
+  resolved_sa="${SERVICE_ACCOUNT:-$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("spec",{}).get("template",{}).get("spec",{}).get("serviceAccountName",""))' "$run_spec_json" 2>/dev/null || true)}"
+  if [[ -n "$resolved_sa" ]]; then
+    gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+      --member="serviceAccount:${resolved_sa}" \
+      --role="roles/serviceusage.serviceUsageConsumer" \
+      --quiet >/dev/null 2>&1 || true
+  fi
+
   local engine_payload
   engine_payload="$(python3 -c '
 import json, os, sys

@@ -720,6 +720,124 @@ fn track_stream_token_usage(
     Box::pin(tracked)
 }
 
+/// A model called on the side whose usage is annotated the way
+/// [`RuntimeModelConfig`] annotates the agent's own calls: the model name,
+/// the `gen_ai.usage.*` counters and the estimated cost, which is what the
+/// studio prices a call from.
+struct UsageAnnotatedLlm {
+    inner: Arc<dyn adk_rust::Llm>,
+}
+
+#[async_trait]
+impl adk_rust::Llm for UsageAnnotatedLlm {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn schema_adapter(&self) -> &dyn adk_rust::SchemaAdapter {
+        self.inner.schema_adapter()
+    }
+
+    fn uses_interactions_api(&self) -> bool {
+        self.inner.uses_interactions_api()
+    }
+
+    async fn generate_content(
+        &self,
+        req: adk_rust::LlmRequest,
+        stream: bool,
+    ) -> AdkResult<adk_rust::LlmResponseStream> {
+        let model_name = self.inner.name().to_string();
+        let usage_span = adk_rust::telemetry::llm_generate_span("gemini", &model_name, stream);
+        let responses = self
+            .inner
+            .generate_content(req, stream)
+            .instrument(usage_span.clone())
+            .await?;
+        Ok(track_stream_token_usage(responses, usage_span, model_name))
+    }
+}
+
+/// Passes a model's responses through and keeps the usage of the latest one.
+struct UsageCapture {
+    inner: Arc<dyn adk_rust::Llm>,
+    usage: Arc<Mutex<Option<adk_rust::UsageMetadata>>>,
+}
+
+#[async_trait]
+impl adk_rust::Llm for UsageCapture {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn schema_adapter(&self) -> &dyn adk_rust::SchemaAdapter {
+        self.inner.schema_adapter()
+    }
+
+    fn uses_interactions_api(&self) -> bool {
+        self.inner.uses_interactions_api()
+    }
+
+    async fn generate_content(
+        &self,
+        req: adk_rust::LlmRequest,
+        stream: bool,
+    ) -> AdkResult<adk_rust::LlmResponseStream> {
+        let seen = self.usage.clone();
+        let responses = self.inner.generate_content(req, stream).await?;
+        Ok(Box::pin(responses.inspect(move |item| {
+            if let Ok(response) = item
+                && let Some(usage) = &response.usage_metadata
+            {
+                *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(usage.clone());
+            }
+        })))
+    }
+}
+
+/// Summarizes a conversation like [`LlmEventSummarizer`] and records what
+/// the summary cost on the compaction event it returns.
+///
+/// adk-rust's summarizer keeps the summary and drops the usage of the call
+/// that produced it, so a compaction's tokens appeared nowhere and the
+/// session's usage and cost came out low. The compaction event is stored in
+/// the session, and the studio counts any stored event that carries usage.
+pub struct MeteredSummarizer {
+    llm: Arc<dyn adk_rust::Llm>,
+}
+
+impl MeteredSummarizer {
+    /// Summarizes with `llm`, whose responses should carry annotated usage
+    /// (see [`UsageAnnotatedLlm`]).
+    pub fn new(llm: Arc<dyn adk_rust::Llm>) -> Self {
+        Self { llm }
+    }
+}
+
+#[async_trait]
+impl adk_rust::BaseEventsSummarizer for MeteredSummarizer {
+    async fn summarize_events(
+        &self,
+        events: &[adk_rust::Event],
+    ) -> AdkResult<Option<adk_rust::Event>> {
+        // One capture per call: summaries of different sessions run at the
+        // same time, and each has to get its own usage.
+        let usage = Arc::new(Mutex::new(None));
+        let capture = Arc::new(UsageCapture {
+            inner: self.llm.clone(),
+            usage: usage.clone(),
+        });
+        let mut summary = LlmEventSummarizer::new(capture)
+            .summarize_events(events)
+            .await?;
+        if let Some(event) = summary.as_mut() {
+            event.llm_response.usage_metadata =
+                usage.lock().unwrap_or_else(|e| e.into_inner()).take();
+        }
+        Ok(summary)
+    }
+}
+
 #[async_trait]
 impl CacheCapable for RuntimeModelConfig {
     async fn create_cache(
@@ -786,7 +904,11 @@ impl AgentRuntime {
         let summarizer_name = config::env_or("SUMMARIZER_MODEL", config::DEFAULT_SUMMARIZER_MODEL);
         let fast_thinking = config::ThinkingSettings::default();
         match build_gemini_model_with_thinking(&summarizer_name, &fast_thinking) {
-            Ok(model) => Arc::new(model),
+            // The runtime model below annotates its own usage; a model built
+            // here has to be wrapped to do the same.
+            Ok(model) => Arc::new(UsageAnnotatedLlm {
+                inner: Arc::new(model),
+            }),
             Err(e) => {
                 tracing::warn!(
                     "Summarizer model {summarizer_name:?} is unavailable ({e:#}); \
@@ -803,7 +925,7 @@ impl AgentRuntime {
         EventsCompactionConfig {
             compaction_interval: c.compaction_interval.min(u32::MAX as u64) as u32,
             overlap_size: c.overlap_size.min(u32::MAX as u64) as u32,
-            summarizer: Arc::new(LlmEventSummarizer::new(self.summarizer_llm())),
+            summarizer: Arc::new(MeteredSummarizer::new(self.summarizer_llm())),
         }
     }
 
@@ -827,7 +949,7 @@ impl AgentRuntime {
             chars_per_token: 4,
         };
         let summarizer: Arc<dyn adk_rust::BaseEventsSummarizer> =
-            Arc::new(LlmEventSummarizer::new(self.summarizer_llm()));
+            Arc::new(MeteredSummarizer::new(self.summarizer_llm()));
         (config, summarizer)
     }
 
@@ -1799,6 +1921,115 @@ mod tests {
             fr.response,
             serde_json::json!({ "status": "rendered", "components": 1 })
         );
+    }
+
+    /// A model that answers every request with the same summary and reports
+    /// the prompt's length as its prompt tokens, so two different
+    /// conversations cost two different amounts.
+    struct FixedLlm;
+
+    #[async_trait]
+    impl adk_rust::Llm for FixedLlm {
+        fn name(&self) -> &str {
+            "gemini-3.5-flash-lite"
+        }
+
+        async fn generate_content(
+            &self,
+            req: adk_rust::LlmRequest,
+            _stream: bool,
+        ) -> AdkResult<adk_rust::LlmResponseStream> {
+            let prompt_chars: usize = req
+                .contents
+                .iter()
+                .flat_map(|content| &content.parts)
+                .map(|part| match part {
+                    Part::Text { text } => text.len(),
+                    _ => 0,
+                })
+                .sum();
+            let mut response =
+                adk_rust::LlmResponse::new(Content::new("model").with_text("the summary"));
+            response.usage_metadata = Some(adk_rust::UsageMetadata {
+                prompt_token_count: prompt_chars as i32,
+                candidates_token_count: 7,
+                total_token_count: prompt_chars as i32 + 7,
+                ..Default::default()
+            });
+            Ok(Box::pin(futures::stream::once(async move { Ok(response) })))
+        }
+    }
+
+    fn conversation(texts: &[&str]) -> Vec<adk_rust::Event> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let role = if index % 2 == 0 { "user" } else { "model" };
+                let mut event = adk_rust::Event::new("inv");
+                event.author = role.to_string();
+                event.llm_response.content = Some(Content::new(role).with_text(*text));
+                event
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_compaction_event_carries_what_its_summary_cost() {
+        use adk_rust::BaseEventsSummarizer as _;
+        let model: Arc<dyn adk_rust::Llm> = Arc::new(UsageAnnotatedLlm {
+            inner: Arc::new(FixedLlm),
+        });
+        let short = conversation(&["hello", "hi"]);
+        let long = conversation(&["hello", &"a much longer reply ".repeat(40)]);
+
+        // adk-rust's own summarizer keeps the summary and drops the usage.
+        let plain = LlmEventSummarizer::new(model.clone())
+            .summarize_events(&short)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(plain.llm_response.usage_metadata.is_none());
+
+        // Two summaries at once: each event gets the usage of its own call.
+        let summarizer = MeteredSummarizer::new(model);
+        let (first, second) = tokio::join!(
+            summarizer.summarize_events(&short),
+            summarizer.summarize_events(&long)
+        );
+        let (first, second) = (first.unwrap().unwrap(), second.unwrap().unwrap());
+        for event in [&first, &second] {
+            let compaction = event.actions.compaction.as_ref().expect("a compaction");
+            assert!(matches!(
+                compaction.compacted_content.parts.as_slice(),
+                [Part::Text { text }] if text == "the summary"
+            ));
+            let usage = event.llm_response.usage_metadata.as_ref().expect("usage");
+            assert_eq!(usage.candidates_token_count, 7);
+            assert_eq!(usage.total_token_count, usage.prompt_token_count + 7);
+            // What the studio prices the call from.
+            let annotated = usage.provider_usage.as_ref().expect("annotations");
+            assert_eq!(annotated["gen_ai.request.model"], "gemini-3.5-flash-lite");
+            assert_eq!(annotated["gen_ai.usage.output_tokens"], 7);
+            assert!(usage.cost.is_some());
+        }
+        let prompt = |event: &adk_rust::Event| {
+            event
+                .llm_response
+                .usage_metadata
+                .as_ref()
+                .unwrap()
+                .prompt_token_count
+        };
+        assert!(
+            prompt(&second) > prompt(&first) + 700,
+            "{} vs {}",
+            prompt(&second),
+            prompt(&first)
+        );
+
+        // Nothing to summarize, nothing to record.
+        assert!(summarizer.summarize_events(&[]).await.unwrap().is_none());
     }
 
     #[test]

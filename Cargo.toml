@@ -42,6 +42,7 @@ adk-rust = {
   version = "2.3.0",
   default-features = false,
   features = [
+    "agent-engine",
     "artifacts",
     "cli",
     "code-tools",

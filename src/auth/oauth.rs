@@ -84,6 +84,35 @@ pub const CREDENTIALS_STATE_KEY: &str = "CREDENTIALS_CACHE_KEY";
 /// (`user:CREDENTIALS_CACHE_KEY`): adk-session merges `user:`-prefixed
 /// entries into every session of the same `(app_name, user_id)`.
 pub const USER_CREDENTIALS_STATE_KEY: &str = "user:CREDENTIALS_CACHE_KEY";
+/// Environment variable naming the Gemini Enterprise authorization resource
+/// ID(s) (`projects/*/locations/*/authorizations/{AUTH_ID}`). When configured,
+/// Gemini Enterprise injects the end user's OAuth token into the session state
+/// under `temp:{AUTH_ID}` or `{AUTH_ID}`.
+pub const GEMINI_ENTERPRISE_AUTH_ID_ENV: &str = "GEMINI_ENTERPRISE_AUTH_ID";
+
+/// State keys to inspect (and scrub from responses) for Gemini Enterprise
+/// delegated OAuth tokens, derived from [`GEMINI_ENTERPRISE_AUTH_ID_ENV`].
+pub fn gemini_enterprise_auth_keys() -> Vec<String> {
+    let Ok(raw) = std::env::var(GEMINI_ENTERPRISE_AUTH_ID_ENV) else {
+        return Vec::new();
+    };
+    let mut keys = Vec::new();
+    for part in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let id = part.rsplit('/').next().unwrap_or(part).trim();
+        if id.is_empty() {
+            continue;
+        }
+        let temp_key = format!("temp:{id}");
+        if !keys.contains(&temp_key) {
+            keys.push(temp_key);
+        }
+        let plain_key = id.to_string();
+        if !keys.contains(&plain_key) {
+            keys.push(plain_key);
+        }
+    }
+    keys
+}
 
 /// Signed-in Google user profile for the custom AdSpace Agent web interface.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -670,17 +699,50 @@ fn unb64(text: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 /// Parses a stored credentials value; `Null` and garbage count as absent.
+///
+/// Accepts:
+/// - [`OAuthToken`] objects (`{"access_token": ..., "refresh_token": ..., "scopes": [...]}`)
+/// - Standard OAuth 2.0 token response objects (`{"access_token": ..., "scope": "a b", "expires_in": 3600}`)
 fn parse_token(value: serde_json::Value) -> Option<OAuthToken> {
     if value.is_null() {
         return None;
     }
-    match serde_json::from_value(value) {
-        Ok(token) => Some(token),
+    let has_oauth2_fields = value
+        .as_object()
+        .is_some_and(|m| m.contains_key("scope") || m.contains_key("expires_in"));
+    match serde_json::from_value::<OAuthToken>(value.clone()) {
+        Ok(mut token) => {
+            if has_oauth2_fields && let Ok(resp) = serde_json::from_value::<TokenResponse>(value) {
+                let from_resp = resp.into_token(token.refresh_token.clone(), &token.scopes);
+                if token.scopes.is_empty() {
+                    token.scopes = from_resp.scopes;
+                }
+                if token.expires_at.is_none() {
+                    token.expires_at = from_resp.expires_at;
+                }
+            }
+            (!token.access_token.trim().is_empty()).then_some(token)
+        }
         Err(e) => {
             tracing::warn!("Ignoring unreadable credentials in session state: {e}");
             None
         }
     }
+}
+
+/// Parses a delegated Gemini Enterprise authorization token stored under
+/// `GEMINI_ENTERPRISE_AUTH_ID` (either a raw bearer token string `"ya29..."` or
+/// a structured OAuth token object).
+fn parse_delegated_token(value: serde_json::Value) -> Option<OAuthToken> {
+    if let Some(raw) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(OAuthToken {
+            access_token: raw.to_string(),
+            refresh_token: None,
+            expires_at: None,
+            scopes: Vec::new(),
+        });
+    }
+    parse_token(value)
 }
 
 /// Combines the grant held so far with a newer token response: the new
@@ -931,16 +993,23 @@ impl SessionCredentialManager {
 
     /// The token stored in the session's state, if any (no refresh performed):
     /// the user-scoped entry ([`USER_CREDENTIALS_STATE_KEY`]) first, then the
-    /// legacy per-session one ([`CREDENTIALS_STATE_KEY`]).
+    /// legacy per-session one ([`CREDENTIALS_STATE_KEY`]), and finally any
+    /// Gemini Enterprise delegated token keys ([`gemini_enterprise_auth_keys`]).
     ///
     /// The runner's tool context exposes the live session through
     /// [`ToolContext::session`] (its [`ReadonlyContext::state`] is `None`),
     /// so that is consulted first; `state()` is the fallback for contexts
     /// that only implement the read-only view.
     pub fn stored_token(ctx: &dyn ToolContext) -> Option<OAuthToken> {
-        [USER_CREDENTIALS_STATE_KEY, CREDENTIALS_STATE_KEY]
+        if let Some(token) = [USER_CREDENTIALS_STATE_KEY, CREDENTIALS_STATE_KEY]
             .into_iter()
             .find_map(|key| Self::stored_value(ctx, key).and_then(parse_token))
+        {
+            return Some(token);
+        }
+        gemini_enterprise_auth_keys()
+            .into_iter()
+            .find_map(|key| Self::stored_value(ctx, &key).and_then(parse_delegated_token))
     }
 
     /// The raw value under `key` in the context's state (`None` when absent).
@@ -1144,7 +1213,12 @@ impl SessionCredentialManager {
             .ok()?;
         let token = [USER_CREDENTIALS_STATE_KEY, CREDENTIALS_STATE_KEY]
             .into_iter()
-            .find_map(|key| loaded.state().get(key).and_then(parse_token))?;
+            .find_map(|key| loaded.state().get(key).and_then(parse_token))
+            .or_else(|| {
+                gemini_enterprise_auth_keys()
+                    .into_iter()
+                    .find_map(|key| loaded.state().get(&key).and_then(parse_delegated_token))
+            })?;
         (token.covers(scopes) && !token.is_expired()).then_some(token)
     }
 
@@ -2482,5 +2556,28 @@ mod tests {
                 .auth_url
                 .contains("prompt=consent")
         );
+    }
+
+    #[tokio::test]
+    async fn parse_delegated_token_accepts_bearer_strings_and_oauth2_token_responses() {
+        let bearer = parse_delegated_token(json!("ya29.delegated-token")).expect("bearer string");
+        assert_eq!(bearer.access_token, "ya29.delegated-token");
+        assert!(bearer.scopes.is_empty());
+        assert!(bearer.covers(&["https://www.googleapis.com/auth/adwords".to_string()]));
+
+        let oauth2_resp = parse_delegated_token(json!({
+            "access_token": "ya29.oauth2-resp",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": "https://www.googleapis.com/auth/adwords https://www.googleapis.com/auth/drive.readonly"
+        }))
+        .expect("oauth2 response object");
+        assert_eq!(oauth2_resp.access_token, "ya29.oauth2-resp");
+        assert!(!oauth2_resp.is_expired());
+        assert!(oauth2_resp.covers(&["https://www.googleapis.com/auth/adwords".to_string()]));
+        assert!(!oauth2_resp.covers(&["https://www.googleapis.com/auth/youtube".to_string()]));
+
+        assert!(parse_delegated_token(json!("")).is_none());
+        assert!(parse_delegated_token(json!("   ")).is_none());
     }
 }

@@ -630,24 +630,34 @@ fn carries_session_state(path: &str) -> bool {
         || path == "/api/run_sse"
         || path.starts_with("/api/run/")
         || path.starts_with("/api/debug/")
+        || path == "/api/reasoning_engine"
+        || path == "/api/stream_reasoning_engine"
 }
 
 /// State keys whose values are OAuth tokens and must never reach a browser.
 const CREDENTIAL_KEYS: [&str; 2] = [USER_CREDENTIALS_STATE_KEY, CREDENTIALS_STATE_KEY];
 
 fn scrub_credentials_from_json(val: &mut serde_json::Value) {
+    let extra_keys = crate::auth::gemini_enterprise_auth_keys();
+    scrub_credentials_from_json_with(val, &extra_keys);
+}
+
+fn scrub_credentials_from_json_with(val: &mut serde_json::Value, extra_keys: &[String]) {
     match val {
         serde_json::Value::Object(map) => {
             for key in CREDENTIAL_KEYS {
                 map.remove(key);
             }
+            for key in extra_keys {
+                map.remove(key);
+            }
             for v in map.values_mut() {
-                scrub_credentials_from_json(v);
+                scrub_credentials_from_json_with(v, extra_keys);
             }
         }
         serde_json::Value::Array(arr) => {
             for item in arr.iter_mut() {
-                scrub_credentials_from_json(item);
+                scrub_credentials_from_json_with(item, extra_keys);
             }
         }
         _ => {}
@@ -656,12 +666,16 @@ fn scrub_credentials_from_json(val: &mut serde_json::Value) {
 
 /// Fast SIMD pre-check before JSON credential scrubbing: returns `false` when
 /// `bytes` contains neither `CREDENTIALS_CACHE_KEY` (a substring of every key
-/// in [`CREDENTIAL_KEYS`]) nor a JSON `\u` escape sequence that could spell it.
+/// in [`CREDENTIAL_KEYS`]), any configured Gemini Enterprise auth key, nor a
+/// JSON `\u` escape sequence that could spell it.
 #[inline]
 fn bytes_may_contain_credentials(bytes: &[u8]) -> bool {
     memchr::memmem::find(bytes, CREDENTIALS_STATE_KEY.as_bytes()).is_some()
         || memchr::memmem::find(bytes, b"\\u").is_some()
         || memchr::memmem::find(bytes, b"\\U").is_some()
+        || crate::auth::gemini_enterprise_auth_keys()
+            .iter()
+            .any(|k| memchr::memmem::find(bytes, k.as_bytes()).is_some())
 }
 
 /// Removes [`CREDENTIALS_STATE_KEY`] from the `data:` payload of one complete
@@ -787,6 +801,90 @@ fn scrub_sse_response(response: Response) -> Response {
     Response::from_parts(parts, Body::from_stream(scrubbed))
 }
 
+/// Scrubs credentials from one newline-delimited JSON line (`/api/stream_reasoning_engine`).
+fn scrub_ndjson_line(line: &[u8]) -> Vec<u8> {
+    if !bytes_may_contain_credentials(line) {
+        return line.to_vec();
+    }
+    let trimmed = line.strip_suffix(b"\n").unwrap_or(line);
+    if let Ok(mut json_val) = serde_json::from_slice::<serde_json::Value>(trimmed) {
+        scrub_credentials_from_json(&mut json_val);
+        if let Ok(mut cleaned) = serde_json::to_vec(&json_val) {
+            cleaned.push(b'\n');
+            return cleaned;
+        }
+    }
+    line.to_vec()
+}
+
+/// Incremental NDJSON scrubber for `/api/stream_reasoning_engine`.
+#[derive(Default)]
+struct NdjsonScrubber {
+    buf: Vec<u8>,
+}
+
+impl NdjsonScrubber {
+    fn push(&mut self, chunk: &[u8]) -> Result<Bytes, axum::Error> {
+        let mut search_from = self.buf.len();
+        self.buf.extend_from_slice(chunk);
+        let mut out = Vec::new();
+        while let Some(at) = memchr::memchr(b'\n', &self.buf[search_from..]) {
+            let end = search_from + at + 1;
+            out.extend(scrub_ndjson_line(&self.buf[..end]));
+            self.buf.drain(..end);
+            search_from = 0;
+        }
+        if self.buf.len() > MAX_SCRUBBED_SSE_EVENT_BYTES {
+            self.buf.clear();
+            return Err(axum::Error::new(
+                "NDJSON event line too large to scrub credentials from; stream aborted",
+            ));
+        }
+        Ok(Bytes::from(out))
+    }
+
+    fn finish(&mut self) -> Bytes {
+        if self.buf.is_empty() {
+            Bytes::new()
+        } else {
+            Bytes::from(scrub_ndjson_line(&std::mem::take(&mut self.buf)))
+        }
+    }
+}
+
+/// Re-streams an NDJSON response (`/api/stream_reasoning_engine`) with
+/// credentials removed from every line without buffering the whole stream.
+fn scrub_ndjson_response(response: Response) -> Response {
+    let (mut parts, body) = response.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    let upstream = body.into_data_stream();
+    let scrubbed = futures::stream::unfold(
+        (upstream, NdjsonScrubber::default(), false),
+        |(mut upstream, mut scrubber, done)| async move {
+            if done {
+                return None;
+            }
+            match upstream.next().await {
+                Some(Ok(chunk)) => {
+                    let out = scrubber.push(&chunk);
+                    let failed = out.is_err();
+                    Some((out, (upstream, scrubber, failed)))
+                }
+                Some(Err(e)) => Some((Err(e), (upstream, scrubber, true))),
+                None => {
+                    let tail = scrubber.finish();
+                    if tail.is_empty() {
+                        None
+                    } else {
+                        Some((Ok(tail), (upstream, scrubber, true)))
+                    }
+                }
+            }
+        },
+    );
+    Response::from_parts(parts, Body::from_stream(scrubbed))
+}
+
 /// Buffers an `application/json` response and removes credentials from it.
 /// Bodies above [`MAX_SCRUBBED_JSON_BYTES`] are refused with `413` rather
 /// than served unscrubbed.
@@ -867,7 +965,9 @@ pub async fn guard_adk_routes(
         .and_then(|v| v.to_str().ok())
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
-    if content_type.starts_with("application/json") {
+    if path == "/api/stream_reasoning_engine" && content_type.starts_with("application/json") {
+        scrub_ndjson_response(response)
+    } else if content_type.starts_with("application/json") {
         scrub_json_response(response).await
     } else if content_type.starts_with("text/event-stream") {
         scrub_sse_response(response)
@@ -1242,6 +1342,7 @@ pub fn oauth_router(routes: OAuthRoutes) -> Router {
         .route("/favicon.ico", get(studio_favicon))
         .route("/favicon.svg", get(studio_favicon))
         .route(HEALTHCHECK_PATH, get(healthcheck))
+        .route("/health", get(healthcheck))
         .with_state(routes)
 }
 
@@ -1311,6 +1412,207 @@ fn compressible() -> impl tower_http::compression::predicate::Predicate {
         .and(NotForContentType::new("application/octet-stream"))
 }
 
+/// Whether Agent Engine BYOC dispatch routes (`/api/reasoning_engine` and
+/// `/api/stream_reasoning_engine`) should be enabled.
+///
+/// True when running inside a Vertex AI Agent Engine container (which sets
+/// `GOOGLE_CLOUD_AGENT_ENGINE_ID`) or when `AGENT_ENGINE=true` is set.
+pub fn is_agent_engine_enabled() -> bool {
+    crate::config::env_opt("GOOGLE_CLOUD_AGENT_ENGINE_ID").is_some()
+        || crate::config::env_bool_or("AGENT_ENGINE", false)
+}
+
+/// Copies any `"temp:<key>"` entries in a state map into `"<key>"` so
+/// `adk-session` does not drop Gemini Enterprise's delegated OAuth tokens when
+/// persisting `create_session` or `append_event`.
+fn copy_temp_state_keys(map: &mut serde_json::Map<String, serde_json::Value>) -> bool {
+    let mut additions = Vec::new();
+    for (k, v) in map.iter() {
+        if let Some(rest) = k.strip_prefix("temp:")
+            && !rest.is_empty()
+            && !map.contains_key(rest)
+        {
+            additions.push((rest.to_string(), v.clone()));
+        }
+    }
+    let changed = !additions.is_empty();
+    for (k, v) in additions {
+        map.insert(k, v);
+    }
+    changed
+}
+
+/// Applies `state` / `state_delta` carried on a `stream_query` /
+/// `async_stream_query` input before delegating to `adk_server::agent_engine`.
+async fn apply_stream_query_state_delta(
+    sessions: &dyn SessionService,
+    input: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    let Some(user_id) = input
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let mut delta: HashMap<String, serde_json::Value> = HashMap::new();
+    for field in ["state", "state_delta", "stateDelta"] {
+        if let Some(serde_json::Value::Object(mut obj)) = input.get(field).cloned() {
+            copy_temp_state_keys(&mut obj);
+            for (k, v) in obj {
+                delta.insert(k, v);
+            }
+        }
+    }
+    if delta.is_empty() {
+        return;
+    }
+    let session_id = match input.get("session_id").and_then(|v| v.as_str()) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => {
+            let generated = uuid::Uuid::new_v4().to_string();
+            input.insert(
+                "session_id".to_string(),
+                serde_json::Value::String(generated.clone()),
+            );
+            generated
+        }
+    };
+    let existing = sessions
+        .get(adk_rust::session::GetRequest {
+            app_name: APP_NAME.to_string(),
+            user_id: user_id.clone(),
+            session_id: session_id.clone(),
+            num_recent_events: Some(1),
+            after: None,
+        })
+        .await;
+    match existing {
+        Ok(_) => {
+            if let (Ok(app_name), Ok(uid), Ok(sid)) = (
+                adk_rust::AppName::try_from(APP_NAME),
+                adk_rust::UserId::try_from(user_id.as_str()),
+                adk_rust::SessionId::try_from(session_id.as_str()),
+            ) {
+                let mut event =
+                    adk_rust::Event::new(format!("agent-engine-state-{}", uuid::Uuid::new_v4()));
+                event.author = "agent_engine_dispatch".to_string();
+                event.actions.state_delta = delta;
+                let _ = sessions
+                    .append_event_for_identity(adk_rust::session::AppendEventRequest {
+                        identity: adk_rust::AdkIdentity {
+                            app_name,
+                            user_id: uid,
+                            session_id: sid,
+                        },
+                        event,
+                    })
+                    .await;
+            }
+        }
+        Err(err) if err.is_not_found() => {
+            let _ = sessions
+                .create(adk_rust::session::CreateRequest {
+                    app_name: APP_NAME.to_string(),
+                    user_id,
+                    session_id: Some(session_id),
+                    state: delta,
+                })
+                .await;
+        }
+        Err(_) => {}
+    }
+}
+
+/// Normalizes incoming Agent Engine requests so `temp:<AUTH_ID>` tokens and
+/// `stream_query` state deltas are preserved across session persistence.
+async fn normalize_agent_engine_request(
+    State(sessions): State<Arc<dyn SessionService>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let (parts, body) = req.into_parts();
+    let Ok(bytes) = to_bytes(body, 16 * 1024 * 1024).await else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
+    let Ok(mut payload) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return next
+            .run(Request::from_parts(parts, Body::from(bytes)))
+            .await;
+    };
+    let mut mutated = false;
+    let class_method = payload
+        .get("class_method")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if let Some(input) = payload.get_mut("input").and_then(|v| v.as_object_mut()) {
+        if let Some(state_obj) = input.get_mut("state").and_then(|v| v.as_object_mut())
+            && copy_temp_state_keys(state_obj)
+        {
+            mutated = true;
+        }
+        if matches!(class_method.as_str(), "stream_query" | "async_stream_query")
+            && (input.contains_key("state_delta")
+                || input.contains_key("stateDelta")
+                || input.contains_key("state"))
+        {
+            apply_stream_query_state_delta(sessions.as_ref(), input).await;
+            mutated = true;
+        }
+        if class_method == "streaming_agent_run_with_events"
+            && let Some(raw_req) = input.get("request_json").and_then(|v| v.as_str())
+            && let Ok(mut inner) = serde_json::from_str::<serde_json::Value>(raw_req)
+            && let Some(inner_obj) = inner.as_object_mut()
+        {
+            let mut inner_mutated = false;
+            for field in ["state_delta", "stateDelta"] {
+                if let Some(delta_obj) = inner_obj.get_mut(field).and_then(|v| v.as_object_mut())
+                    && copy_temp_state_keys(delta_obj)
+                {
+                    inner_mutated = true;
+                }
+            }
+            if inner_mutated && let Ok(updated) = serde_json::to_string(&inner) {
+                input.insert(
+                    "request_json".to_string(),
+                    serde_json::Value::String(updated),
+                );
+                mutated = true;
+            }
+        }
+    }
+    let body_bytes = if mutated {
+        Bytes::from(serde_json::to_vec(&payload).unwrap_or_else(|_| bytes.to_vec()))
+    } else {
+        bytes
+    };
+    let mut parts = parts;
+    parts.headers.remove(header::CONTENT_LENGTH);
+    next.run(Request::from_parts(parts, Body::from(body_bytes)))
+        .await
+}
+
+/// Builds the Vertex AI Agent Engine (ReasoningEngine BYOC) dispatch router
+/// (`POST /api/reasoning_engine`, `POST /api/stream_reasoning_engine`).
+///
+/// # Errors
+///
+/// Returns an error when the underlying runner cannot be constructed.
+pub fn build_agent_engine_router(runtime: &AgentRuntime) -> anyhow::Result<Router> {
+    let runner = runtime.build_runner(DEFAULT_USER_ID)?;
+    let state = adk_rust::server::AgentEngineState::new(runner)
+        .with_memory_service(runtime.memory_service.clone())
+        .with_artifact_service(runtime.artifact_service.clone());
+    Ok(
+        adk_rust::server::agent_engine_router(state).layer(middleware::from_fn_with_state(
+            runtime.session_service.clone(),
+            normalize_agent_engine_request,
+        )),
+    )
+}
+
 /// Assembles the HTTP application: adk-server's routes (authenticated through
 /// [`CookieIdentityExtractor`]), the OAuth / studio routes, the `/ui/` helper
 /// injection, [`guard_adk_routes`], and HTTP response compression.
@@ -1319,12 +1621,29 @@ fn compressible() -> impl tower_http::compression::predicate::Predicate {
 ///
 /// Returns an error when the adk-server application cannot be built.
 pub fn build_app(launcher: Launcher, routes: OAuthRoutes) -> anyhow::Result<Router> {
+    build_app_with_agent_engine(launcher, routes, None)
+}
+
+/// Like [`build_app`], optionally merging the Agent Engine BYOC dispatch router.
+///
+/// # Errors
+///
+/// Returns an error when the adk-server application cannot be built.
+pub fn build_app_with_agent_engine(
+    launcher: Launcher,
+    routes: OAuthRoutes,
+    agent_engine: Option<Router>,
+) -> anyhow::Result<Router> {
     let credentials = routes.credentials.clone();
     let admins = routes.admins.clone();
-    let app = launcher
+    let mut app = launcher
         .with_request_context_extractor(Arc::new(CookieIdentityExtractor::new(credentials.clone())))
         .build_app()?
-        .merge(oauth_router(routes))
+        .merge(oauth_router(routes));
+    if let Some(ae_router) = agent_engine {
+        app = app.merge(ae_router);
+    }
+    let app = app
         .layer(middleware::from_fn(inject_auth_helper))
         .layer(middleware::from_fn_with_state(
             (credentials, admins),
@@ -1342,21 +1661,58 @@ fn shutdown_grace_period() -> Duration {
         .map_or(DEFAULT_SHUTDOWN_GRACE, Duration::from_secs)
 }
 
-/// Serves the agent (web UI at `/ui/`, REST API under `/api`, OAuth callback).
+/// Serves the agent (web UI at `/ui/`, REST API under `/api`, OAuth callback,
+/// and — when [`is_agent_engine_enabled`] is true — the Agent Engine BYOC
+/// dispatch routes `/api/reasoning_engine` and `/api/stream_reasoning_engine`).
 ///
 /// # Errors
 ///
 /// Returns an error when the listener cannot be bound or the server fails.
 pub async fn serve(runtime: AgentRuntime, host: &str, port: u16) -> anyhow::Result<()> {
-    runtime
-        .credentials
-        .enable_interactive_wait(Duration::from_secs(300), true);
+    serve_with_mode(runtime, host, port, is_agent_engine_enabled()).await
+}
+
+/// Serves the agent in Agent Engine BYOC mode (`/api/reasoning_engine` and
+/// `/api/stream_reasoning_engine` enabled).
+///
+/// # Errors
+///
+/// Returns an error when the listener cannot be bound or the server fails.
+pub async fn serve_agent_engine(
+    runtime: AgentRuntime,
+    host: &str,
+    port: u16,
+) -> anyhow::Result<()> {
+    serve_with_mode(runtime, host, port, true).await
+}
+
+async fn serve_with_mode(
+    runtime: AgentRuntime,
+    host: &str,
+    port: u16,
+    agent_engine: bool,
+) -> anyhow::Result<()> {
+    if !agent_engine {
+        runtime
+            .credentials
+            .enable_interactive_wait(Duration::from_secs(300), true);
+    }
     runtime
         .credentials
         .attach_session_service(runtime.session_service.clone());
-    let app = build_app(launcher(&runtime), runtime.oauth_routes(true))?;
+    let ae_router = if agent_engine {
+        Some(build_agent_engine_router(&runtime)?)
+    } else {
+        None
+    };
+    let app =
+        build_app_with_agent_engine(launcher(&runtime), runtime.oauth_routes(true), ae_router)?;
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
-    if runtime.credentials.flow().config().is_configured() {
+    if agent_engine {
+        tracing::info!(
+            "AdSpace Agent (Agent Engine BYOC) listening on http://{host}:{port}  (/api/reasoning_engine, /api/stream_reasoning_engine, /health)"
+        );
+    } else if runtime.credentials.flow().config().is_configured() {
         tracing::info!(
             "AdSpace Agent listening on http://{host}:{port}  (studio: http://{host}:{port}/app/  ·  Google Sign-In required; /ui/ disabled)"
         );
@@ -2365,5 +2721,186 @@ mod tests {
         assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
         let body = to_bytes(cached.into_body(), usize::MAX).await.unwrap();
         assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_engine_dispatch_registers_operations_persists_temp_state_and_scrubs_credentials()
+    {
+        use adk_rust::session::InMemorySessionService;
+        use tower::ServiceExt as _;
+
+        struct EchoAgent;
+        #[async_trait]
+        impl adk_rust::Agent for EchoAgent {
+            fn name(&self) -> &str {
+                APP_NAME
+            }
+            fn description(&self) -> &str {
+                "echo"
+            }
+            fn sub_agents(&self) -> &[Arc<dyn adk_rust::Agent>] {
+                &[]
+            }
+            async fn run(
+                &self,
+                ctx: Arc<dyn adk_rust::InvocationContext>,
+            ) -> adk_rust::Result<adk_rust::EventStream> {
+                let mut ev = adk_rust::Event::new(ctx.invocation_id());
+                ev.author = APP_NAME.to_string();
+                ev.actions.state_delta.insert(
+                    USER_CREDENTIALS_STATE_KEY.to_string(),
+                    serde_json::json!({"access_token": "ya29.stream-secret"}),
+                );
+                ev.llm_response.content = Some(adk_rust::Content::new("model").with_text("ack"));
+                Ok(Box::pin(futures::stream::iter(vec![Ok(ev)])))
+            }
+        }
+
+        let sessions: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let runner = Arc::new(
+            adk_rust::runner::Runner::builder()
+                .app_name(APP_NAME)
+                .agent(Arc::new(EchoAgent))
+                .session_service(sessions.clone())
+                .build()
+                .unwrap(),
+        );
+        let state = adk_rust::server::AgentEngineState::new(runner);
+        let ae_router = adk_rust::server::agent_engine_router(state)
+            .layer(middleware::from_fn_with_state(
+                sessions.clone(),
+                normalize_agent_engine_request,
+            ))
+            .layer(middleware::from_fn_with_state(
+                (test_credentials(true), AdminAllowList::default()),
+                guard_adk_routes,
+            ));
+
+        // 1. register_operations succeeds without browser cookies even when OAuth is configured.
+        let reg_resp = ae_router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/reasoning_engine")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"class_method":"register_operations"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reg_resp.status(), StatusCode::OK);
+        let reg_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(reg_resp.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert!(
+            reg_json["output"]["async_stream"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("async_stream_query"))
+        );
+
+        // 2. create_session preserves temp:<auth_id> as <auth_id> in the store while scrubbing credentials from the HTTP response.
+        let create_resp = ae_router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/reasoning_engine")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "class_method": "create_session",
+                            "input": {
+                                "user_id": "ge-user",
+                                "session_id": "ge-s1",
+                                "state": {
+                                    "temp:adspace-oauth": "ya29.ge-delegated",
+                                    USER_CREDENTIALS_STATE_KEY: {"access_token": "ya29.stored"}
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::OK);
+        let create_body = String::from_utf8(
+            to_bytes(create_resp.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!create_body.contains("ya29.stored"), "{create_body}");
+
+        let stored = sessions
+            .get(adk_rust::session::GetRequest {
+                app_name: APP_NAME.to_string(),
+                user_id: "ge-user".to_string(),
+                session_id: "ge-s1".to_string(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            stored.state().get("adspace-oauth"),
+            Some(serde_json::json!("ya29.ge-delegated")),
+            "temp:adspace-oauth is preserved as adspace-oauth across adk-session persistence"
+        );
+
+        // 3. async_stream_query applies state_delta and scrubs credentials from the NDJSON stream.
+        let stream_resp = ae_router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/stream_reasoning_engine")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "class_method": "async_stream_query",
+                            "input": {
+                                "user_id": "ge-user",
+                                "session_id": "ge-s1",
+                                "message": "hello",
+                                "state_delta": {
+                                    "temp:adspace-oauth": "ya29.updated-delegated"
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stream_resp.status(), StatusCode::OK);
+        let ndjson = String::from_utf8(
+            to_bytes(stream_resp.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(ndjson.contains("\"ack\""), "{ndjson}");
+        assert!(!ndjson.contains("ya29.stream-secret"), "{ndjson}");
+
+        let updated = sessions
+            .get(adk_rust::session::GetRequest {
+                app_name: APP_NAME.to_string(),
+                user_id: "ge-user".to_string(),
+                session_id: "ge-s1".to_string(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            updated.state().get("adspace-oauth"),
+            Some(serde_json::json!("ya29.updated-delegated"))
+        );
     }
 }

@@ -533,9 +533,12 @@ pub fn env_bool_or(name: &str, default: bool) -> bool {
     }
 }
 
-/// Whether `GOOGLE_GENAI_USE_VERTEXAI` is truthy (defaults to `true`; accepts
-/// `1`/`true`/`yes`/`on` like the Python SDK).
+/// Whether `GOOGLE_GENAI_USE_VERTEXAI` (or `GOOGLE_GENAI_USE_ENTERPRISE`) is
+/// truthy (defaults to `true`; accepts `1`/`true`/`yes`/`on` like the Python SDK).
 pub fn use_vertex_ai() -> bool {
+    if env_opt("GOOGLE_GENAI_USE_ENTERPRISE").is_some() {
+        return env_bool_or("GOOGLE_GENAI_USE_ENTERPRISE", true);
+    }
     env_bool_or("GOOGLE_GENAI_USE_VERTEXAI", true)
 }
 
@@ -806,7 +809,8 @@ impl Settings {
             video_model: env_or("VIDEO_MODEL", DEFAULT_VIDEO_MODEL),
             image_model: env_or("IMAGE_MODEL", DEFAULT_IMAGE_MODEL),
             google_cloud_project: env_opt("GOOGLE_CLOUD_PROJECT"),
-            google_cloud_location: env_or("GOOGLE_CLOUD_LOCATION", "global"),
+            google_cloud_location: env_opt("GOOGLE_MODEL_LOCATION")
+                .unwrap_or_else(|| env_or("GOOGLE_CLOUD_LOCATION", "global")),
             use_vertex_ai: use_vertex_ai(),
             google_api_key: env_opt("GOOGLE_API_KEY"),
             client_id: env_or("CLIENT_ID", ""),

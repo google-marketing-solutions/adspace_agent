@@ -37,9 +37,10 @@ pub mod oauth;
 
 pub use adc::AdcTokenProvider;
 pub use oauth::{
-    AuthRequired, AuthenticatedUser, CREDENTIALS_STATE_KEY, GoogleOAuthFlow, LOGIN_SENTINEL_APP,
-    OAuthClientConfig, OAuthToken, OAuthUiEvent, SessionCredentialManager, SessionRef,
-    SessionTokenProvider, USER_CREDENTIALS_STATE_KEY, UserLogin, UserRef, auth_required,
+    AuthRequired, AuthenticatedUser, CREDENTIALS_STATE_KEY, GEMINI_ENTERPRISE_AUTH_ID_ENV,
+    GoogleOAuthFlow, LOGIN_SENTINEL_APP, OAuthClientConfig, OAuthToken, OAuthUiEvent,
+    SessionCredentialManager, SessionRef, SessionTokenProvider, USER_CREDENTIALS_STATE_KEY,
+    UserLogin, UserRef, auth_required, gemini_enterprise_auth_keys,
 };
 
 /// Something that can produce a valid OAuth 2.0 bearer access token.

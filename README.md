@@ -134,7 +134,8 @@ not export is otherwise only found when the studio fails to load.
 
 | Command                                      | What it does                                                                                                                                                                                             |
 | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `serve [--host 0.0.0.0] [--port 8000]`       | Serves the studio (`/app/`), the OAuth routes and adk-server's REST API. `PORT` is honoured (Cloud Run). While `CLIENT_ID` / `CLIENT_SECRET` are unset the stock ADK dev UI is also available at `/ui/`. |
+| `serve [--host 0.0.0.0] [--port 8000]`       | Serves the studio (`/app/`), the OAuth routes and adk-server's REST API. `PORT` is honoured (Cloud Run). When `GOOGLE_CLOUD_AGENT_ENGINE_ID` or `AGENT_ENGINE=true` is set, also serves the Agent Engine BYOC dispatch endpoints. |
+| `agent-engine [--host 0.0.0.0] [--port 8080]`| Serves the Vertex AI Agent Engine (`ReasoningEngine` BYOC) dispatch endpoints (`/api/reasoning_engine`, `/api/stream_reasoning_engine`, `/health`).                                                                                 |
 | `console [--host] [--port]`                  | adk-cli terminal chat as user `user`; the OAuth callback is still served on `host:port`, so consent popups complete.                                                                                     |
 | `list-tools google-ads`                      | Google Ads API tools (unfiltered).                                                                                                                                                                       |
 | `list-tools youtube`                         | YouTube Data API tools (with the agent's filter).                                                                                                                                                        |
@@ -518,6 +519,52 @@ The [Dockerfile](Dockerfile) uses `cargo-chef` to cache compiled dependencies
 and ships the release binary on `debian:trixie-slim`; no Python runtime is
 needed because code execution happens server-side in Gemini by default.
 
+### Deploy to Gemini Enterprise
+
+[`deploy.sh`](deploy.sh) also supports deploying the container to **Vertex AI
+Agent Runtime (`ReasoningEngine` BYOC)** and registering (or updating in-place)
+the ADK agent on a **Gemini Enterprise** app per
+[Register and manage an ADK agent](https://docs.cloud.google.com/gemini/enterprise/docs/register-and-manage-an-adk-agent):
+
+```shell
+# Build image, deploy/update Agent Runtime (ReasoningEngine), and register/update on Gemini Enterprise
+./deploy.sh --gemini-enterprise --app-id {YOUR_GEMINI_ENTERPRISE_APP_ID}
+
+# Also create/update the Gemini Enterprise OAuth authorization resource for end-user Google API access
+./deploy.sh --gemini-enterprise \
+  --app-id {YOUR_GEMINI_ENTERPRISE_APP_ID} \
+  --auth-id adspace-oauth
+
+# Deploy to both Cloud Run and Gemini Enterprise in one run
+./deploy.sh --target all --app-id {YOUR_GEMINI_ENTERPRISE_APP_ID} --auth-id adspace-oauth
+
+# Reuse the current :latest image without rebuilding
+./deploy.sh --gemini-enterprise --skip-build --app-id {YOUR_GEMINI_ENTERPRISE_APP_ID}
+```
+
+How it works:
+
+1. **Agent Runtime (`ReasoningEngine` BYOC):** `deploy.sh` reads the existing
+   Cloud Run service configuration so the `ReasoningEngine` automatically
+   inherits the service account, environment variables (`GOOGLE_MODEL_LOCATION=global`,
+   `SESSION_SERVICE_URI`, `ARTIFACT_SERVICE_URI`, `AGENT_ENGINE=true`), and
+   Secret Manager `secretEnv` bindings (`CLIENT_ID`, `CLIENT_SECRET`,
+   `GOOGLE_ADS_DEVELOPER_TOKEN`, `SESSION_ENCRYPTION_KEY`). If a
+   `ReasoningEngine` with the same display name (or `--engine-id` /
+   `REASONING_ENGINE_ID`) already exists in `${REGION}`, it is updated in-place
+   via `PATCH`.
+2. **End-user OAuth (`--auth-id` / `GEMINI_ENTERPRISE_AUTH_ID`):** When set,
+   `deploy.sh` creates or updates the Discovery Engine `authorizations/{AUTH_ID}`
+   resource and attaches it to `authorizationConfig.toolAuthorizations`. Add
+   `https://vertexaisearch.cloud.google.com/oauth-redirect` and
+   `https://vertexaisearch.cloud.google.com/static/oauth/oauth.html` to the
+   OAuth 2.0 Web client's authorized redirect URIs in Google Cloud Console, and
+   ensure `discoveryengine.googleapis.com` is enabled on the project.
+3. **Quota-safe registration (`--app-id` / `GEMINI_ENTERPRISE_APP_ID`):**
+   `deploy.sh` checks `assistants/default_assistant/agents` first and uses
+   `PATCH` when the agent is already registered on the app, avoiding Gemini
+   Enterprise's daily `agents.create` quota on subsequent rollouts.
+
 ## Troubleshooting
 
 | Symptom                                                                | Cause / fix                                                                                                                                                                                        |
@@ -543,8 +590,9 @@ needed because code execution happens server-side in Gemini by default.
 - The operations staged by `parse_sheet_tool` are stored as a versioned session
   artifact (`cm360_payloads.json`) through the configured artifact service
   instead of a hard-coded GCS path.
-- Deployment targets Cloud Run; Agent Engine (ReasoningEngine BYOC) can be added
-  with adk-rust's `agent-engine` / `gcp-deploy` features.
+- Deployment supports both Cloud Run and Gemini Enterprise (Vertex AI Agent
+  Runtime `ReasoningEngine` BYOC + Discovery Engine agent registration) via
+  [`deploy.sh`](deploy.sh).
 
 ## Contributing
 

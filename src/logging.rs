@@ -90,7 +90,8 @@ pub fn init(service_name: &str) {
     }
     let (format, complaint) = LogFormat::resolve(
         std::env::var("LOG_FORMAT").ok().as_deref(),
-        std::env::var_os("K_SERVICE").is_some(),
+        std::env::var_os("K_SERVICE").is_some()
+            || std::env::var_os("GOOGLE_CLOUD_AGENT_ENGINE_ID").is_some(),
     );
     let _ = FORMAT.set(format);
     match format {

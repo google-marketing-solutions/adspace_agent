@@ -17,6 +17,7 @@
 //! ```text
 //! adspace-agent                      # serve the web UI + API (default)
 //! adspace-agent serve --port 8000
+//! adspace-agent agent-engine         # serve as a Vertex AI Agent Engine BYOC container
 //! adspace-agent console              # interactive terminal chat
 //! adspace-agent list-tools google_ads
 //! adspace-agent list-tools youtube
@@ -57,6 +58,18 @@ enum Command {
         host: String,
         /// Port to bind (Cloud Run sets `PORT`).
         #[arg(long, env = "PORT", default_value_t = 8000)]
+        port: u16,
+    },
+    /// Serve the Vertex AI Agent Engine (ReasoningEngine BYOC) dispatch endpoints
+    /// (`/api/reasoning_engine`, `/api/stream_reasoning_engine`, `/health`).
+    /// Note: `serve` also enables these endpoints automatically when
+    /// `GOOGLE_CLOUD_AGENT_ENGINE_ID` or `AGENT_ENGINE=true` is set.
+    AgentEngine {
+        /// Interface to bind.
+        #[arg(long, env = "HOST", default_value = "0.0.0.0")]
+        host: String,
+        /// Port to bind (Agent Engine defaults to `8080`).
+        #[arg(long, env = "PORT", default_value_t = 8080)]
         port: u16,
     },
     /// Chat with the agent in the terminal (adk-cli console; user id `user`).
@@ -218,6 +231,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Serve { host, port } => {
             let runtime = build_runtime().await?;
             server::serve(runtime, &host, port).await
+        }
+        Command::AgentEngine { host, port } => {
+            let runtime = build_runtime().await?;
+            server::serve_agent_engine(runtime, &host, port).await
         }
         Command::Console { host, port } => {
             let runtime = build_runtime().await?;

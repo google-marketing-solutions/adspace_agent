@@ -1004,6 +1004,35 @@ impl AgentRuntime {
         }
         runner
     }
+
+    /// Builds an [`adk_rust::runner::Runner`] configured with all runtime
+    /// services, compaction, and context-caching settings (used by the Agent
+    /// Engine dispatch router).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runner cannot be constructed.
+    pub fn build_runner(
+        &self,
+        default_user_id: &str,
+    ) -> anyhow::Result<Arc<adk_rust::runner::Runner>> {
+        let (intra_cfg, intra_summarizer) = self.intra_compaction_config();
+        let mut builder = adk_rust::runner::Runner::builder()
+            .app_name(APP_NAME)
+            .agent(self.agent.clone())
+            .session_service(self.session_service.clone())
+            .artifact_service(self.artifact_service.clone())
+            .memory_service(self.memory_for(default_user_id))
+            .compaction_config(self.compaction_config())
+            .intra_compaction_config(intra_cfg)
+            .intra_compaction_summarizer(intra_summarizer);
+        if let Some(cache_cfg) = self.context_cache_config_opt() {
+            builder = builder
+                .context_cache_config(cache_cfg)
+                .cache_capable(self.models.clone() as Arc<dyn CacheCapable>);
+        }
+        Ok(Arc::new(builder.build()?))
+    }
 }
 
 /// Runs agent turns outside of an HTTP request — e.g. to resume a chat after
@@ -1778,7 +1807,16 @@ fn build_gemini_model_with_thinking(
     model_name: &str,
     thinking: &config::ThinkingSettings,
 ) -> anyhow::Result<GeminiModel> {
-    let mut model = GeminiModel::from_env(model_name).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut model = if config::use_vertex_ai()
+        && let (Some(project), Some(location)) = (
+            config::env_opt("GOOGLE_CLOUD_PROJECT"),
+            config::env_opt("GOOGLE_MODEL_LOCATION"),
+        ) {
+        GeminiModel::new_google_cloud_adc(project, location, model_name)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+    } else {
+        GeminiModel::from_env(model_name).map_err(|e| anyhow::anyhow!("{e}"))?
+    };
     if let Some(cfg) = thinking.thinking_config_for_model(model_name) {
         model.set_thinking_config(cfg);
     }

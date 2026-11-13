@@ -16,6 +16,7 @@
 
 // Lower-cased component type, matching how `renderInnerComponent` dispatches.
 import { style } from "../dom.js";
+import { parseMarkdownBlocksInto } from "../markdown.js";
 import { renderChartInner } from "./charts.js";
 import { renderTableParts } from "./tables.js";
 import { buildAlertParts, renderInnerComponent } from "./components.js";
@@ -379,6 +380,30 @@ export const inferArtifactKind = (filename, mimeType = "") => {
   ) {
     return { kind: "audio", icon: "audio_file", defaultTitle: "Audio Artifact" };
   }
+  if (
+    mime === "text/csv" ||
+    mime === "application/csv" ||
+    mime === "text/tab-separated-values" ||
+    /\.(?:csv|tsv)$/i.test(lower)
+  ) {
+    return { kind: "file", icon: "table_view", defaultTitle: "CSV Artifact" };
+  }
+  if (mime === "application/json" || /\.json$/i.test(lower)) {
+    return { kind: "file", icon: "data_object", defaultTitle: "JSON Artifact" };
+  }
+  if (
+    mime === "text/markdown" ||
+    mime === "text/x-markdown" ||
+    /\.(?:md|markdown)$/i.test(lower)
+  ) {
+    return { kind: "markdown", icon: "article", defaultTitle: "Markdown Artifact" };
+  }
+  if (mime === "text/plain" || /\.(?:txt|log)$/i.test(lower)) {
+    return { kind: "file", icon: "description", defaultTitle: "Text Artifact" };
+  }
+  if (/\.(?:sql|ya?ml|xml|html?)$/i.test(lower)) {
+    return { kind: "file", icon: "code", defaultTitle: filename || "Artifact" };
+  }
   return { kind: "file", icon: "description", defaultTitle: filename || "Artifact" };
 };
 
@@ -410,20 +435,35 @@ export const extractPartArtifact = (part) => {
       toolName,
       message: typeof resp.message === "string" ? resp.message : null,
       mimeType: resp.mime_type || resp.mimeType || null,
+      bytes: typeof resp.bytes === "number" ? resp.bytes : null,
+      preview: typeof resp.preview === "string" ? resp.preview : null,
     };
   }
 
-  if (typeof resp.saved_to_artifact === "string" && resp.saved_to_artifact.trim() !== "") {
-    const filename = resp.saved_to_artifact.trim();
-    const inferred = inferArtifactKind(filename, resp.mime_type || resp.mimeType);
+  const savedAs =
+    typeof resp.saved_to_artifact === "string"
+      ? resp.saved_to_artifact.trim()
+      : typeof resp.file?.saved_as === "string"
+        ? resp.file.saved_as.trim()
+        : "";
+  if (savedAs !== "") {
+    const mimeType =
+      resp.mime_type || resp.mimeType || resp.file?.mime_type || resp.file?.mimeType || null;
+    const bytes =
+      typeof resp.bytes === "number"
+        ? resp.bytes
+        : typeof resp.file?.bytes === "number"
+          ? resp.file.bytes
+          : null;
+    const inferred = inferArtifactKind(savedAs, mimeType);
     return {
-      filename,
+      filename: savedAs,
       kind: inferred.kind,
       icon: inferred.icon,
-      title: filename,
+      title: savedAs,
       toolName,
-      mimeType: resp.mime_type || resp.mimeType || null,
-      bytes: typeof resp.bytes === "number" ? resp.bytes : null,
+      mimeType,
+      bytes,
       preview: typeof resp.preview === "string" ? resp.preview : null,
     };
   }
@@ -588,21 +628,39 @@ export const buildArtifactSurfaceCard = (art, url) => {
     body.appendChild(audio);
   } else {
     if (art.preview) {
-      const pre = document.createElement("pre");
-      pre.className = "artifact-file-preview";
-      pre.textContent = art.preview;
-      style(pre, {
-        margin: "0",
-        padding: "14px",
-        maxHeight: "320px",
-        overflow: "auto",
-        borderRadius: "14px",
-        border: "1px solid var(--dm-outline)",
-        background: "var(--dm-surface-gray)",
-        color: "var(--dm-text-primary)",
-        font: "12px/1.5 var(--mono)",
-      });
-      body.appendChild(pre);
+      if (art.kind === "markdown") {
+        const mdBox = document.createElement("div");
+        mdBox.className = "adk-ui-md artifact-md-preview";
+        style(mdBox, {
+          padding: "16px 18px",
+          maxHeight: "380px",
+          overflow: "auto",
+          borderRadius: "14px",
+          border: "1px solid var(--dm-outline)",
+          background: "var(--dm-surface-gray)",
+          color: "var(--dm-text-primary)",
+          fontSize: "13.5px",
+          lineHeight: "1.6",
+        });
+        parseMarkdownBlocksInto(mdBox, art.preview);
+        body.appendChild(mdBox);
+      } else {
+        const pre = document.createElement("pre");
+        pre.className = "artifact-file-preview";
+        pre.textContent = art.preview;
+        style(pre, {
+          margin: "0",
+          padding: "14px",
+          maxHeight: "320px",
+          overflow: "auto",
+          borderRadius: "14px",
+          border: "1px solid var(--dm-outline)",
+          background: "var(--dm-surface-gray)",
+          color: "var(--dm-text-primary)",
+          font: "12px/1.5 var(--mono)",
+        });
+        body.appendChild(pre);
+      }
     }
     if (url) {
       const fileRow = document.createElement("a");

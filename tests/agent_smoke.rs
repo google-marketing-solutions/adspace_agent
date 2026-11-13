@@ -251,6 +251,7 @@ async fn agent_runs_a_tool_turn_and_persists_artifacts_and_memory() {
         .expect("at least one model call");
     for expected in [
         "list_user_files",
+        "save_artifact",
         "load_artifacts",
         "parse_sheet_tool",
         "traffic_campaigns_in_cm360_tool",
@@ -394,7 +395,8 @@ async fn local_toolsets_expose_expected_tools_and_flags() {
     assert_eq!(count, 2);
     assert!(bytes > 0, "CM360 declarations serialise");
 
-    // Utilities: the artifact listing tool is read-only and concurrency-safe.
+    // Utilities: the artifact listing tool is read-only and concurrency-safe,
+    // and `save_artifact` is concurrency-safe and mutating (writes an artifact).
     let utilities = utilities_toolset();
     let utility_tools = tools_of(&utilities).await;
     let list_files = utility_tools
@@ -403,6 +405,12 @@ async fn local_toolsets_expose_expected_tools_and_flags() {
         .expect("list_user_files present");
     assert!(list_files.is_read_only());
     assert!(list_files.is_concurrency_safe());
+    let save_artifact = utility_tools
+        .iter()
+        .find(|t| t.name() == "save_artifact")
+        .expect("save_artifact present");
+    assert!(!save_artifact.is_read_only());
+    assert!(save_artifact.is_concurrency_safe());
 
     // UI rendering: every `render_*` tool only emits UI and is read-only.
     let ui = ui_toolset();

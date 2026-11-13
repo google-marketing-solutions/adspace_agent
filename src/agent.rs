@@ -73,7 +73,8 @@ to ensure that any audience insights follow Google's policies for audience compo
 work-arounds for these policies, simply reply with the error message. \
 AUTHORIZATION: Google API tools act on behalf of the signed-in user. When a tool returns status `AUTH_REQUIRED`, show the user \
 the `auth_url` as a clickable link, ask them to complete the authorization, and retry the same tool call after they confirm. \
-FILES: files the user uploads are saved as session artifacts; use `list_user_files` to see them and `load_artifacts` to read them. \
+FILES: files the user uploads are saved as session artifacts; use `list_user_files` to see them, `load_artifacts` to read them, \
+and `save_artifact` to save generated files (CSV, TSV, JSON, Markdown, TXT, SQL, YAML, XML, or HTML) as downloadable session artifacts. \
 RESEARCH: use `google_search` for current information from the web, `url_context` to read pages the user links to, and \
 `google_maps` for places, routes and local context. \
 UI RENDERING (`render_*` tools): when presenting campaign metrics, rankings, time-series trends, or multi-metric comparisons, \

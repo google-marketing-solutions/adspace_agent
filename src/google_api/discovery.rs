@@ -304,11 +304,7 @@ impl DiscoveryFetcher {
             Err(_) => Some(default_cache_dir()),
         };
         Self {
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(60))
-                .connect_timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_default(),
+            http: super::toolset::shared_http_client(),
             cache_dir,
             cache_ttl: DEFAULT_DISCOVERY_CACHE_TTL,
         }
@@ -454,7 +450,13 @@ impl DiscoveryFetcher {
         let mut errors = Vec::new();
         for url in &candidates {
             tracing::info!("Fetching Discovery document for {api_name} {api_version} from {url}");
-            match self.http.get(url).send().await {
+            match self
+                .http
+                .get(url)
+                .timeout(Duration::from_secs(60))
+                .send()
+                .await
+            {
                 Ok(resp) if resp.status().is_success() => {
                     let body = match read_body_limited(resp, MAX_DISCOVERY_BODY_BYTES).await {
                         Ok(body) => body,

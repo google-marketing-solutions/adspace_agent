@@ -404,14 +404,21 @@ export const updateMessageArticle = (
   article,
   { isUser, partial, textContent, visibleTools, usage }
 ) => {
-  // 1. Streaming indicator
+  // 1. Streaming indicator: three dots that trail the text, so the text does
+  //    not shift when the stream ends. Appended, never prepended.
   let st = article.querySelector(":scope > .streaming-tag");
   if (partial) {
     if (!st) {
       st = document.createElement("div");
       st.className = "streaming-tag";
-      st.textContent = "streaming…";
-      article.prepend(st);
+      st.setAttribute("role", "img");
+      st.setAttribute("aria-label", "Agent is responding");
+      st.append(
+        document.createElement("span"),
+        document.createElement("span"),
+        document.createElement("span")
+      );
+      article.append(st);
     }
   } else if (st) {
     st.remove();
@@ -423,13 +430,7 @@ export const updateMessageArticle = (
     if (!textEl) {
       textEl = document.createElement("div");
       textEl.className = "message-text adk-ui-md";
-      if (st && st.nextSibling) {
-        article.insertBefore(textEl, st.nextSibling);
-      } else if (st) {
-        article.appendChild(textEl);
-      } else {
-        article.prepend(textEl);
-      }
+      article.prepend(textEl);
     }
     if (textEl._renderedText !== textContent) {
       textEl._renderedText = textContent;
@@ -599,6 +600,8 @@ export const updateMessageCol = (col, item) => {
   updateUsageFooter(col, { isUser: item.isUser, usage: item.usage });
 };
 
+const visibleItemMemo = new WeakMap();
+
 export const renderTranscript = () => {
   updateSessionUsageUi();
   // Decide whether to follow the bottom *before* mutating the DOM: only
@@ -611,8 +614,25 @@ export const renderTranscript = () => {
     els.chatTranscript.scrollHeight - els.chatTranscript.scrollTop - els.chatTranscript.clientHeight < 40;
   const stickToBottom = prefs.autoScroll && (nearBottom || isNewSessionView);
   const visibleItems = [];
+  const surfaceStateStamp = `${state.canvasSurfaces.length}:${overlayTriggersById.size}:${prefs.showTools ? 1 : 0}`;
+  const currentUserLabel = state.currentUser?.name || state.currentUser?.email || "You";
 
   state.currentEvents.forEach((ev, idx) => {
+    // Non-partial historical event objects are immutable across streaming frames;
+    // reuse their projected item so streaming remains O(1) in session length.
+    if (!ev?.partial && ev && typeof ev === "object") {
+      const cached = visibleItemMemo.get(ev);
+      if (
+        cached &&
+        cached.stamp === surfaceStateStamp &&
+        cached.idx === idx &&
+        cached.userLabel === currentUserLabel
+      ) {
+        if (cached.item) visibleItems.push(cached.item);
+        return;
+      }
+    }
+
     const parts = ev?.content?.parts || [];
     const hasToolOrUi = parts.some(
       (p) =>
@@ -655,16 +675,24 @@ export const renderTranscript = () => {
 
     const visibleTools = prefs.showTools ? toolParts : [];
     if (!textContent && visibleTools.length === 0 && surfaceRefs.length === 0) {
+      if (!ev?.partial && ev && typeof ev === "object") {
+        visibleItemMemo.set(ev, {
+          stamp: surfaceStateStamp,
+          idx,
+          userLabel: currentUserLabel,
+          item: null,
+        });
+      }
       return;
     }
 
     const authorLabel = isUser
-      ? state.currentUser?.name || state.currentUser?.email || "You"
+      ? currentUserLabel
       : ev.author === APP_NAME
         ? "AdSpace Agent"
         : ev.author || "Agent";
 
-    visibleItems.push({
+    const item = {
       isUser,
       authorLabel,
       partial: !!ev.partial,
@@ -672,7 +700,16 @@ export const renderTranscript = () => {
       visibleTools,
       surfaceRefs,
       usage: isUser ? null : cachedEventUsage(ev),
-    });
+    };
+    if (!ev?.partial && ev && typeof ev === "object") {
+      visibleItemMemo.set(ev, {
+        stamp: surfaceStateStamp,
+        idx,
+        userLabel: currentUserLabel,
+        item,
+      });
+    }
+    visibleItems.push(item);
   });
 
   if (!visibleItems.length) {
@@ -725,6 +762,8 @@ export const renderTranscript = () => {
       row = newRow;
     }
 
+    if (row._renderedItem === item) return;
+    row._renderedItem = item;
     const col = row.querySelector(":scope > .message-col");
     updateMessageCol(col, item);
   });

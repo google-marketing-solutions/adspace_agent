@@ -147,6 +147,7 @@ impl RuntimeModelConfig {
         });
         let llm: Arc<dyn adk_rust::Llm> = initial.clone();
         let cache: Arc<dyn CacheCapable> = initial;
+        let thinking = config::ThinkingSettings::from_env();
         Self {
             schema_source: llm.clone(),
             llm_name: std::sync::RwLock::new(initial_name),
@@ -154,10 +155,8 @@ impl RuntimeModelConfig {
             cache_capable: std::sync::RwLock::new(Some(cache)),
             video_model: std::sync::RwLock::new(video_model.into()),
             image_model: std::sync::RwLock::new(image_model.into()),
-            factory: Box::new(|model_name| {
-                let built = Arc::new(
-                    GeminiModel::from_env(model_name).map_err(|e| anyhow::anyhow!("{e}"))?,
-                );
+            factory: Box::new(move |model_name| {
+                let built = Arc::new(build_gemini_model_with_thinking(model_name, &thinking)?);
                 Ok((
                     built.clone() as Arc<dyn adk_rust::Llm>,
                     Some(built as Arc<dyn CacheCapable>),
@@ -377,10 +376,16 @@ fn normalize_gemini_request_contents(contents: Vec<adk_rust::Content>) -> Vec<ad
 
                     if let Some(found_idx) = pos {
                         let mut part = avail_responses.remove(found_idx);
-                        if let adk_rust::Part::FunctionResponse { ref mut id, .. } = part
-                            && id.is_none()
+                        if let adk_rust::Part::FunctionResponse {
+                            ref mut function_response,
+                            ref mut id,
+                            ..
+                        } = part
                         {
-                            *id = fc_id;
+                            if id.is_none() {
+                                *id = fc_id;
+                            }
+                            compact_ui_function_response(function_response);
                         }
                         matched_parts.push(part);
                     } else {
@@ -425,6 +430,30 @@ fn normalize_gemini_request_contents(contents: Vec<adk_rust::Content>) -> Vec<ad
     }
 
     normalized
+}
+
+/// Compacts successful `render_*` UI tool responses in outgoing LLM requests.
+///
+/// Session storage and the SSE stream retain the full `adk-ui` component tree
+/// for the Studio frontend, while the LLM only needs confirmation that the
+/// surface rendered (the arguments it passed are already in the paired
+/// `FunctionCall` part; validation errors have no `"components"` array and pass
+/// through verbatim so the model can self-correct).
+fn compact_ui_function_response(fr: &mut adk_rust::FunctionResponseData) {
+    if !fr.name.starts_with("render_") {
+        return;
+    }
+    let Some(components) = fr.response.get("components").and_then(|v| v.as_array()) else {
+        return;
+    };
+    let mut compact = serde_json::json!({
+        "status": "rendered",
+        "components": components.len(),
+    });
+    if let Some(surface_id) = fr.response.get("surface_id").and_then(|v| v.as_str()) {
+        compact["surface_id"] = serde_json::Value::String(surface_id.to_string());
+    }
+    fr.response = compact;
 }
 
 /// Counts character lengths of text/tool parts and thinking parts in `content`.
@@ -686,23 +715,64 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
+    /// Builds a fast LLM handle for context summarization (`SUMMARIZER_MODEL`,
+    /// defaulting to [`config::DEFAULT_SUMMARIZER_MODEL`]), falling back to the
+    /// active runtime model when credentials are offline (e.g. unit tests).
+    fn summarizer_llm(&self) -> Arc<dyn adk_rust::Llm> {
+        let summarizer_name = config::env_or("SUMMARIZER_MODEL", config::DEFAULT_SUMMARIZER_MODEL);
+        let fast_thinking = config::ThinkingSettings::default();
+        match build_gemini_model_with_thinking(&summarizer_name, &fast_thinking) {
+            Ok(model) => Arc::new(model),
+            Err(_) => self.models.clone(),
+        }
+    }
+
     /// Events-compaction configuration derived from the settings.
     pub fn compaction_config(&self) -> EventsCompactionConfig {
         let c = self.settings.compaction;
         EventsCompactionConfig {
             compaction_interval: c.compaction_interval.min(u32::MAX as u64) as u32,
             overlap_size: c.overlap_size.min(u32::MAX as u64) as u32,
-            summarizer: Arc::new(LlmEventSummarizer::new(self.models.clone())),
+            summarizer: Arc::new(LlmEventSummarizer::new(self.summarizer_llm())),
         }
     }
 
-    /// Context-cache configuration (mirrors the Python `ContextCacheConfig`).
+    /// Intra-invocation compaction configuration (`COMPACTION_TOKEN_THRESHOLD`
+    /// and `COMPACTION_EVENT_RETENTION_SIZE`).
+    pub fn intra_compaction_config(
+        &self,
+    ) -> (
+        adk_rust::IntraCompactionConfig,
+        Arc<dyn adk_rust::BaseEventsSummarizer>,
+    ) {
+        let c = self.settings.compaction;
+        let config = adk_rust::IntraCompactionConfig {
+            token_threshold: c.token_threshold,
+            overlap_event_count: c.event_retention_size.min(usize::MAX as u64) as usize,
+            chars_per_token: 4,
+        };
+        let summarizer: Arc<dyn adk_rust::BaseEventsSummarizer> =
+            Arc::new(LlmEventSummarizer::new(self.summarizer_llm()));
+        (config, summarizer)
+    }
+
+    /// Context-cache configuration (`CONTEXT_CACHE_MIN_TOKENS` defaults to `0`,
+    /// disabling explicit `CachedContent` creation unless opted in).
     pub fn context_cache_config(&self) -> ContextCacheConfig {
         ContextCacheConfig {
-            min_tokens: config::env_u64_or("CONTEXT_CACHE_MIN_TOKENS", 2048) as u32,
+            min_tokens: config::env_u64_or("CONTEXT_CACHE_MIN_TOKENS", 0) as u32,
             ttl_seconds: config::env_u64_or("CONTEXT_CACHE_TTL_SECONDS", 600) as u32,
             cache_intervals: config::env_u64_or("CONTEXT_CACHE_INTERVALS", 5) as u32,
         }
+    }
+
+    /// Returns `Some(ContextCacheConfig)` only when explicit context caching is
+    /// opted in via `CONTEXT_CACHE_MIN_TOKENS > 0`. Leaving it `None` avoids
+    /// `adk-runner`'s per-request `create_cache` HTTP 400 round-trip while
+    /// preserving Gemini's automatic implicit prefix caching.
+    pub fn context_cache_config_opt(&self) -> Option<ContextCacheConfig> {
+        let cfg = self.context_cache_config();
+        (cfg.min_tokens > 0).then_some(cfg)
     }
 
     /// Memory bound to a specific app/user, as the runner expects it.
@@ -716,17 +786,20 @@ impl AgentRuntime {
 
     /// A [`TurnRunner`] configured like the server's request runner.
     pub fn turn_runner(&self) -> TurnRunner {
-        TurnRunner::new(
+        let (intra_cfg, intra_summarizer) = self.intra_compaction_config();
+        let mut runner = TurnRunner::new(
             self.agent.clone(),
             self.session_service.clone(),
             self.artifact_service.clone(),
             self.memory_service.clone(),
         )
         .with_compaction(self.compaction_config())
-        .with_context_cache(
-            self.context_cache_config(),
-            self.models.clone() as Arc<dyn CacheCapable>,
-        )
+        .with_intra_compaction(intra_cfg, intra_summarizer);
+        if let Some(cache_cfg) = self.context_cache_config_opt() {
+            runner =
+                runner.with_context_cache(cache_cfg, self.models.clone() as Arc<dyn CacheCapable>);
+        }
+        runner
     }
 }
 
@@ -741,6 +814,10 @@ pub struct TurnRunner {
     artifact_service: Arc<dyn ArtifactService>,
     memory_service: Arc<dyn MemoryService>,
     compaction: Option<EventsCompactionConfig>,
+    intra_compaction: Option<(
+        adk_rust::IntraCompactionConfig,
+        Arc<dyn adk_rust::BaseEventsSummarizer>,
+    )>,
     context_cache: Option<(ContextCacheConfig, Arc<dyn CacheCapable>)>,
 }
 
@@ -758,6 +835,7 @@ impl TurnRunner {
             artifact_service,
             memory_service,
             compaction: None,
+            intra_compaction: None,
             context_cache: None,
         }
     }
@@ -765,6 +843,16 @@ impl TurnRunner {
     /// Enables events compaction.
     pub fn with_compaction(mut self, config: EventsCompactionConfig) -> Self {
         self.compaction = Some(config);
+        self
+    }
+
+    /// Enables mid-turn token-threshold compaction.
+    pub fn with_intra_compaction(
+        mut self,
+        config: adk_rust::IntraCompactionConfig,
+        summarizer: Arc<dyn adk_rust::BaseEventsSummarizer>,
+    ) -> Self {
+        self.intra_compaction = Some((config, summarizer));
         self
     }
 
@@ -798,6 +886,11 @@ impl TurnRunner {
             )));
         if let Some(compaction) = &self.compaction {
             builder = builder.compaction_config(compaction.clone());
+        }
+        if let Some((intra_cfg, summarizer)) = &self.intra_compaction {
+            builder = builder
+                .intra_compaction_config(intra_cfg.clone())
+                .intra_compaction_summarizer(summarizer.clone());
         }
         if let Some((config, model)) = &self.context_cache {
             builder = builder
@@ -1084,21 +1177,44 @@ impl Agent for MemorySavingAgent {
                     .drain(..),
             );
             let mut seen = HashSet::new();
+            let now = chrono::Utc::now();
             let entries: Vec<adk_rust::memory::MemoryEntry> = contents
                 .into_iter()
-                .filter(|c| c.parts.iter().any(|p| matches!(p, Part::Text { .. })))
-                .filter(|c| seen.insert(serde_json::to_string(c).unwrap_or_default()))
-                .map(|content| {
-                    let author = if content.role == "user" {
+                .filter_map(|c| {
+                    // Retain only non-empty text parts so binary attachments
+                    // (`InlineData`) are never cloned or JSON-serialized into RAM.
+                    let text_parts: Vec<Part> = c
+                        .parts
+                        .into_iter()
+                        .filter(|p| matches!(p, Part::Text { text } if !text.is_empty()))
+                        .collect();
+                    if text_parts.is_empty() {
+                        return None;
+                    }
+                    let mut key = String::with_capacity(64);
+                    key.push_str(&c.role);
+                    for p in &text_parts {
+                        if let Part::Text { text } = p {
+                            key.push('\0');
+                            key.push_str(text);
+                        }
+                    }
+                    if !seen.insert(key) {
+                        return None;
+                    }
+                    let author = if c.role == "user" {
                         "user".to_string()
                     } else {
                         agent_name.clone()
                     };
-                    adk_rust::memory::MemoryEntry {
-                        content,
+                    Some(adk_rust::memory::MemoryEntry {
+                        content: Content {
+                            role: c.role,
+                            parts: text_parts,
+                        },
                         author,
-                        timestamp: chrono::Utc::now(),
-                    }
+                        timestamp: now,
+                    })
                 })
                 .collect();
             if let Err(e) = memory
@@ -1154,22 +1270,36 @@ pub async fn create_agent(
     ));
 
     if settings.is_toolset_enabled("campaign_manager_360") {
-        toolsets.push(Arc::new(Cm360TraffickingToolset::new(Cm360Services {
-            credentials: credentials.clone(),
-            api_override: None,
-        })));
+        let cm360_trafficking: Arc<dyn Toolset> =
+            Arc::new(Cm360TraffickingToolset::new(Cm360Services {
+                credentials: credentials.clone(),
+                api_override: None,
+            }));
+        if settings
+            .lazy_toolsets
+            .iter()
+            .any(|n| n == "campaign_manager_360")
+        {
+            let write_key = format!("campaign_manager_360{}", config::LAZY_WRITE_TIER_SUFFIX);
+            toolsets.push(Arc::new(LazyToolset::with_keys(
+                cm360_trafficking,
+                ["campaign_manager_360".to_string(), write_key],
+            )));
+        } else {
+            toolsets.push(cm360_trafficking);
+        }
     }
 
     let mut deferred: Vec<LazyToolsetEntry> = Vec::new();
-    let mut lazy: Vec<GoogleApiToolset> = Vec::new();
-    let mut defer = |toolset: GoogleApiToolset, summary: String| {
+    let mut lazy: Vec<Arc<dyn Toolset>> = Vec::new();
+    let mut defer_api = |toolset: GoogleApiToolset, summary: String| {
         deferred.push(LazyToolsetEntry {
             name: toolset.name().to_string(),
             summary,
             tool_count: toolset.tool_names().len(),
             declaration_bytes: toolset.declaration_bytes(),
         });
-        lazy.push(toolset);
+        lazy.push(Arc::new(toolset));
     };
     for toolset in load_google_api_toolsets(settings, &credentials).await {
         if !settings.lazy_toolsets.iter().any(|n| n == toolset.name()) {
@@ -1188,14 +1318,64 @@ pub async fn create_agent(
         match writes {
             Some(writes) => {
                 let (read_summary, write_summary) = config::tiered_toolset_summaries(&name);
-                defer(reads, read_summary);
-                defer(writes, write_summary);
+                defer_api(reads, read_summary);
+                defer_api(writes, write_summary);
             }
-            None => defer(reads, config::toolset_summary(&name).to_string()),
+            None => defer_api(reads, config::toolset_summary(&name).to_string()),
         }
     }
+
+    if settings.is_toolset_enabled("bigquery") {
+        // Runs with the signed-in user's OAuth token (never the service
+        // account's ADC), like every other data toolset.
+        let bq: Arc<dyn Toolset> = Arc::new(
+            BigQueryToolset::new(credentials.clone())
+                .with_project(settings.google_cloud_project.clone())
+                .with_read_only(config::env_bool_or("BIGQUERY_READ_ONLY", true))
+                .with_dry_run(config::env_bool_or("BIGQUERY_DRY_RUN", false)),
+        );
+        if settings.lazy_toolsets.iter().any(|n| n == "bigquery") {
+            let (tool_count, declaration_bytes) =
+                declaration_size(bq.as_ref()).await.unwrap_or((4, 0));
+            deferred.push(LazyToolsetEntry {
+                name: "bigquery".to_string(),
+                summary: config::toolset_summary("bigquery").to_string(),
+                tool_count,
+                declaration_bytes,
+            });
+            lazy.push(bq);
+        } else {
+            toolsets.push(bq);
+        }
+    }
+
+    if settings.is_toolset_enabled("google_genai") {
+        match GenAiClient::from_settings(settings) {
+            Ok(client) => {
+                let genai_ts: Arc<dyn Toolset> = Arc::new(google_genai_toolset_with_controller(
+                    client,
+                    credentials.model_controller(),
+                ));
+                if settings.lazy_toolsets.iter().any(|n| n == "google_genai") {
+                    let (tool_count, declaration_bytes) =
+                        declaration_size(genai_ts.as_ref()).await.unwrap_or((3, 0));
+                    deferred.push(LazyToolsetEntry {
+                        name: "google_genai".to_string(),
+                        summary: config::toolset_summary("google_genai").to_string(),
+                        tool_count,
+                        declaration_bytes,
+                    });
+                    lazy.push(genai_ts);
+                } else {
+                    toolsets.push(genai_ts);
+                }
+            }
+            Err(e) => tracing::warn!("Google GenAI toolset disabled: {e:#}"),
+        }
+    }
+
     for toolset in lazy {
-        toolsets.push(Arc::new(LazyToolset::new(Arc::new(toolset))));
+        toolsets.push(Arc::new(LazyToolset::new(toolset)));
     }
     if !deferred.is_empty() {
         tracing::info!(
@@ -1217,30 +1397,11 @@ pub async fn create_agent(
         )));
     }
 
-    if settings.is_toolset_enabled("bigquery") {
-        // Runs with the signed-in user's OAuth token (never the service
-        // account's ADC), like every other data toolset.
-        toolsets.push(Arc::new(
-            BigQueryToolset::new(credentials.clone())
-                .with_project(settings.google_cloud_project.clone())
-                .with_read_only(config::env_bool_or("BIGQUERY_READ_ONLY", true)),
-        ));
-    }
-
-    if settings.is_toolset_enabled("google_genai") {
-        match GenAiClient::from_settings(settings) {
-            Ok(client) => toolsets.push(Arc::new(google_genai_toolset_with_controller(
-                client,
-                credentials.model_controller(),
-            ))),
-            Err(e) => tracing::warn!("Google GenAI toolset disabled: {e:#}"),
-        }
-    }
-
     let preload = PreloadMemoryTool::builder()
         .memory_service(memory_service.clone())
         .max_results(5)
         .build()?;
+    let preload_callback = cached_preload_memory_callback(preload.into_before_model_callback());
 
     let mut builder = LlmAgentBuilder::new(APP_NAME)
         .description(AGENT_DESCRIPTION)
@@ -1248,7 +1409,7 @@ pub async fn create_agent(
         .model(model)
         .tool_execution_strategy(ToolExecutionStrategy::Auto)
         .before_callback(save_uploaded_files_callback())
-        .before_model_callback(preload.into_before_model_callback());
+        .before_model_callback(preload_callback);
     for toolset in toolsets {
         builder = builder.toolset(toolset);
     }
@@ -1259,15 +1420,92 @@ pub async fn create_agent(
     )))
 }
 
+type PreloadCache = Mutex<std::collections::VecDeque<(String, Option<String>)>>;
+
+/// Caches `PreloadMemoryTool` results per `invocation_id` so multi-step tool
+/// loops within a turn neither re-query the memory backend on every iteration
+/// nor alter the system-prompt prefix mid-turn (preserving implicit prefix caching).
+fn cached_preload_memory_callback(
+    inner: adk_rust::BeforeModelCallback,
+) -> adk_rust::BeforeModelCallback {
+    let inner = Arc::new(inner);
+    let cache: Arc<PreloadCache> =
+        Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(64)));
+    Box::new(move |ctx, mut req| {
+        let inv_id = ctx.invocation_id().to_string();
+        if let Some((_, cached_text)) = cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(id, _)| id == &inv_id)
+            .cloned()
+        {
+            if let Some(memory_text) = cached_text {
+                if let Some(sys) = req.contents.iter_mut().find(|c| c.role == "system") {
+                    sys.parts.push(Part::Text { text: memory_text });
+                } else {
+                    req.contents
+                        .insert(0, Content::new("system").with_text(memory_text));
+                }
+            }
+            return Box::pin(async move { Ok(adk_rust::BeforeModelResult::Continue(req)) });
+        }
+
+        let inner = inner.clone();
+        let cache = cache.clone();
+        let pre_system_parts = req
+            .contents
+            .iter()
+            .find(|c| c.role == "system")
+            .map_or(0, |c| c.parts.len());
+        Box::pin(async move {
+            let result = inner(ctx, req).await?;
+            if let adk_rust::BeforeModelResult::Continue(ref modified) = result {
+                let injected = modified
+                    .contents
+                    .iter()
+                    .find(|c| c.role == "system")
+                    .and_then(|c| {
+                        (c.parts.len() > pre_system_parts)
+                            .then(|| c.parts.last())
+                            .flatten()
+                    })
+                    .and_then(|p| match p {
+                        Part::Text { text } => Some(text.clone()),
+                        _ => None,
+                    });
+                let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.len() >= 64 {
+                    guard.pop_front();
+                }
+                guard.push_back((inv_id, injected));
+            }
+            Ok(result)
+        })
+    })
+}
+
+fn build_gemini_model_with_thinking(
+    model_name: &str,
+    thinking: &config::ThinkingSettings,
+) -> anyhow::Result<GeminiModel> {
+    let mut model = GeminiModel::from_env(model_name).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if let Some(cfg) = thinking.thinking_config_for_model(model_name) {
+        model.set_thinking_config(cfg);
+    }
+    Ok(model)
+}
+
 /// Builds the Gemini model from the environment (`MODEL`,
 /// `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`
-/// or `GOOGLE_API_KEY`).
+/// or `GOOGLE_API_KEY`, plus `THINKING_LEVEL` / `THINKING_BUDGET`).
 ///
 /// # Errors
 ///
 /// Returns an error when the model configuration is incomplete.
 pub fn build_model(settings: &Settings) -> anyhow::Result<Arc<GeminiModel>> {
-    let model = GeminiModel::from_env(&settings.model).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let thinking = config::ThinkingSettings::from_env();
+    let model = build_gemini_model_with_thinking(&settings.model, &thinking)?;
     Ok(Arc::new(model))
 }
 
@@ -1633,5 +1871,80 @@ mod tests {
         // Synthetic model turn separates the function response turn from the next user turn.
         assert_eq!(normalized[3].role, "model");
         assert_eq!(normalized[4].role, "user");
+    }
+
+    #[test]
+    fn normalize_gemini_contents_compacts_render_ui_responses_but_keeps_errors() {
+        let contents = vec![
+            Content::new("user").with_text("Chart this"),
+            Content {
+                role: "model".to_string(),
+                parts: vec![
+                    Part::FunctionCall {
+                        name: "render_chart".to_string(),
+                        args: serde_json::json!({"title": "Spend", "data": [{"x": 1, "y": 100}]}),
+                        id: Some("ui_1".to_string()),
+                        thought_signature: None,
+                    },
+                    Part::FunctionCall {
+                        name: "render_table".to_string(),
+                        args: serde_json::json!({}),
+                        id: Some("ui_2".to_string()),
+                        thought_signature: None,
+                    },
+                ],
+            },
+            Content {
+                role: "function".to_string(),
+                parts: vec![
+                    Part::FunctionResponse {
+                        function_response: adk_rust::FunctionResponseData::new(
+                            "render_chart",
+                            serde_json::json!({
+                                "surface_id": "surf-42",
+                                "components": [
+                                    {"type": "chart", "title": "Spend", "data": [{"x": 1, "y": 100}]}
+                                ]
+                            }),
+                        ),
+                        id: Some("ui_1".to_string()),
+                        annotations: None,
+                    },
+                    Part::FunctionResponse {
+                        function_response: adk_rust::FunctionResponseData::new(
+                            "render_table",
+                            serde_json::json!({"error": "missing columns"}),
+                        ),
+                        id: Some("ui_2".to_string()),
+                        annotations: None,
+                    },
+                ],
+            },
+        ];
+
+        let normalized = normalize_gemini_request_contents(contents);
+        let fn_parts = &normalized[2].parts;
+        let Part::FunctionResponse {
+            function_response: ok_ui,
+            ..
+        } = &fn_parts[0]
+        else {
+            panic!("expected FunctionResponse");
+        };
+        assert_eq!(
+            ok_ui.response,
+            serde_json::json!({"status": "rendered", "components": 1, "surface_id": "surf-42"})
+        );
+        let Part::FunctionResponse {
+            function_response: err_ui,
+            ..
+        } = &fn_parts[1]
+        else {
+            panic!("expected FunctionResponse");
+        };
+        assert_eq!(
+            err_ui.response,
+            serde_json::json!({"error": "missing columns"})
+        );
     }
 }

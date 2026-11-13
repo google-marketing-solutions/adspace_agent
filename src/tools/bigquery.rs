@@ -46,7 +46,7 @@ pub const BIGQUERY_READ_ONLY_SCOPE: &str = "https://www.googleapis.com/auth/bigq
 /// Base URL of the BigQuery REST API v2.
 pub const DEFAULT_BASE_URL: &str = "https://bigquery.googleapis.com/bigquery/v2";
 /// Default maximum number of result rows returned by `bigquery_execute_sql`.
-pub const DEFAULT_MAX_RESULTS: u64 = 1000;
+pub const DEFAULT_MAX_RESULTS: u64 = 200;
 /// Hard cap on `max_results`, whatever the caller asks for.
 pub const MAX_RESULT_ROWS: u64 = 10_000;
 /// Largest single API response body handed to the model (per page).
@@ -58,10 +58,6 @@ const MAX_LISTED_ITEMS: usize = 1000;
 const QUERY_TIMEOUT_MS: u64 = 30_000;
 /// How long a query may run in total before the tool gives up on it.
 const QUERY_DEADLINE: Duration = Duration::from_secs(5 * 60);
-/// Overall request timeout (connect + send + receive).
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-/// TCP/TLS connect timeout.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The statement type a BigQuery dry run reports for a query that only reads.
 const SELECT_STATEMENT_TYPE: &str = "SELECT";
 
@@ -71,6 +67,7 @@ struct BigQueryShared {
     credentials: Arc<SessionCredentialManager>,
     project_id: Option<String>,
     read_only: bool,
+    dry_run: bool,
     base_url: String,
     http: reqwest::Client,
 }
@@ -87,16 +84,9 @@ struct ApiFailure {
     details: Option<Value>,
 }
 
-/// Builds the shared `reqwest` client with sane timeouts.
+/// Reuses the process-wide HTTP/2 connection pool.
 fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .connect_timeout(CONNECT_TIMEOUT)
-        .build()
-        .unwrap_or_else(|e| {
-            tracing::warn!("Falling back to a default reqwest client without timeouts: {e}");
-            reqwest::Client::new()
-        })
+    crate::google_api::toolset::shared_http_client()
 }
 
 impl BigQueryShared {
@@ -301,62 +291,73 @@ const PROJECT_ID_DESCRIPTION: &str =
 // Read-only SQL guard
 // ---------------------------------------------------------------------------
 
-/// Rejects SQL that is not a single read-only query, before any request is sent.
+#[derive(Debug, PartialEq, Eq)]
+enum SqlToken {
+    LParen,
+    RParen,
+    Comma,
+    Semicolon,
+    Word(String),
+    Literal,
+    Symbol(char),
+}
+
+/// Whether `ch` may end a `--` / `#` comment.
 ///
-/// The check is lexical and conservative: comments are skipped, the contents of
-/// string literals and quoted identifiers are ignored, the first keyword must be
-/// `SELECT` or `WITH` (optionally after opening parentheses), and only comments may
-/// follow a `;`. The dry run in [`BigQueryExecuteSql`] is the authoritative check;
-/// this one keeps a statement that is plainly not a query from reaching BigQuery.
-///
-/// # Errors
-///
-/// Returns the reason the statement was refused.
-pub fn check_read_only_sql(sql: &str) -> std::result::Result<(), String> {
-    let chars: Vec<char> = sql.chars().collect();
-    let mut i = 0;
-    let mut started = false;
-    let mut terminated = false;
-    while let Some(&c) = chars.get(i) {
-        let next = chars.get(i + 1).copied();
+/// GoogleSQL ends line comments at `\r`, `\n` or `\r\n`. The other characters
+/// are included on purpose: ending a comment too early only makes this guard
+/// read more of the input as SQL (and refuse it), whereas ending it later than
+/// BigQuery does would hide a statement from the guard.
+fn ends_line_comment(ch: char) -> bool {
+    matches!(
+        ch,
+        '\n' | '\r' | '\u{000B}' | '\u{000C}' | '\u{0085}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+fn next_sql_token(chars: &[char], i: &mut usize) -> std::result::Result<Option<SqlToken>, String> {
+    while let Some(&c) = chars.get(*i) {
+        let next = chars.get(*i + 1).copied();
         if c.is_whitespace() {
-            i += 1;
+            *i += 1;
         } else if c == '#' || (c == '-' && next == Some('-')) {
-            while chars.get(i).is_some_and(|&c| c != '\n') {
-                i += 1;
+            while chars.get(*i).is_some_and(|&ch| !ends_line_comment(ch)) {
+                *i += 1;
             }
         } else if c == '/' && next == Some('*') {
-            let close = (i + 2..chars.len().saturating_sub(1))
+            let close = (*i + 2..chars.len().saturating_sub(1))
                 .find(|&j| chars[j] == '*' && chars[j + 1] == '/')
                 .ok_or_else(|| "the query has an unterminated comment".to_string())?;
-            i = close + 2;
-        } else if terminated {
-            return Err("multiple statements are not allowed".to_string());
-        } else if c == ';' {
-            terminated = true;
-            i += 1;
-        } else if !started && c == '(' {
-            i += 1;
-        } else if !started {
-            let end = (i..chars.len())
-                .find(|&j| !(chars[j].is_alphanumeric() || chars[j] == '_'))
-                .unwrap_or(chars.len());
-            let keyword: String = chars[i..end].iter().collect();
-            if !(keyword.eq_ignore_ascii_case("SELECT") || keyword.eq_ignore_ascii_case("WITH")) {
-                let found = if keyword.is_empty() {
-                    c.to_string()
-                } else {
-                    keyword.to_uppercase()
-                };
-                return Err(format!("it starts with {found}, not SELECT or WITH"));
-            }
-            started = true;
-            i = end;
-        } else if matches!(c, '\'' | '"' | '`') {
-            // A string literal or quoted identifier; its contents are not SQL.
-            let triple = c != '`' && next == Some(c) && chars.get(i + 2) == Some(&c);
+            *i = close + 2;
+        } else {
+            break;
+        }
+    }
+    let Some(&c) = chars.get(*i) else {
+        return Ok(None);
+    };
+    let next = chars.get(*i + 1).copied();
+    match c {
+        '(' => {
+            *i += 1;
+            Ok(Some(SqlToken::LParen))
+        }
+        ')' => {
+            *i += 1;
+            Ok(Some(SqlToken::RParen))
+        }
+        ',' => {
+            *i += 1;
+            Ok(Some(SqlToken::Comma))
+        }
+        ';' => {
+            *i += 1;
+            Ok(Some(SqlToken::Semicolon))
+        }
+        '\'' | '"' | '`' => {
+            let triple = c != '`' && next == Some(c) && chars.get(*i + 2) == Some(&c);
             let width = if triple { 3 } else { 1 };
-            let mut j = i + width;
+            let mut j = *i + width;
             loop {
                 match chars.get(j) {
                     None => {
@@ -371,15 +372,180 @@ pub fn check_read_only_sql(sql: &str) -> std::result::Result<(), String> {
                     Some(_) => j += 1,
                 }
             }
-            i = j + width;
-        } else {
-            i += 1;
+            *i = j + width;
+            Ok(Some(SqlToken::Literal))
+        }
+        _ if c.is_alphanumeric() || c == '_' => {
+            let end = (*i..chars.len())
+                .find(|&j| !(chars[j].is_alphanumeric() || chars[j] == '_'))
+                .unwrap_or(chars.len());
+            let word: String = chars[*i..end].iter().collect();
+            *i = end;
+            Ok(Some(SqlToken::Word(word)))
+        }
+        _ => {
+            *i += 1;
+            Ok(Some(SqlToken::Symbol(c)))
         }
     }
-    if started {
-        Ok(())
-    } else {
-        Err("the query is empty".to_string())
+}
+
+fn skip_balanced_parens(tokens: &[SqlToken], idx: &mut usize) -> std::result::Result<(), String> {
+    if tokens.get(*idx) != Some(&SqlToken::LParen) {
+        return Err("expected '(' in WITH clause".to_string());
+    }
+    let mut depth = 0usize;
+    while let Some(tok) = tokens.get(*idx) {
+        *idx += 1;
+        match tok {
+            SqlToken::LParen => depth += 1,
+            SqlToken::RParen => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
+    }
+    Err("the query has unbalanced parentheses".to_string())
+}
+
+/// Pipe operators (`|> OP ...`) that write. This is a deny-list: `|> DROP`,
+/// `|> SET` and `|> CALL` are column and table-function operators that only
+/// read, so the operator cannot be required to come from a fixed read set.
+const PIPE_WRITE_OPERATORS: &[&str] = &[
+    "INSERT", "CREATE", "EXPORT", "MERGE", "UPDATE", "DELETE", "TRUNCATE", "LOAD", "ALTER",
+];
+
+/// Rejects SQL that is not a single read-only query, before any request is sent.
+///
+/// The check is lexical and structure-aware: comments are skipped, string
+/// literals and quoted identifiers are opaque, parentheses must balance, only
+/// comments may follow `;`, and `WITH [RECURSIVE] cte AS (...)` clauses are
+/// walked past to ensure the main top-level statement keyword is `SELECT`
+/// (rejecting `WITH x AS (SELECT 1) INSERT ...` locally in 0ms). Combined with
+/// the `bigquery.readonly` OAuth scope, this allows `SELECT` queries to run in
+/// a single HTTP round-trip without a separate `jobs.insert(dryRun=true)` call.
+///
+/// # Errors
+///
+/// Returns the reason the statement was refused.
+pub fn check_read_only_sql(sql: &str) -> std::result::Result<(), String> {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut i = 0;
+    let mut tokens = Vec::new();
+    let mut terminated = false;
+    let mut paren_depth = 0usize;
+    while let Some(tok) = next_sql_token(&chars, &mut i)? {
+        if terminated {
+            return Err("multiple statements are not allowed".to_string());
+        }
+        match &tok {
+            SqlToken::Semicolon => {
+                terminated = true;
+            }
+            SqlToken::LParen => {
+                paren_depth += 1;
+                tokens.push(tok);
+            }
+            SqlToken::RParen => {
+                if paren_depth == 0 {
+                    return Err("the query has unbalanced parentheses".to_string());
+                }
+                paren_depth -= 1;
+                tokens.push(tok);
+            }
+            _ => tokens.push(tok),
+        }
+    }
+    if paren_depth != 0 {
+        return Err("the query has unbalanced parentheses".to_string());
+    }
+    if tokens.is_empty() {
+        return Err("the query is empty".to_string());
+    }
+
+    // Pipe syntax can end a query that starts with SELECT in a write
+    // (`SELECT ... |> INSERT INTO t`), at any nesting depth.
+    for window in tokens.windows(3) {
+        if let [
+            SqlToken::Symbol('|'),
+            SqlToken::Symbol('>'),
+            SqlToken::Word(op),
+        ] = window
+            && PIPE_WRITE_OPERATORS
+                .iter()
+                .any(|w| op.eq_ignore_ascii_case(w))
+        {
+            return Err(format!(
+                "it pipes into {}, which is not a read",
+                op.to_uppercase()
+            ));
+        }
+    }
+
+    let mut idx = 0usize;
+    while tokens.get(idx) == Some(&SqlToken::LParen) {
+        idx += 1;
+    }
+    match tokens.get(idx) {
+        Some(SqlToken::Word(w)) if w.eq_ignore_ascii_case("SELECT") => Ok(()),
+        Some(SqlToken::Word(w)) if w.eq_ignore_ascii_case("WITH") => {
+            idx += 1;
+            if matches!(tokens.get(idx), Some(SqlToken::Word(r)) if r.eq_ignore_ascii_case("RECURSIVE"))
+            {
+                idx += 1;
+            }
+            loop {
+                match tokens.get(idx) {
+                    Some(SqlToken::Word(_) | SqlToken::Literal) => idx += 1,
+                    _ => return Err("malformed WITH clause: expected CTE name".to_string()),
+                }
+                // Optional column list: `cte_name (col1, col2) AS (...)`.
+                if tokens.get(idx) == Some(&SqlToken::LParen) {
+                    skip_balanced_parens(&tokens, &mut idx)?;
+                }
+                match tokens.get(idx) {
+                    Some(SqlToken::Word(as_kw)) if as_kw.eq_ignore_ascii_case("AS") => idx += 1,
+                    _ => return Err("malformed WITH clause: expected AS".to_string()),
+                }
+                while matches!(
+                    tokens.get(idx),
+                    Some(SqlToken::Word(m))
+                        if m.eq_ignore_ascii_case("NOT") || m.eq_ignore_ascii_case("MATERIALIZED")
+                ) {
+                    idx += 1;
+                }
+                skip_balanced_parens(&tokens, &mut idx)?;
+                if tokens.get(idx) == Some(&SqlToken::Comma) {
+                    idx += 1;
+                } else {
+                    break;
+                }
+            }
+            while tokens.get(idx) == Some(&SqlToken::LParen) {
+                idx += 1;
+            }
+            match tokens.get(idx) {
+                Some(SqlToken::Word(main_kw)) if main_kw.eq_ignore_ascii_case("SELECT") => Ok(()),
+                Some(SqlToken::Word(other)) => Err(format!(
+                    "WITH query main statement starts with {}, not SELECT",
+                    other.to_uppercase()
+                )),
+                _ => Err("WITH clause is not followed by a SELECT statement".to_string()),
+            }
+        }
+        Some(SqlToken::Word(other)) => Err(format!(
+            "it starts with {}, not SELECT or WITH",
+            other.to_uppercase()
+        )),
+        Some(SqlToken::Literal) => Err("it starts with a literal, not SELECT or WITH".to_string()),
+        Some(SqlToken::Symbol(c)) => Err(format!("it starts with {c}, not SELECT or WITH")),
+        Some(SqlToken::Comma) => Err("it starts with ',', not SELECT or WITH".to_string()),
+        Some(SqlToken::RParen) | Some(SqlToken::LParen) | Some(SqlToken::Semicolon) | None => {
+            Err("the query is empty".to_string())
+        }
     }
 }
 
@@ -740,9 +906,9 @@ impl BigQueryExecuteSql {
         let token = self.shared.token(ctx).await?;
         let project_id = self.shared.project_id(&args)?;
 
-        if self.shared.read_only {
-            // A dry run validates the query and reports its statement type
-            // without running it, which settles what a lexical check cannot.
+        if self.shared.read_only && self.shared.dry_run {
+            // Optional server-side dry run (`BIGQUERY_DRY_RUN=true`) validates
+            // the query and reports its statement type before running it.
             let job = self
                 .shared
                 .post(
@@ -909,7 +1075,7 @@ impl Tool for BigQueryExecuteSql {
                 "project_id": { "type": "string", "description": PROJECT_ID_DESCRIPTION },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum number of rows to return (default 1000)."
+                    "description": "Maximum number of rows to return (default 200)."
                 }
             },
             "required": ["query"]
@@ -939,13 +1105,14 @@ pub struct BigQueryToolset {
 }
 
 impl BigQueryToolset {
-    /// Creates the toolset (read-only, no default project).
+    /// Creates the toolset (read-only, single-round-trip fast path, no default project).
     pub fn new(credentials: Arc<SessionCredentialManager>) -> Self {
         Self {
             shared: Arc::new(BigQueryShared {
                 credentials,
                 project_id: None,
                 read_only: true,
+                dry_run: false,
                 base_url: DEFAULT_BASE_URL.to_string(),
                 http: http_client(),
             }),
@@ -966,6 +1133,12 @@ impl BigQueryToolset {
     /// than a single `SELECT`; also picks the OAuth scope requested.
     pub fn with_read_only(self, read_only: bool) -> Self {
         self.update(|s| s.read_only = read_only)
+    }
+
+    /// Enables (`true`) or disables (`false`, the default) an extra
+    /// `jobs.insert(dryRun=true)` HTTP round-trip before read-only queries.
+    pub fn with_dry_run(self, dry_run: bool) -> Self {
+        self.update(|s| s.dry_run = dry_run)
     }
 
     /// Overrides the BigQuery API base URL (tests).
@@ -1041,6 +1214,7 @@ mod tests {
             "SELECT 1",
             "select 1;",
             "WITH t AS (SELECT 1 AS n) SELECT n FROM t",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3), s AS (SELECT * FROM r) (SELECT * FROM s)",
             "(SELECT 1) UNION ALL (SELECT 2)",
             "  -- leading comment\n  SELECT 1",
             "#standardSQL\nSELECT 1",
@@ -1076,6 +1250,9 @@ mod tests {
             "/* SELECT */ DELETE FROM t WHERE true",
             "-- SELECT\nDROP TABLE x",
             "'SELECT 1'",
+            "WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x",
+            "WITH a AS (SELECT 1), b AS (SELECT 2) DELETE FROM t WHERE id IN (SELECT * FROM a)",
+            "WITH a AS (SELECT 1) MERGE t USING a ON true WHEN MATCHED THEN DELETE",
         ] {
             assert!(
                 check_read_only_sql(sql).is_err(),
@@ -1097,6 +1274,68 @@ mod tests {
             assert!(
                 check_read_only_sql(sql).is_err(),
                 "accepted multiple statements: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn statements_hidden_behind_a_line_comment_are_rejected() {
+        // GoogleSQL ends `--` and `#` comments at `\r`, `\n` or `\r\n`. A lexer
+        // that only stops at `\n` reads the rest of these as comment text and
+        // sees a single SELECT, while BigQuery would see a second statement.
+        for sql in [
+            "SELECT 1 --x\r; DROP TABLE ds.t",
+            "SELECT 1 #x\r; DELETE FROM ds.t WHERE true",
+            "#\rDROP TABLE ds.t;\nSELECT 1",
+            "SELECT 1 --\r; EXPORT DATA OPTIONS(uri='gs://b/*.csv', format='CSV') AS SELECT * FROM ds.t",
+            // Other characters a SQL lexer may treat as a line break.
+            "SELECT 1 --x\u{000B}; DROP TABLE ds.t",
+            "SELECT 1 --x\u{000C}; DROP TABLE ds.t",
+            "SELECT 1 --x\u{0085}; DROP TABLE ds.t",
+            "SELECT 1 --x\u{2028}; DROP TABLE ds.t",
+            "SELECT 1 --x\u{2029}; DROP TABLE ds.t",
+        ] {
+            assert!(
+                check_read_only_sql(sql).is_err(),
+                "accepted a statement hidden behind a line comment: {sql:?}"
+            );
+        }
+        // Ordinary comments and CRLF line endings still work.
+        for sql in [
+            "SELECT 1 -- trailing comment",
+            "SELECT 1 -- a; DROP TABLE x",
+            "-- leading\r\nSELECT 1\r\n",
+            "SELECT 1 # note\r\nFROM t",
+        ] {
+            assert!(
+                check_read_only_sql(sql).is_ok(),
+                "rejected a plain query: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pipe_operators_that_write_are_rejected() {
+        for sql in [
+            "SELECT 1 AS n |> INSERT INTO ds.t",
+            "SELECT * FROM ds.t |> EXPORT DATA OPTIONS(uri='gs://b/*.csv', format='CSV')",
+            "SELECT * FROM ds.t |> WHERE n > 1 |> create table ds.copy",
+            "SELECT * FROM (SELECT 1 AS n |> INSERT INTO ds.t)",
+            "WITH a AS (SELECT 1 AS n) SELECT * FROM a |> INSERT INTO ds.t",
+        ] {
+            assert!(
+                check_read_only_sql(sql).is_err(),
+                "accepted a pipe operator that writes: {sql}"
+            );
+        }
+        for sql in [
+            "SELECT * FROM ds.t |> WHERE n > 1 |> DROP m |> SET n = n + 1 |> LIMIT 5",
+            "SELECT 'x |> INSERT INTO ds.t' AS note",
+            "SELECT 1 | 2 > 0",
+        ] {
+            assert!(
+                check_read_only_sql(sql).is_ok(),
+                "rejected a read-only pipe query: {sql}"
             );
         }
     }

@@ -19,7 +19,7 @@
 import { state } from "./state.js";
 import { setStatus } from "./status.js";
 import { loadSession } from "./sessions.js";
-import { checkAuthStatus, openPopup } from "./auth.js";
+import { checkAuthStatus, onAuthChange, openPopup } from "./auth.js";
 
 export const CHANNEL = "adspace:oauth";
 export const EVENTS_PATH = "/oauth2/events";
@@ -88,9 +88,23 @@ export const handleOAuthCompletion = async (status) => {
   }
 };
 
-if ("EventSource" in window) {
-  const es = new EventSource(EVENTS_PATH);
-  es.addEventListener("message", (event) => {
+// The stream is bound to the signed-in user: without the session cookie the
+// server answers 401, and an EventSource that gets a non-200 response is
+// closed for good, with no retry. So it is opened once sign-in is known and
+// reopened after a later sign-in, not at page load. Opening it while signed
+// out would also leave the tab deaf to `auth_required` (the only way a tool's
+// consent popup reaches the studio) until the page was reloaded.
+let eventStream = null;
+const syncEventStream = (signedIn) => {
+  if (!("EventSource" in window)) return;
+  if (!signedIn) {
+    if (eventStream) eventStream.close();
+    eventStream = null;
+    return;
+  }
+  if (eventStream && eventStream.readyState !== EventSource.CLOSED) return;
+  eventStream = new EventSource(EVENTS_PATH);
+  eventStream.addEventListener("message", (event) => {
     try {
       const data = JSON.parse(event.data);
       if (data.type === "auth_required") {
@@ -102,7 +116,8 @@ if ("EventSource" in window) {
       /* ignore */
     }
   });
-}
+};
+onAuthChange(syncEventStream);
 
 if ("BroadcastChannel" in window) {
   new BroadcastChannel(CHANNEL).addEventListener("message", (event) => {

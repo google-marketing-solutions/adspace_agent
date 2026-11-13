@@ -572,6 +572,15 @@ const READ_LIKE_POST_PREFIXES: &[&str] = &[
     "get", "list", "search", "query", "run", "generate", "lookup", "download", "audit", "batchget",
 ];
 
+/// The subset of [`READ_LIKE_POST_PREFIXES`] with no side effect at all; see
+/// [`MethodSpec::is_side_effect_free`]. `run` is left out because it starts
+/// report files and queued jobs (`reports.run`, `queries.run`,
+/// `batchJobs.run`), `generate` because it includes
+/// `generatePMaxDraftCampaign`, and `download` / `audit` because nothing here
+/// establishes that every such method is a pure read.
+const SIDE_EFFECT_FREE_POST_PREFIXES: &[&str] =
+    &["get", "list", "search", "query", "lookup", "batchget"];
+
 /// Builds the JSON schema for a query/path parameter.
 fn parameter_schema(param: &DiscoveryParameter, options: &SpecOptions) -> Value {
     let json_type = param.type_.as_deref().unwrap_or("string");
@@ -881,6 +890,32 @@ impl MethodSpec {
                     .any(|prefix| leaf.starts_with(prefix))
             }
             _ => true,
+        }
+    }
+
+    /// Whether the call has no side effect, so it may be dispatched
+    /// concurrently with other calls and ahead of state-changing calls made
+    /// in the same model turn.
+    ///
+    /// This is stricter than `!is_mutating()`, which sorts methods into the
+    /// read and write tiers: a report run belongs with the reads there, but
+    /// it creates a report file and must not overtake the `patch` that
+    /// precedes it.
+    pub fn is_side_effect_free(&self) -> bool {
+        match self.http_method.as_str() {
+            "GET" | "HEAD" | "OPTIONS" => true,
+            "POST" => {
+                let leaf = self
+                    .method_id
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                SIDE_EFFECT_FREE_POST_PREFIXES
+                    .iter()
+                    .any(|prefix| leaf.starts_with(prefix))
+            }
+            _ => false,
         }
     }
 

@@ -123,7 +123,12 @@ Run the same quality gates as CI before pushing:
 cargo fmt --all -- --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
+node --experimental-vm-modules --no-warnings scripts/check-js-modules.mjs
 ```
+
+The last command links the studio's ES modules the way a browser does. They
+are served verbatim with no bundler, so a named import that its target does
+not export is otherwise only found when the studio fails to load.
 
 ## Command line
 

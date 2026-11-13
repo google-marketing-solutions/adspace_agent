@@ -38,7 +38,7 @@ use adk_session::{
 use anyhow::Context;
 use async_trait::async_trait;
 use base64::Engine as _;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
 use crate::config::env_opt;
 
@@ -155,9 +155,7 @@ pub async fn build_session_service() -> anyhow::Result<Arc<dyn SessionService>> 
     if uri.starts_with("sqlite") {
         let normalized = normalize_sqlite_uri(&uri);
         tracing::info!("Session service: SQLite ({normalized})");
-        let service = SqliteSessionService::new(&normalized)
-            .await
-            .with_context(|| format!("opening session database {normalized}"))?;
+        let service = open_sqlite_session_service(&normalized).await?;
         // Creates/updates the `sessions`/`events` tables (idempotent).
         service
             .migrate()
@@ -184,12 +182,37 @@ pub async fn build_session_service() -> anyhow::Result<Arc<dyn SessionService>> 
     )
 }
 
-/// Wraps [`SqliteSessionService`] with an async reader-writer lock and retry
-/// backoff so concurrent requests never hit SQLite `BEGIN DEFERRED`
-/// read-before-write lock-upgrade deadlocks (`(code: 5) database is locked`).
+/// Opens a SQLite session pool tuned for concurrent web traffic: WAL journal
+/// mode (for file-backed DBs), `synchronous = NORMAL`, 5 s `busy_timeout`, and
+/// `foreign_keys = ON`.
+pub(crate) async fn open_sqlite_session_service(
+    normalized: &str,
+) -> anyhow::Result<SqliteSessionService> {
+    let is_in_memory = normalized.contains(":memory:");
+    let mut connect_opts = normalized
+        .parse::<sqlx::sqlite::SqliteConnectOptions>()
+        .with_context(|| format!("invalid SQLite URI {normalized}"))?
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5))
+        .foreign_keys(true);
+    if !is_in_memory {
+        connect_opts = connect_opts.journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+    }
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(if is_in_memory { 1 } else { 8 })
+        .connect_with(connect_opts)
+        .await
+        .with_context(|| format!("opening session database {normalized}"))?;
+    Ok(SqliteSessionService::from_pool(pool))
+}
+
+/// Wraps [`SqliteSessionService`] so mutating operations serialize through a
+/// single writer mutex (preventing SQLite `BEGIN DEFERRED` lock-upgrade
+/// deadlocks), while read operations (`get`, `list`, `get_for_identity`,
+/// `health_check`) execute concurrently without blocking behind in-flight writes.
 pub struct SerializedSqliteSessionService {
     inner: SqliteSessionService,
-    lock: RwLock<()>,
+    write_lock: Mutex<()>,
 }
 
 /// Maximum number of attempts for a SQLite operation that reports the
@@ -201,7 +224,7 @@ impl SerializedSqliteSessionService {
     pub fn new(inner: SqliteSessionService) -> Self {
         Self {
             inner,
-            lock: RwLock::new(()),
+            write_lock: Mutex::new(()),
         }
     }
 
@@ -235,51 +258,48 @@ fn is_sqlite_locked(err: &AdkError) -> bool {
 #[async_trait]
 impl SessionService for SerializedSqliteSessionService {
     async fn create(&self, req: CreateRequest) -> adk_rust::Result<Box<dyn Session>> {
-        let _guard = self.lock.write().await;
+        let _guard = self.write_lock.lock().await;
         self.with_retry(|| self.inner.create(req.clone())).await
     }
 
     async fn get(&self, req: GetRequest) -> adk_rust::Result<Box<dyn Session>> {
-        let _guard = self.lock.read().await;
         self.with_retry(|| self.inner.get(req.clone())).await
     }
 
     async fn list(&self, req: ListRequest) -> adk_rust::Result<Vec<Box<dyn Session>>> {
-        let _guard = self.lock.read().await;
         self.with_retry(|| self.inner.list(req.clone())).await
     }
 
     async fn delete(&self, req: DeleteRequest) -> adk_rust::Result<()> {
-        let _guard = self.lock.write().await;
+        let _guard = self.write_lock.lock().await;
         self.with_retry(|| self.inner.delete(req.clone())).await
     }
 
     async fn append_event(&self, session_id: &str, event: Event) -> adk_rust::Result<()> {
-        let _guard = self.lock.write().await;
+        let _guard = self.write_lock.lock().await;
         self.with_retry(|| self.inner.append_event(session_id, event.clone()))
             .await
     }
 
     async fn get_for_identity(&self, identity: &AdkIdentity) -> adk_rust::Result<Box<dyn Session>> {
-        let _guard = self.lock.read().await;
         self.with_retry(|| self.inner.get_for_identity(identity))
             .await
     }
 
     async fn delete_for_identity(&self, identity: &AdkIdentity) -> adk_rust::Result<()> {
-        let _guard = self.lock.write().await;
+        let _guard = self.write_lock.lock().await;
         self.with_retry(|| self.inner.delete_for_identity(identity))
             .await
     }
 
     async fn append_event_for_identity(&self, req: AppendEventRequest) -> adk_rust::Result<()> {
-        let _guard = self.lock.write().await;
+        let _guard = self.write_lock.lock().await;
         self.with_retry(|| self.inner.append_event_for_identity(req.clone()))
             .await
     }
 
     async fn delete_all_sessions(&self, app_name: &str, user_id: &str) -> adk_rust::Result<()> {
-        let _guard = self.lock.write().await;
+        let _guard = self.write_lock.lock().await;
         self.with_retry(|| self.inner.delete_all_sessions(app_name, user_id))
             .await
     }
@@ -289,7 +309,7 @@ impl SessionService for SerializedSqliteSessionService {
         session_id: &str,
         target_event_id: &str,
     ) -> adk_rust::Result<Box<dyn Session>> {
-        let _guard = self.lock.write().await;
+        let _guard = self.write_lock.lock().await;
         self.with_retry(|| self.inner.rewind(session_id, target_event_id))
             .await
     }
@@ -299,13 +319,12 @@ impl SessionService for SerializedSqliteSessionService {
         session_id: &str,
         steps: usize,
     ) -> adk_rust::Result<Box<dyn Session>> {
-        let _guard = self.lock.write().await;
+        let _guard = self.write_lock.lock().await;
         self.with_retry(|| self.inner.rewind_steps(session_id, steps))
             .await
     }
 
     async fn health_check(&self) -> adk_rust::Result<()> {
-        let _guard = self.lock.read().await;
         self.inner.health_check().await
     }
 }
@@ -415,7 +434,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("sessions.db");
         let url = normalize_sqlite_uri(&format!("sqlite:///{}", db.display()));
-        let inner = SqliteSessionService::new(&url).await.unwrap();
+        let inner = open_sqlite_session_service(&url).await.unwrap();
+        let mode: (String,) = sqlx::query_as("PRAGMA journal_mode;")
+            .fetch_one(inner.pool())
+            .await
+            .unwrap();
+        assert_eq!(mode.0.to_ascii_lowercase(), "wal");
         inner.migrate().await.unwrap();
         let service = Arc::new(SerializedSqliteSessionService::new(inner));
 

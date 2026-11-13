@@ -105,17 +105,38 @@ fn is_enabled_in(state: Option<&dyn State>, name: &str) -> bool {
 pub struct LazyToolset {
     inner: Arc<dyn Toolset>,
     name: String,
+    keys: Vec<String>,
 }
 
 impl LazyToolset {
-    /// Wraps `inner`.
+    /// Wraps `inner`, activating when `inner.name()` is enabled in session state.
     pub fn new(inner: Arc<dyn Toolset>) -> Self {
         let name = inner.name().to_string();
-        Self { inner, name }
+        let keys = vec![name.clone()];
+        Self { inner, name, keys }
+    }
+
+    /// Wraps `inner`, activating when *any* of `keys` is enabled in session state
+    /// (e.g., enabling a companion local toolset alongside either tier of a split
+    /// Discovery toolset).
+    pub fn with_keys<I, S>(inner: Arc<dyn Toolset>, keys: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let name = inner.name().to_string();
+        let keys: Vec<String> = keys.into_iter().map(Into::into).collect();
+        let keys = if keys.is_empty() {
+            vec![name.clone()]
+        } else {
+            keys
+        };
+        Self { inner, name, keys }
     }
 
     fn is_enabled(&self, ctx: &dyn ReadonlyContext) -> bool {
-        is_enabled_in(ctx.state(), &self.name)
+        let state = ctx.state();
+        self.keys.iter().any(|k| is_enabled_in(state, k))
     }
 }
 
@@ -213,6 +234,14 @@ impl Tool for EnableToolsetsTool {
             },
             "required": ["toolset_names"]
         }))
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn is_concurrency_safe(&self) -> bool {
+        true
     }
 
     async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {

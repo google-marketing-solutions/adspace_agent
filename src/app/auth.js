@@ -66,6 +66,17 @@ export const setAvatarImage = (imgEl, fallbackEl, user) => {
   }
 };
 
+// Lets oauth-popup.js open and close the user-bound `/oauth2/events` stream as
+// sign-in changes. Late binding, as with `onStatusChange`: oauth-popup.js sits
+// above this module, so it registers here instead of being imported.
+let authListener = null;
+export const onAuthChange = (fn) => {
+  authListener = fn;
+};
+const notifyAuthChange = (signedIn) => {
+  if (typeof authListener === "function") authListener(signedIn);
+};
+
 let authCheckPromise = null;
 
 export const checkAuthStatus = () => {
@@ -80,6 +91,7 @@ export const checkAuthStatus = () => {
       const data = await resp.json();
       if (!data.authenticated || !data.user) {
         state.currentUser = null;
+        notifyAuthChange(false);
         state.activeSession = null;
         state.canManageModels = true;
         els.authGate.classList.remove("hidden");
@@ -96,6 +108,7 @@ export const checkAuthStatus = () => {
       }
 
       state.currentUser = data.user;
+      notifyAuthChange(true);
       // `is_admin` gates POST /auth/models; absent (e.g. OAuth unconfigured) means allowed.
       state.canManageModels = data.is_admin !== false;
       els.authGate.classList.add("hidden");

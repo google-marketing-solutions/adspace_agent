@@ -64,6 +64,24 @@ export const renderSessionOptions = (selectedId) => {
   });
 };
 
+// Monotonic token so overlapping `loadSession` calls (quick <select> changes,
+// refresh racing an OAuth completion) cannot apply a stale response.
+let loadSeq = 0;
+
+const applySessionData = (data, isSessionSwitch) => {
+  state.activeSession = data;
+  syncSettingsAvailability();
+  $("menu-session-id").textContent = state.activeSession.id;
+  if (isSessionSwitch) {
+    state.activeSurfaceId = "all";
+    closeModalOverlay();
+  }
+  rebuildFromSessionEvents(state.activeSession.events || [], {
+    forceCanvas: isSessionSwitch,
+    suppressOverlays: true,
+  });
+};
+
 let createSessionPromise = null;
 
 export const createNewSession = () => {
@@ -89,9 +107,11 @@ export const createNewSession = () => {
       }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const created = await resp.json();
+      if (state.isRunning && state.abortController) state.abortController.abort();
+      ++loadSeq;
       state.sessions = [created, ...state.sessions.filter((s) => s.id !== created.id)];
       renderSessionOptions(created.id);
-      await loadSession(created.id);
+      applySessionData(created, true);
     } catch (err) {
       showError(`Could not create session: ${err.message || err}`);
     } finally {
@@ -100,10 +120,6 @@ export const createNewSession = () => {
   })();
   return createSessionPromise;
 };
-
-// Monotonic token so overlapping `loadSession` calls (quick <select> changes,
-// refresh racing an OAuth completion) cannot apply a stale response.
-let loadSeq = 0;
 
 export const loadSession = async (sessionId) => {
   if (!state.currentUser || !sessionId) return;
@@ -123,17 +139,7 @@ export const loadSession = async (sessionId) => {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
     if (seq !== loadSeq) return; // stale: a newer load has started
-    state.activeSession = data;
-    syncSettingsAvailability();
-    $("menu-session-id").textContent = state.activeSession.id;
-    if (isSessionSwitch) {
-      state.activeSurfaceId = "all";
-      closeModalOverlay();
-    }
-    rebuildFromSessionEvents(state.activeSession.events || [], {
-      forceCanvas: isSessionSwitch,
-      suppressOverlays: true,
-    });
+    applySessionData(data, isSessionSwitch);
   } catch (err) {
     if (seq !== loadSeq) return;
     showError(`Could not load session: ${err.message || err}`);

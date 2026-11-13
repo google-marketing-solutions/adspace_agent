@@ -1452,12 +1452,56 @@ summary:focus-visible,
   stroke: none;
 }
 
+/* Typing indicator shown while a reply streams: three dots that trail the
+   text. It sits below the text, so the text does not move when the stream
+   ends, and uses the "info" tint that the running status pill uses. */
 .streaming-tag {
-  padding: 10px 16px 0;
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 450;
-  letter-spacing: -0.002em;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 16px 18px;
+}
+
+.message-text + .streaming-tag {
+  margin-top: -4px;
+  padding-top: 0;
+}
+
+.streaming-tag span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tint-info-spin);
+  opacity: 0.4;
+  animation: streaming-dot 1.2s ease-in-out infinite;
+}
+
+.streaming-tag span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.streaming-tag span:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes streaming-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.4;
+    transform: translateY(0);
+  }
+
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+/* Before the first words arrive the bubble holds only the dots: let it
+   shrink to them instead of spanning the pane. */
+.message-agent:not(:has(> .message-text)) {
+  width: auto;
 }
 
 .message-text {
@@ -2158,5 +2202,11 @@ button.message-usage {
   .status-authorizing i {
     animation: none;
     border-color: currentColor;
+  }
+
+  /* The typing dots stay visible as a still ellipsis. */
+  .streaming-tag span {
+    animation: none;
+    opacity: 0.7;
   }
 }

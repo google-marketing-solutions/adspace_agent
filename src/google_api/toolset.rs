@@ -29,8 +29,27 @@ use crate::auth::{SessionCredentialManager, auth_required};
 
 /// Largest upstream response body handed back to the model. Bigger bodies
 /// (media downloads, unpaged exports) are replaced by a structured error that
-/// asks the model to narrow the request.
-pub const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+/// asks the model to narrow the request (`pageSize`, `fields`, filters).
+pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+/// Process-wide HTTP/2 connection pool shared across Discovery fetching and all
+/// Google API / BigQuery toolsets so TLS sessions stay warm across platforms.
+pub fn shared_http_client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(120))
+                .connect_timeout(Duration::from_secs(10))
+                .pool_idle_timeout(Duration::from_secs(90))
+                .pool_max_idle_per_host(16)
+                .tcp_nodelay(true)
+                .http2_adaptive_window(true)
+                .build()
+                .unwrap_or_default()
+        })
+        .clone()
+}
 
 /// Configuration of a [`GoogleApiToolset`].
 #[derive(Debug, Clone)]
@@ -334,12 +353,14 @@ impl Tool for GoogleApiTool {
         Some(self.spec.parameters_schema())
     }
 
+    // ADK's `Auto` strategy runs tools that are both read-only and
+    // concurrency-safe first and concurrently, then the rest in model order.
     fn is_read_only(&self) -> bool {
-        self.spec.http_method == "GET"
+        self.spec.is_side_effect_free()
     }
 
     fn is_concurrency_safe(&self) -> bool {
-        self.spec.http_method == "GET"
+        self.spec.is_side_effect_free()
     }
 
     async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
@@ -400,11 +421,7 @@ impl GoogleApiToolset {
     ) -> Self {
         let api_scopes = doc.oauth_scopes();
         let shared = Arc::new(ToolShared {
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(120))
-                .connect_timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_default(),
+            http: shared_http_client(),
             credentials,
             additional_headers: config.additional_headers.clone(),
         });
@@ -937,5 +954,52 @@ mod tests {
             .prepare_request(&json!({"file_id": "abc"}))
             .unwrap();
         assert_eq!(req.url, "http://127.0.0.1:1/files/abc");
+    }
+
+    #[test]
+    fn only_side_effect_free_posts_dispatch_concurrently() {
+        let doc = DiscoveryDocument::parse(
+            r#"{"name":"googleads","version":"v26","rootUrl":"https://googleads.googleapis.com/","servicePath":"",
+            "resources":{"customers":{"methods":{
+              "search":{"id":"googleads.customers.googleAds.search","path":"v26/customers/{customerId}/googleAds:search","httpMethod":"POST"},
+              "mutate":{"id":"googleads.customers.campaigns.mutate","path":"v26/customers/{customerId}/campaigns:mutate","httpMethod":"POST"},
+              "run":{"id":"googleads.customers.batchJobs.run","path":"v26/customers/{customerId}/batchJobs:run","httpMethod":"POST"},
+              "draft":{"id":"googleads.customers.smartCampaignSettings.generatePMaxDraftCampaign","path":"v26/customers/{customerId}/smartCampaignSettings:generatePMaxDraftCampaign","httpMethod":"POST"}
+            }}}}"#,
+        )
+        .unwrap();
+        let toolset = GoogleApiToolset::from_document(
+            &doc,
+            GoogleApiToolsetConfig::new("google_ads", "googleads", "v26"),
+            credentials(),
+        );
+        let tool = |leaf: &str| {
+            toolset
+                .api_tools()
+                .iter()
+                .find(|t| t.spec.method_id.ends_with(leaf))
+                .unwrap_or_else(|| panic!("no tool for {leaf}"))
+        };
+        let search = tool(".googleAds.search");
+        assert!(search.is_read_only(), "GAQL POST search is read-only");
+        assert!(
+            search.is_concurrency_safe(),
+            "GAQL POST search dispatches concurrently"
+        );
+        // A job run or a draft-campaign generation sits in the read tier
+        // (`!is_mutating()`), but it changes state: it must stay in model
+        // order, behind the calls that set it up.
+        for leaf in [
+            ".campaigns.mutate",
+            ".batchJobs.run",
+            ".generatePMaxDraftCampaign",
+        ] {
+            let t = tool(leaf);
+            assert!(!t.is_read_only(), "{leaf} is not read-only");
+            assert!(
+                !t.is_concurrency_safe(),
+                "{leaf} does not dispatch concurrently"
+            );
+        }
     }
 }

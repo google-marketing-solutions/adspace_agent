@@ -19,13 +19,14 @@
 import { $ } from "./dom.js";
 import { APP_NAME, els, prefs, state } from "./state.js";
 import { setStatus, showError } from "./status.js";
+import { extractUiResponse } from "./adk-ui/index.js";
 import {
   coalesceParts,
   mergeStreamedEvent,
   rebuildFromSessionEvents,
   renderTranscript,
 } from "./transcript.js";
-import { apiUrl, loadSession } from "./sessions.js";
+import { apiUrl, renderSessionOptions } from "./sessions.js";
 
 export const renderAttachments = () => {
   els.attachmentChips.replaceChildren();
@@ -97,21 +98,29 @@ export const stopRun = () => {
 };
 
 // SSE chunks arrive far faster than frames; coalesce the transcript/canvas
-// rebuild to at most once per animation frame while streaming. The stream
-// end (and error paths) flush or cancel the pending frame explicitly.
+// rebuild to at most once per animation frame while streaming. Pure text/tool
+// frames update the transcript directly without re-scanning all canvas surfaces.
 let streamRenderRaf = 0;
+let streamNeedsSurfaceRebuild = false;
 export const flushStreamRender = () => {
   if (streamRenderRaf) {
     cancelAnimationFrame(streamRenderRaf);
     streamRenderRaf = 0;
   }
+  streamNeedsSurfaceRebuild = false;
   rebuildFromSessionEvents(state.currentEvents);
 };
-export const scheduleStreamRender = () => {
+export const scheduleStreamRender = (hasUiSurface = false) => {
+  if (hasUiSurface) streamNeedsSurfaceRebuild = true;
   if (streamRenderRaf) return;
   streamRenderRaf = requestAnimationFrame(() => {
     streamRenderRaf = 0;
-    rebuildFromSessionEvents(state.currentEvents);
+    if (streamNeedsSurfaceRebuild) {
+      streamNeedsSurfaceRebuild = false;
+      rebuildFromSessionEvents(state.currentEvents);
+    } else {
+      renderTranscript();
+    }
   });
 };
 export const cancelStreamRender = () => {
@@ -119,6 +128,7 @@ export const cancelStreamRender = () => {
     cancelAnimationFrame(streamRenderRaf);
     streamRenderRaf = 0;
   }
+  streamNeedsSurfaceRebuild = false;
 };
 
 // Polite screen-reader announcement via the visually hidden `#sr-announcer`
@@ -259,21 +269,23 @@ export const sendMessage = async (overrideText) => {
                 : ev.content,
             });
           }
-          scheduleStreamRender();
+          const hasUiSurface = Boolean(
+            ev.content?.parts?.some((p) => Boolean(extractUiResponse(p)))
+          );
+          scheduleStreamRender(hasUiSurface);
         }
       }
-      // Flush whatever the last frame did not get to before reloading.
+      // Flush final transcript + any non-partial UI overlays immediately.
       flushStreamRender();
     }
-    // Reload only if nobody switched away meanwhile. `loadSession` aborts the
-    // controller on an explicit switch before `activeSession` changes, so the
-    // signal is checked too; otherwise this reload would supersede the
-    // user's pending switch.
+    // Sync the completed turn into the in-memory session record immediately
+    // without blocking the composer on a redundant GET /sessions/{id} round-trip.
     if (!state.abortController.signal.aborted && state.activeSession?.id === runSession.id) {
-      // Single polite announcement per completed turn (the transcript
-      // itself is no longer a live region).
       announce("Agent replied");
-      await loadSession(runSession.id);
+      runSession.events = state.currentEvents.slice();
+      runSession.lastUpdateTime = Date.now() / 1000;
+      state.sessions = [runSession, ...state.sessions.filter((s) => s.id !== runSession.id)];
+      renderSessionOptions(runSession.id);
     }
   } catch (err) {
     if (err.name !== "AbortError") {

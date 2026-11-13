@@ -469,11 +469,20 @@ struct Harness {
 
 impl Harness {
     async fn new(read_only: bool) -> Self {
+        Self::build(read_only, false).await
+    }
+
+    async fn with_dry_run(read_only: bool, dry_run: bool) -> Self {
+        Self::build(read_only, dry_run).await
+    }
+
+    async fn build(read_only: bool, dry_run: bool) -> Self {
         let fake = Arc::new(Fake::default());
         let base = spawn(fake.clone()).await;
         let toolset = BigQueryToolset::new(credentials())
             .with_project(Some("proj".into()))
             .with_read_only(read_only)
+            .with_dry_run(dry_run)
             .with_base_url(base);
         let ctx: Arc<dyn ReadonlyContext> = SessionToolContext::with_scopes(&[]);
         let tools = toolset
@@ -589,7 +598,7 @@ async fn listing_and_schema_tools_use_the_users_token() {
 }
 
 #[tokio::test]
-async fn read_only_mode_gates_queries_lexically_and_with_a_dry_run() {
+async fn read_only_mode_gates_queries_lexically_in_single_round_trip_by_default() {
     let h = Harness::new(true).await;
     let ctx = SessionToolContext::with_scopes(&[BIGQUERY_READ_ONLY_SCOPE]);
 
@@ -604,8 +613,7 @@ async fn read_only_mode_gates_queries_lexically_and_with_a_dry_run() {
     assert_eq!(refused["error"]["code"], "READ_ONLY_VIOLATION");
     assert!(h.paths().is_empty(), "{:?}", h.paths());
 
-    // Looks like a query but BigQuery classifies it otherwise: only the dry
-    // run is sent.
+    // CTE followed by DML (`WITH ... INSERT`) is caught lexically in 0 HTTP round-trips!
     let refused = h
         .call(
             "bigquery_execute_sql",
@@ -618,12 +626,16 @@ async fn read_only_mode_gates_queries_lexically_and_with_a_dry_run() {
         refused["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("classifies it as INSERT")
+            .contains("INSERT"),
+        "{refused}"
     );
-    assert_eq!(h.paths(), vec!["POST /projects/proj/jobs"]);
-    h.clear();
+    assert!(
+        h.paths().is_empty(),
+        "CTE DML refused without any HTTP call"
+    );
 
-    // A real SELECT: dry run, then query, then paging up to max_results.
+    // A real SELECT executes directly without a separate jobs.insert dryRun preflight,
+    // then pages up to max_results.
     let result = h
         .call(
             "bigquery_execute_sql",
@@ -647,16 +659,15 @@ async fn read_only_mode_gates_queries_lexically_and_with_a_dry_run() {
     assert_eq!(
         h.paths(),
         vec![
-            "POST /projects/proj/jobs",
             "POST /projects/proj/queries",
             "GET /projects/proj/queries/job-1",
         ]
     );
     {
         let seen = h.fake.requests.lock().unwrap();
-        assert_eq!(seen[1].4.as_ref().unwrap()["maxResults"], 4);
-        assert_eq!(seen[2].2["pageToken"], "next-1");
-        assert_eq!(seen[2].2["maxResults"], "2", "only the rows still needed");
+        assert_eq!(seen[0].4.as_ref().unwrap()["maxResults"], 4);
+        assert_eq!(seen[1].2["pageToken"], "next-1");
+        assert_eq!(seen[1].2["maxResults"], "2", "only the rows still needed");
     }
     h.clear();
 
@@ -671,7 +682,44 @@ async fn read_only_mode_gates_queries_lexically_and_with_a_dry_run() {
     assert_eq!(result["total_rows"], 5);
     assert_eq!(result["truncated"], false);
     let seen = h.fake.requests.lock().unwrap();
-    assert_eq!(seen[1].4.as_ref().unwrap()["maxResults"], MAX_RESULT_ROWS);
+    assert_eq!(seen[0].4.as_ref().unwrap()["maxResults"], MAX_RESULT_ROWS);
+}
+
+#[tokio::test]
+async fn optional_dry_run_mode_classifies_queries_via_jobs_endpoint() {
+    let h = Harness::with_dry_run(true, true).await;
+    let ctx = SessionToolContext::with_scopes(&[BIGQUERY_READ_ONLY_SCOPE]);
+
+    // Passes lexical check (literal contains 'DELETE'), but fake dry-run classifies as DELETE.
+    let refused = h
+        .call(
+            "bigquery_execute_sql",
+            ctx.clone(),
+            json!({ "query": "SELECT 'DELETE' AS kind" }),
+        )
+        .await;
+    assert_eq!(refused["error"]["code"], "READ_ONLY_VIOLATION");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("classifies it as DELETE")
+    );
+    assert_eq!(h.paths(), vec!["POST /projects/proj/jobs"]);
+    h.clear();
+
+    let result = h
+        .call(
+            "bigquery_execute_sql",
+            ctx,
+            json!({ "query": "SELECT n, label FROM sales.orders", "max_results": 2 }),
+        )
+        .await;
+    assert_eq!(result["total_rows"], 2);
+    assert_eq!(
+        h.paths(),
+        vec!["POST /projects/proj/jobs", "POST /projects/proj/queries",]
+    );
 }
 
 #[tokio::test]
@@ -781,7 +829,7 @@ async fn auth_failures_are_surfaced_to_the_model() {
     assert_eq!(unauthorized["error"]["status"], 401, "{unauthorized}");
     assert_eq!(
         h.paths(),
-        vec!["POST /projects/proj/jobs"],
-        "fails at the dry run"
+        vec!["POST /projects/proj/queries"],
+        "fails directly at jobs.query without extra dryRun round-trip"
     );
 }

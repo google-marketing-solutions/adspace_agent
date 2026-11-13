@@ -42,3 +42,7 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --locked
+      # The studio's ES modules are served verbatim (no bundler), so nothing
+      # else resolves their imports before a browser does.
+      - name: JS modules
+        run: node --experimental-vm-modules --no-warnings scripts/check-js-modules.mjs

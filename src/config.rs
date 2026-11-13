@@ -57,10 +57,13 @@ pub const PRESET_IMAGE_MODELS: &[&str] = &[
 pub const DEFAULT_COMPACTION_INTERVAL: u64 = 3;
 /// Default events-compaction overlap size (in invocations).
 pub const DEFAULT_COMPACTION_OVERLAP_SIZE: u64 = 1;
-/// Default events-compaction token threshold.
-pub const DEFAULT_COMPACTION_TOKEN_THRESHOLD: u64 = 500_000;
-/// Default number of raw events retained after compaction.
-pub const DEFAULT_COMPACTION_EVENT_RETENTION_SIZE: u64 = 3;
+/// Default events-compaction token threshold (triggers intra-invocation compaction
+/// when large tool results push context past 80k tokens).
+pub const DEFAULT_COMPACTION_TOKEN_THRESHOLD: u64 = 80_000;
+/// Default number of raw events retained after intra-invocation compaction.
+pub const DEFAULT_COMPACTION_EVENT_RETENTION_SIZE: u64 = 6;
+/// Default fast model used for background sliding-window / intra-invocation summarization.
+pub const DEFAULT_SUMMARIZER_MODEL: &str = "gemini-3.5-flash-lite";
 
 /// Google Ads API version used for the discovery document.
 pub const GOOGLE_ADS_API_VERSION: &str = "v26";
@@ -253,12 +256,20 @@ pub const YOUTUBE_TOOL_FILTER: &[&str] = &[
 ];
 
 /// Google toolsets whose tools are loaded on demand (`enable_toolsets`)
-/// when `LAZY_TOOLSETS` is unset: the ones large enough to dominate the
-/// per-request token budget.
+/// when `LAZY_TOOLSETS` is unset: keeps the high-frequency core (`google_ads`
+/// and `bigquery`) eager while deferring secondary platforms until needed.
 pub const DEFAULT_LAZY_TOOLSETS: &[&str] = &[
+    "bid_manager",
     "campaign_manager_360",
     "display_video_360",
+    "drive",
+    "google_genai",
+    "merchant_center_inventories",
     "merchant_center_products",
+    "merchant_center_reports",
+    "search_ads_360",
+    "storage",
+    "youtube",
 ];
 
 /// Suffix of the write tier of a deferred toolset (`campaign_manager_360`
@@ -313,7 +324,7 @@ pub fn tiered_toolset_summaries(name: &str) -> (String, String) {
 }
 
 /// Resolves which toolsets are deferred from a raw `LAZY_TOOLSETS` value
-/// (`none` disables deferral, `all` defers every Discovery toolset).
+/// (`none` disables deferral, `all` defers every enabled toolset).
 pub fn parse_lazy_toolsets(raw: Option<&str>, enabled: &[String]) -> Vec<String> {
     let default = || {
         DEFAULT_LAZY_TOOLSETS
@@ -333,11 +344,7 @@ pub fn parse_lazy_toolsets(raw: Option<&str>, enabled: &[String]) -> Vec<String>
         return Vec::new();
     }
     if is_wildcard(&parsed) {
-        return enabled
-            .iter()
-            .filter(|s| !matches!(s.as_str(), "bigquery" | "google_genai"))
-            .cloned()
-            .collect();
+        return enabled.to_vec();
     }
     parsed.into_iter().filter(|s| enabled.contains(s)).collect()
 }
@@ -545,6 +552,167 @@ impl CompactionSettings {
                 DEFAULT_COMPACTION_EVENT_RETENTION_SIZE,
             ),
         }
+    }
+}
+
+/// Reasoning-effort mode resolved from `THINKING_LEVEL` / `THINKING_BUDGET`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThinkingMode {
+    /// Low-latency default: `ThinkingLevel::Low` on Gemini 3/4 models and
+    /// `thinking_budget: 512` on `gemini-2.5-flash` (non-lite).
+    #[default]
+    AutoFast,
+    /// Defer entirely to the model's server-side default (`thinking_config: None`).
+    ModelDefault,
+    /// Explicit Gemini 3/4 level (`minimal`, `low`, `medium`, `high`).
+    Level(adk_gemini::ThinkingLevel),
+    /// Explicit Gemini 2.5 token budget (`0` = off, `-1` = dynamic, `>0` = cap).
+    Budget(i32),
+}
+
+/// Thinking configuration resolved from `THINKING_LEVEL`, `THINKING_BUDGET`,
+/// and `INCLUDE_THOUGHTS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ThinkingSettings {
+    /// Reasoning-effort mode.
+    pub mode: ThinkingMode,
+    /// Optional override for whether synthesized thought summaries are streamed.
+    pub include_thoughts: Option<bool>,
+}
+
+impl ThinkingSettings {
+    /// Resolves thinking settings from the environment.
+    pub fn from_env() -> Self {
+        Self::parse(
+            env_opt("THINKING_LEVEL").as_deref(),
+            env_opt("THINKING_BUDGET").as_deref(),
+            env_opt("INCLUDE_THOUGHTS").as_deref(),
+        )
+    }
+
+    /// Parses raw environment values into [`ThinkingSettings`].
+    pub fn parse(
+        level_raw: Option<&str>,
+        budget_raw: Option<&str>,
+        include_thoughts_raw: Option<&str>,
+    ) -> Self {
+        let include_thoughts = include_thoughts_raw.and_then(|raw| {
+            let parsed = parse_bool(raw);
+            if parsed.is_none() {
+                tracing::warn!("Ignoring invalid INCLUDE_THOUGHTS={raw:?}");
+            }
+            parsed
+        });
+
+        // Explicit budget wins when `THINKING_LEVEL` is unset so Gemini 2.5
+        // callers can set `THINKING_BUDGET` directly without mutual-exclusion errors.
+        if level_raw.is_none()
+            && let Some(raw) = budget_raw
+        {
+            match raw.trim().parse::<i32>() {
+                Ok(budget) => {
+                    return Self {
+                        mode: ThinkingMode::Budget(budget),
+                        include_thoughts,
+                    };
+                }
+                Err(_) => {
+                    tracing::warn!("Ignoring invalid THINKING_BUDGET={raw:?}; using default");
+                }
+            }
+        }
+
+        let mode = match level_raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            None | Some("") | Some("auto-fast") | Some("fast") => ThinkingMode::AutoFast,
+            Some("auto") | Some("default") | Some("dynamic") => ThinkingMode::ModelDefault,
+            Some("minimal") | Some("min") => {
+                ThinkingMode::Level(adk_gemini::ThinkingLevel::Minimal)
+            }
+            Some("low") => ThinkingMode::Level(adk_gemini::ThinkingLevel::Low),
+            Some("medium") | Some("med") => ThinkingMode::Level(adk_gemini::ThinkingLevel::Medium),
+            Some("high") => ThinkingMode::Level(adk_gemini::ThinkingLevel::High),
+            Some("0") | Some("off") | Some("none") | Some("false") => ThinkingMode::Budget(0),
+            Some(other) => {
+                tracing::warn!("Ignoring invalid THINKING_LEVEL={other:?}; using fast default");
+                ThinkingMode::AutoFast
+            }
+        };
+
+        Self {
+            mode,
+            include_thoughts,
+        }
+    }
+
+    /// Builds the model-appropriate [`adk_gemini::ThinkingConfig`] for `model_name`,
+    /// guaranteeing `thinking_level` and `thinking_budget` are never both set.
+    pub fn thinking_config_for_model(
+        &self,
+        model_name: &str,
+    ) -> Option<adk_gemini::ThinkingConfig> {
+        use adk_gemini::{ThinkingConfig, ThinkingLevel};
+
+        let m = model_name.trim().to_ascii_lowercase();
+        if m.contains("image") || m.contains("imagen") || m.contains("veo") {
+            return None;
+        }
+        let is_gemini_3_or_newer =
+            m.contains("gemini-3") || m.contains("gemini-4") || m.contains("argon");
+        let is_gemini_25 = m.contains("gemini-2.5");
+
+        let mut cfg = match self.mode {
+            ThinkingMode::ModelDefault => None,
+            ThinkingMode::AutoFast => {
+                if is_gemini_3_or_newer {
+                    Some(ThinkingConfig::new().with_thinking_level(ThinkingLevel::Low))
+                } else if is_gemini_25 && m.contains("flash") && !m.contains("lite") {
+                    Some(ThinkingConfig::new().with_thinking_budget(512))
+                } else {
+                    None
+                }
+            }
+            ThinkingMode::Level(level) => {
+                if is_gemini_25 {
+                    let budget = match level {
+                        ThinkingLevel::Minimal => 0,
+                        ThinkingLevel::Low => 512,
+                        ThinkingLevel::Medium => 2048,
+                        ThinkingLevel::High => 8192,
+                    };
+                    Some(ThinkingConfig::new().with_thinking_budget(budget))
+                } else {
+                    Some(ThinkingConfig::new().with_thinking_level(level))
+                }
+            }
+            ThinkingMode::Budget(budget) => {
+                if is_gemini_3_or_newer {
+                    let level = if budget < 0 {
+                        None
+                    } else if budget == 0 {
+                        // Gemini 3.1 Pro rejects Minimal; use Low on non-Flash Gemini 3/4.
+                        Some(if m.contains("flash") {
+                            ThinkingLevel::Minimal
+                        } else {
+                            ThinkingLevel::Low
+                        })
+                    } else if budget <= 1024 {
+                        Some(ThinkingLevel::Low)
+                    } else if budget <= 4096 {
+                        Some(ThinkingLevel::Medium)
+                    } else {
+                        Some(ThinkingLevel::High)
+                    };
+                    level.map(|lvl| ThinkingConfig::new().with_thinking_level(lvl))
+                } else {
+                    Some(ThinkingConfig::new().with_thinking_budget(budget))
+                }
+            }
+        };
+
+        if let Some(inc) = self.include_thoughts {
+            cfg = Some(cfg.unwrap_or_default().with_thoughts_included(inc));
+        }
+        cfg
     }
 }
 
@@ -994,12 +1162,67 @@ mod tests {
         );
         assert_eq!(
             parse_lazy_toolsets(Some("all"), &enabled),
-            strs(&["google_ads", "campaign_manager_360", "display_video_360"])
+            strs(&[
+                "google_ads",
+                "campaign_manager_360",
+                "display_video_360",
+                "bigquery",
+            ])
         );
         assert_eq!(
             parse_lazy_toolsets(Some("google_ads, nope"), &enabled),
             strs(&["google_ads"])
         );
+        // Full default toolset roster keeps only google_ads and bigquery eager.
+        let all_enabled = strs(ALL_GOOGLE_TOOLSETS);
+        let default_lazy = parse_lazy_toolsets(None, &all_enabled);
+        assert!(!default_lazy.contains(&"google_ads".to_string()));
+        assert!(!default_lazy.contains(&"bigquery".to_string()));
+        assert!(default_lazy.contains(&"drive".to_string()));
+        assert!(default_lazy.contains(&"youtube".to_string()));
+        assert!(default_lazy.contains(&"google_genai".to_string()));
+    }
+
+    #[test]
+    fn thinking_settings_defaults_and_overrides() {
+        let default_cfg = ThinkingSettings::parse(None, None, None);
+        assert_eq!(default_cfg.mode, ThinkingMode::AutoFast);
+
+        let flash38 = default_cfg
+            .thinking_config_for_model("gemini-3.8-flash")
+            .expect("gemini 3.8 flash gets low thinking by default");
+        assert_eq!(flash38.thinking_level, Some(adk_gemini::ThinkingLevel::Low));
+        assert_eq!(flash38.thinking_budget, None);
+        flash38.validate().unwrap();
+
+        let flash25 = default_cfg
+            .thinking_config_for_model("gemini-2.5-flash")
+            .expect("gemini 2.5 flash gets fast budget");
+        assert_eq!(flash25.thinking_budget, Some(512));
+        assert_eq!(flash25.thinking_level, None);
+        flash25.validate().unwrap();
+
+        assert!(
+            default_cfg
+                .thinking_config_for_model("gemini-3.1-flash-image")
+                .is_none(),
+            "image models never receive thinking_config"
+        );
+
+        let auto_cfg = ThinkingSettings::parse(Some("auto"), None, None);
+        assert!(
+            auto_cfg
+                .thinking_config_for_model("gemini-3.8-flash")
+                .is_none()
+        );
+
+        let high_cfg = ThinkingSettings::parse(Some("high"), None, Some("true"));
+        let argon = high_cfg
+            .thinking_config_for_model("gemini-4-argon")
+            .unwrap();
+        assert_eq!(argon.thinking_level, Some(adk_gemini::ThinkingLevel::High));
+        assert_eq!(argon.include_thoughts, Some(true));
+        argon.validate().unwrap();
     }
 
     #[test]

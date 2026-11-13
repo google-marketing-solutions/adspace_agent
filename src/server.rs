@@ -298,20 +298,63 @@ fn html_page(title: &str, body: &str, status: &str) -> Html<String> {
 
 /// Serves the browser helper (`/oauth2/helper.js`, the same bytes as
 /// `/app/ui-helper.js`).
-async fn auth_helper() -> Response {
-    js_response(app_module(AUTH_HELPER_MODULE).expect("ui-helper.js is an embedded module"))
+async fn auth_helper(headers: HeaderMap) -> Response {
+    static_asset_response(
+        &headers,
+        "application/javascript; charset=utf-8",
+        app_module(AUTH_HELPER_MODULE).expect("ui-helper.js is an embedded module"),
+    )
 }
 
-fn js_response(src: &'static str) -> Response {
+fn static_asset_response(
+    req_headers: &HeaderMap,
+    content_type: &'static str,
+    body: &'static str,
+) -> Response {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(body.as_bytes());
+    // Weak validator: the compression layer may vary the exact bytes on the
+    // wire, but the embedded asset content is what the tag identifies.
+    let mut opaque = String::with_capacity(18);
+    opaque.push('"');
+    for b in &digest[..8] {
+        use std::fmt::Write as _;
+        let _ = write!(&mut opaque, "{b:02x}");
+    }
+    opaque.push('"');
+    let etag = format!("W/{opaque}");
+
+    // Weak comparison (RFC 9110 §8.8.3.2): ignore `W/` on both sides.
+    let matches_etag = req_headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|raw| {
+            raw.split(',').any(|candidate| {
+                let candidate = candidate.trim();
+                let stripped = candidate.strip_prefix("W/").unwrap_or(candidate);
+                stripped == "*" || stripped == opaque
+            })
+        });
+
+    let etag_val = HeaderValue::from_str(&etag).expect("ascii hex etag");
+    if matches_etag {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [
+                (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+                (header::ETAG, etag_val),
+            ],
+        )
+            .into_response();
+    }
+
     (
         [
-            (
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/javascript; charset=utf-8"),
-            ),
+            (header::CONTENT_TYPE, HeaderValue::from_static(content_type)),
             (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+            (header::ETAG, etag_val),
         ],
-        src,
+        body,
     )
         .into_response()
 }
@@ -417,49 +460,25 @@ pub async fn inject_auth_helper(req: Request, next: Next) -> Response {
 }
 
 /// Serves the custom AdSpace Agent studio HTML (`/app` and `/app/`).
-async fn studio_index() -> Response {
-    (
-        [
-            (
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/html; charset=utf-8"),
-            ),
-            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
-        ],
-        STUDIO_HTML,
-    )
-        .into_response()
+async fn studio_index(headers: HeaderMap) -> Response {
+    static_asset_response(&headers, "text/html; charset=utf-8", STUDIO_HTML)
 }
 
 /// Serves the custom AdSpace Agent studio stylesheet (`/app/app.css`).
-async fn studio_css() -> Response {
-    css_response(STUDIO_CSS)
+async fn studio_css(headers: HeaderMap) -> Response {
+    static_asset_response(&headers, "text/css; charset=utf-8", STUDIO_CSS)
 }
 
 /// Serves the shared `adk-ui` renderer stylesheet (`/app/adk-ui.css`).
-async fn adk_ui_css() -> Response {
-    css_response(ADK_UI_CSS)
-}
-
-fn css_response(css: &'static str) -> Response {
-    (
-        [
-            (
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/css; charset=utf-8"),
-            ),
-            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
-        ],
-        css,
-    )
-        .into_response()
+async fn adk_ui_css(headers: HeaderMap) -> Response {
+    static_asset_response(&headers, "text/css; charset=utf-8", ADK_UI_CSS)
 }
 
 /// Serves one of the studio's ES modules (`/app/{*path}`), e.g. `/app/app.js`
 /// or `/app/stage.js`. Paths outside the embedded module list are 404.
-async fn app_js(Path(path): Path<String>) -> Response {
+async fn app_js(Path(path): Path<String>, headers: HeaderMap) -> Response {
     match app_module(&path) {
-        Some(src) => js_response(src),
+        Some(src) => static_asset_response(&headers, "application/javascript; charset=utf-8", src),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -619,6 +638,16 @@ fn scrub_credentials_from_json(val: &mut serde_json::Value) {
     }
 }
 
+/// Fast SIMD pre-check before JSON credential scrubbing: returns `false` when
+/// `bytes` contains neither `CREDENTIALS_CACHE_KEY` (a substring of every key
+/// in [`CREDENTIAL_KEYS`]) nor a JSON `\u` escape sequence that could spell it.
+#[inline]
+fn bytes_may_contain_credentials(bytes: &[u8]) -> bool {
+    memchr::memmem::find(bytes, CREDENTIALS_STATE_KEY.as_bytes()).is_some()
+        || memchr::memmem::find(bytes, b"\\u").is_some()
+        || memchr::memmem::find(bytes, b"\\U").is_some()
+}
+
 /// Removes [`CREDENTIALS_STATE_KEY`] from the `data:` payload of one complete
 /// SSE event (text up to and including its terminating blank line).
 ///
@@ -626,6 +655,13 @@ fn scrub_credentials_from_json(val: &mut serde_json::Value) {
 /// lines are joined as the SSE spec prescribes, parsed as JSON, scrubbed and
 /// re-emitted as a single `data:` line. Data that is not JSON passes through.
 fn scrub_sse_event(frame: &[u8]) -> Vec<u8> {
+    if !bytes_may_contain_credentials(frame)
+        && frame.ends_with(b"\n\n")
+        && !frame.ends_with(b"\n\n\n")
+        && memchr::memmem::find(frame, b"\r").is_none()
+    {
+        return frame.to_vec();
+    }
     let text = String::from_utf8_lossy(frame);
     let body = text.trim_end_matches('\n');
     let mut out = String::with_capacity(text.len());
@@ -677,10 +713,7 @@ impl SseScrubber {
         let mut search_from = self.buf.len().saturating_sub(1);
         self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
-        while let Some(at) = self.buf[search_from..]
-            .windows(2)
-            .position(|w| w == b"\n\n")
-        {
+        while let Some(at) = memchr::memmem::find(&self.buf[search_from..], b"\n\n") {
             let end = search_from + at + 2;
             out.extend(scrub_sse_event(&self.buf[..end]));
             self.buf.drain(..end);
@@ -755,6 +788,9 @@ async fn scrub_json_response(response: Response) -> Response {
         )
             .into_response();
     };
+    if !bytes_may_contain_credentials(&bytes) {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
     if let Ok(mut json_val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
         scrub_credentials_from_json(&mut json_val);
         if let Ok(cleaned) = serde_json::to_vec(&json_val) {
@@ -1225,21 +1261,21 @@ const DEFAULT_USER_ID: &str = "user";
 
 /// adk-cli launcher configured with the runtime's services.
 fn launcher(runtime: &AgentRuntime) -> Launcher {
-    Launcher::new(runtime.agent.clone())
+    let mut l = Launcher::new(runtime.agent.clone())
         .app_name(APP_NAME)
         .with_session_service(runtime.session_service.clone())
         .with_artifact_service(runtime.artifact_service.clone())
         .with_memory_service(runtime.memory_for(DEFAULT_USER_ID))
-        .with_compaction(runtime.compaction_config())
-        .with_context_cache(
-            runtime.context_cache_config(),
-            runtime.models.clone() as Arc<dyn CacheCapable>,
-        )
+        .with_compaction(runtime.compaction_config());
+    if let Some(cache_cfg) = runtime.context_cache_config_opt() {
+        l = l.with_context_cache(cache_cfg, runtime.models.clone() as Arc<dyn CacheCapable>);
+    }
+    l
 }
 
 /// Assembles the HTTP application: adk-server's routes (authenticated through
 /// [`CookieIdentityExtractor`]), the OAuth / studio routes, the `/ui/` helper
-/// injection and [`guard_adk_routes`].
+/// injection, [`guard_adk_routes`], and HTTP response compression.
 ///
 /// # Errors
 ///
@@ -1255,7 +1291,8 @@ pub fn build_app(launcher: Launcher, routes: OAuthRoutes) -> anyhow::Result<Rout
         .layer(middleware::from_fn_with_state(
             (credentials, admins),
             guard_adk_routes,
-        ));
+        ))
+        .layer(tower_http::compression::CompressionLayer::new());
     Ok(app)
 }
 
@@ -2214,5 +2251,61 @@ mod tests {
         assert!(admins.allows("ADMIN@example.com"));
         assert!(!admins.allows("other@example.com"));
         assert!(AdminAllowList::new(Vec::<String>::new()).is_empty());
+    }
+
+    #[test]
+    fn sse_scrubber_catches_unicode_escaped_credential_keys_and_fast_paths_clean_frames() {
+        let mut scrubber = SseScrubber::default();
+        // Clean frame preserves exact whitespace formatting via SIMD fast path.
+        let clean = b"data: { \"hello\" : \"world\" }\n\n";
+        let out = scrubber.push(clean).unwrap();
+        assert_eq!(out.as_ref(), clean);
+
+        // Unicode-escaped `"CREDENTIALS_CACHE_KEY"` (`\u0043...`) still triggers
+        // full JSON parsing and removes the secret.
+        let escaped =
+            b"data: {\"state\":{\"\\u0043REDENTIALS_CACHE_KEY\":\"ya29.escaped\",\"ok\":1}}\n\n";
+        let scrubbed = String::from_utf8(scrubber.push(escaped).unwrap().to_vec()).unwrap();
+        assert!(!scrubbed.contains("ya29.escaped"), "{scrubbed}");
+        assert!(scrubbed.contains("\"ok\":1"), "{scrubbed}");
+    }
+
+    #[tokio::test]
+    async fn studio_static_assets_emit_etag_and_honor_if_none_match() {
+        use tower::ServiceExt as _;
+
+        let app = oauth_router(OAuthRoutes {
+            credentials: test_credentials(false),
+            sessions: Arc::new(adk_rust::session::InMemorySessionService::new()),
+            resume: None,
+            admins: AdminAllowList::default(),
+        });
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/app/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let etag = first.headers()[header::ETAG].to_str().unwrap().to_string();
+        assert!(etag.starts_with("W/\"") && etag.ends_with('"'));
+
+        let cached = app
+            .oneshot(
+                Request::builder()
+                    .uri("/app/app.js")
+                    .header(header::IF_NONE_MATCH, &etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+        let body = to_bytes(cached.into_body(), usize::MAX).await.unwrap();
+        assert!(body.is_empty());
     }
 }

@@ -83,6 +83,11 @@ impl Tool for CleanUiTool {
         true
     }
 
+    // Deliberately not `is_concurrency_safe`: ADK's `Auto` strategy runs the
+    // concurrency-safe calls of a turn before the others, so a
+    // `render_alert("done")` emitted after a write would be shown before the
+    // write had run. Rendering is local and gains nothing from overlapping.
+
     async fn execute(&self, ctx: Arc<dyn ToolContext>, mut args: Value) -> Result<Value> {
         // Strip every protocol field, consistent with the advertised schema,
         // so a model that echoes one back cannot steer the surface/thread

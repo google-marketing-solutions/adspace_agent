@@ -69,19 +69,22 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 csv = "1.4.0"
 dotenvy = "0.15.7"
 futures = "0.3.34"
-google-cloud-auth = { version = "1.17.0", default-features = false, features = ["default-rustls-provider"] }
+google-cloud-auth = { version = "1.19.0", default-features = false, features = ["default-rustls-provider"] }
 hmac = "0.13.0"
 indexmap = { version = "2.14.2", features = ["serde"] }
+memchr = "2.8.3"
 regex = "1.13.1"
-reqwest = { version = "0.13.5", default-features = false, features = ["form", "json", "query", "rustls", "stream"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["deflate", "form", "gzip", "http2", "json", "query", "rustls", "stream"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.11.1"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
 thiserror = "2.0.21"
-tokio = { version = "1.53.3", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
+tower-http = { version = "0.6.11", default-features = false, features = ["compression-deflate", "compression-gzip"] }
 tracing = "0.1.44"
 url = "2.5.8"
-uuid = { version = "1.28.0", features = ["v4"] }
+uuid = { version = "1.29.2", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

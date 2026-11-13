@@ -174,8 +174,15 @@ deploy_cloud_run() {
 }
 
 gcp_access_token() {
-  gcloud auth application-default print-access-token 2>/dev/null \
-    || gcloud auth print-access-token
+  local tok="" attempt
+  for attempt in 1 2 3; do
+    if tok="$(gcloud auth application-default print-access-token 2>/dev/null)" && [[ -n "$tok" ]]; then
+      printf '%s\n' "$tok"
+      return 0
+    fi
+    sleep 1
+  done
+  gcloud auth print-access-token
 }
 
 # Deploys/updates the Vertex AI Agent Runtime (ReasoningEngine BYOC) resource

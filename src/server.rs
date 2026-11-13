@@ -397,7 +397,8 @@ async fn oauth_events(State(routes): State<OAuthRoutes>, headers: HeaderMap) -> 
                 }
             }
         },
-    );
+    )
+    .fuse();
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
@@ -797,7 +798,8 @@ fn scrub_sse_response(response: Response) -> Response {
                 }
             }
         },
-    );
+    )
+    .fuse();
     Response::from_parts(parts, Body::from_stream(scrubbed))
 }
 
@@ -881,7 +883,8 @@ fn scrub_ndjson_response(response: Response) -> Response {
                 }
             }
         },
-    );
+    )
+    .fuse();
     Response::from_parts(parts, Body::from_stream(scrubbed))
 }
 
@@ -1541,6 +1544,7 @@ async fn normalize_agent_engine_request(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
+    parts.headers.remove(header::ACCEPT_ENCODING);
     let Ok(bytes) = to_bytes(body, 16 * 1024 * 1024).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
@@ -2891,7 +2895,7 @@ mod tests {
                 Request::builder()
                     .method(Method::POST)
                     .uri("/api/stream_reasoning_engine")
-                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT_ENCODING, "gzip")
                     .body(Body::from(
                         serde_json::json!({
                             "class_method": "async_stream_query",

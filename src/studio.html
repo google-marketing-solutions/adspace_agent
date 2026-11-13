@@ -154,11 +154,12 @@
             <div class="popover-section hidden" data-session-only data-admin-only>
               <div class="popover-label">ADK &amp; Generative Media Models</div>
               <p id="setting-models-admin-hint" class="popover-hint hidden">
-                Only administrators can change the active models. Showing the server&rsquo;s current selection.
+                Only administrators can change the active models.
               </p>
               <div class="settings-inputs">
                 <label>
                   <span>Agent Model (ADK LLM)</span>
+                  <span id="setting-model-text" class="setting-readonly"></span>
                   <select id="setting-model-select" aria-label="Agent Model">
                     <option value="gemini-4-hydrogen">gemini-4-hydrogen</option>
                     <option value="gemini-4-carbon">gemini-4-carbon</option>
@@ -182,6 +183,7 @@
 
                 <label>
                   <span>Image Generation Model</span>
+                  <span id="setting-image-model-text" class="setting-readonly"></span>
                   <select id="setting-image-model-select" aria-label="Image Generation Model">
                     <option value="gemini-3.1-flash-image">gemini-3.1-flash-image</option>
                     <option value="imagen-4.0-generate-001">imagen-4.0-generate-001</option>
@@ -203,6 +205,7 @@
 
                 <label>
                   <span>Video Generation Model</span>
+                  <span id="setting-video-model-text" class="setting-readonly"></span>
                   <select id="setting-video-model-select" aria-label="Video Generation Model">
                     <option value="veo-3.1-fast-generate-001">veo-3.1-fast-generate-001</option>
                     <option value="veo-3.1-generate-001">veo-3.1-generate-001</option>

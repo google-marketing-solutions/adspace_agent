@@ -769,6 +769,26 @@ summary:focus-visible,
   margin-top: 3px;
 }
 
+/* A setting the user cannot change is shown as its value, not as a control
+   that does nothing: `.is-read-only` on the section swaps each select (and
+   its custom-value input) for the text beside it. */
+.setting-readonly {
+  display: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.is-read-only .setting-readonly {
+  display: block;
+}
+
+.is-read-only select,
+.is-read-only .custom-model-input {
+  display: none;
+}
+
 .popover-footer {
   padding: 12px 18px;
   background: var(--bg-primary);

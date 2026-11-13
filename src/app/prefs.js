@@ -67,7 +67,19 @@ export const populateModelSelects = () => {
 };
 populateModelSelects();
 
+// The text shown in place of each model select to someone who cannot change
+// the models (see `syncSettingsAvailability`).
+export const MODEL_TEXT_IDS = {
+  model: "setting-model-text",
+  imageModel: "setting-image-model-text",
+  videoModel: "setting-video-model-text",
+};
+
 export const syncAllModelControls = () => {
+  for (const [key, id] of Object.entries(MODEL_TEXT_IDS)) {
+    const textEl = $(id);
+    if (textEl) textEl.textContent = prefs[key] || "";
+  }
   syncModelControl(
     $(MODEL_SELECT_IDS.model),
     $("setting-model-custom"),
@@ -218,9 +230,11 @@ export function syncSettingsAvailability() {
       ctrl.disabled = !hasSession;
     });
   });
-  // Model selectors stay visible (so users can see the active models) but
-  // are disabled for non-admins, who would get a 403 from POST /auth/models.
+  // Only administrators may change the models (anyone else would get a 403
+  // from POST /auth/models). Everyone else sees which models are active as
+  // plain text: a select that will not open reads as a broken control.
   els.settingsMenu.querySelectorAll("[data-admin-only]").forEach((el) => {
+    el.classList.toggle("is-read-only", !state.canManageModels);
     el.querySelectorAll("input, select").forEach((ctrl) => {
       ctrl.disabled = !hasSession || !state.canManageModels;
     });

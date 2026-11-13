@@ -1960,6 +1960,9 @@ fn event_to_python_adk_json(event: &mut serde_json::Value) {
         }
     }
 
+    let projected_widgets =
+        crate::a2ui_bridge::extract_event_ui_widgets(&serde_json::Value::Object(map.clone()));
+
     if let Some(actions_val) = map.remove("actions")
         && let Some(a) = actions_val.as_object()
     {
@@ -2024,9 +2027,33 @@ fn event_to_python_adk_json(event: &mut serde_json::Value) {
                 .map(serde_json::Value::Object)
                 .unwrap_or_else(|| serde_json::json!({})),
         );
+        let mut ui_widgets = a
+            .get("render_ui_widgets")
+            .or_else(|| a.get("renderUiWidgets"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        ui_widgets.extend(projected_widgets);
+        if !ui_widgets.is_empty() {
+            clean_actions.insert(
+                "render_ui_widgets".to_string(),
+                serde_json::Value::Array(ui_widgets),
+            );
+        }
         map.insert(
             "actions".to_string(),
             serde_json::Value::Object(clean_actions),
+        );
+    } else if !projected_widgets.is_empty() {
+        map.insert(
+            "actions".to_string(),
+            serde_json::json!({
+                "state_delta": {},
+                "artifact_delta": {},
+                "requested_auth_configs": {},
+                "requested_tool_confirmations": {},
+                "render_ui_widgets": projected_widgets,
+            }),
         );
     }
 
@@ -4260,6 +4287,52 @@ mod tests {
         assert_eq!(
             ge_session.state().get("adspace_agent"),
             Some(serde_json::json!("ya29.ge-auth-token"))
+        );
+
+        // 5. event_to_python_adk_json projects render_* tool outputs into
+        //    actions.render_ui_widgets (A2UI v0.9) on the Agent Engine wire
+        //    while leaving the function_response intact.
+        let mut ui_event = serde_json::json!({
+            "id": "ev-ui-1",
+            "invocation_id": "inv-ui-1",
+            "author": APP_NAME,
+            "timestamp": "2026-11-13T18:17:32Z",
+            "content": {
+                "role": "function",
+                "parts": [{
+                    "functionResponse": {
+                        "name": "render_card",
+                        "response": {
+                            "components": [{
+                                "type": "card",
+                                "title": "Campaign Summary",
+                                "content": [{
+                                    "type": "text",
+                                    "content": "Spend: $12,400",
+                                    "variant": "body"
+                                }]
+                            }]
+                        }
+                    },
+                    "id": "call-card-1"
+                }]
+            },
+            "actions": {
+                "state_delta": {},
+                "artifact_delta": {}
+            }
+        });
+        event_to_python_adk_json(&mut ui_event);
+        let widgets = ui_event["actions"]["render_ui_widgets"]
+            .as_array()
+            .expect("render_ui_widgets should be populated");
+        assert_eq!(widgets.len(), 1);
+        assert_eq!(widgets[0]["provider"], "a2ui");
+        assert!(
+            widgets[0]["payload"]["jsonl"]
+                .as_str()
+                .unwrap()
+                .contains("Campaign Summary")
         );
     }
 }

@@ -18,6 +18,7 @@
 //! with Google Ads, YouTube, Google Cloud, and Google Search to form a more
 //! comprehensive campaign and marketing plan for agencies.
 
+pub mod a2ui_bridge;
 pub mod agent;
 pub mod auth;
 pub mod config;

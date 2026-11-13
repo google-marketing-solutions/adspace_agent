@@ -667,20 +667,42 @@ summary:focus-visible,
   gap: 8px;
 }
 
-.popover-link-btn {
+/* A hint that explains a restriction, set apart in the info tint. */
+.popover-hint--notice {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 2px 0 0;
+  padding: 7px 10px;
+  border: 1px solid var(--tint-info-ring);
+  border-radius: 10px;
+  background: var(--tint-info-bg);
+  color: var(--tint-info-fg);
+}
+
+.popover-hint--notice .google-symbols {
+  font-size: 16px;
+  flex: 0 0 auto;
+}
+
+/* A small action beside a section label. Filled with the accent; the card
+   colour is the text (white on the light theme's blue, near-black on the
+   dark theme's), which keeps it readable in both. */
+.popover-action-btn {
   border: 0;
-  background: transparent;
-  min-height: 28px;
-  padding: 0;
+  border-radius: 9999px;
+  min-height: 26px;
+  padding: 3px 12px;
+  background: var(--accent-primary);
+  color: var(--surface-card);
+  font-family: var(--sans);
   font-size: 12px;
   font-weight: 500;
-  color: var(--text-secondary);
   cursor: pointer;
 }
 
-.popover-link-btn:hover {
-  color: var(--text-primary);
-  text-decoration: underline;
+.popover-action-btn:hover {
+  background: color-mix(in srgb, var(--accent-primary) 86%, var(--text-primary));
 }
 
 .pricing-rates-grid {

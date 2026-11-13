@@ -130,19 +130,19 @@
             <div class="popover-section hidden" data-session-only>
               <div class="popover-label">Conversation &amp; Telemetry</div>
               <label class="toggle-row">
-                <span>Show tool calls in chat</span>
+                <span>Tool calls in chat</span>
                 <input id="setting-show-tools" type="checkbox" checked />
               </label>
               <label class="toggle-row">
-                <span>Show session token usage</span>
+                <span>Session token usage</span>
                 <input id="setting-show-session-usage" type="checkbox" checked />
               </label>
               <label class="toggle-row">
-                <span>Show token usage on messages</span>
+                <span>Token usage on messages</span>
                 <input id="setting-show-message-usage" type="checkbox" checked />
               </label>
               <label class="toggle-row">
-                <span>Show estimated cost</span>
+                <span>Estimated cost</span>
                 <input id="setting-show-cost" type="checkbox" checked />
               </label>
               <label class="toggle-row">
@@ -152,13 +152,10 @@
             </div>
 
             <div class="popover-section hidden" data-session-only data-admin-only>
-              <div class="popover-label">ADK &amp; Generative Media Models</div>
-              <p id="setting-models-admin-hint" class="popover-hint hidden">
-                Only administrators can change the active models.
-              </p>
+              <div class="popover-label">Models</div>
               <div class="settings-inputs">
                 <label>
-                  <span>Agent Model (ADK LLM)</span>
+                  <span>Agent</span>
                   <span id="setting-model-text" class="setting-readonly"></span>
                   <select id="setting-model-select" aria-label="Agent Model">
                     <option value="gemini-4-hydrogen">gemini-4-hydrogen</option>
@@ -182,7 +179,7 @@
                 </label>
 
                 <label>
-                  <span>Image Generation Model</span>
+                  <span>Image Generation</span>
                   <span id="setting-image-model-text" class="setting-readonly"></span>
                   <select id="setting-image-model-select" aria-label="Image Generation Model">
                     <option value="gemini-3.1-flash-image">gemini-3.1-flash-image</option>
@@ -204,7 +201,7 @@
                 </label>
 
                 <label>
-                  <span>Video Generation Model</span>
+                  <span>Video Generation</span>
                   <span id="setting-video-model-text" class="setting-readonly"></span>
                   <select id="setting-video-model-select" aria-label="Video Generation Model">
                     <option value="veo-3.1-fast-generate-001">veo-3.1-fast-generate-001</option>
@@ -225,6 +222,10 @@
                   />
                 </label>
               </div>
+              <p id="setting-models-admin-hint" class="popover-hint popover-hint--notice hidden">
+                <span class="google-symbols" aria-hidden="true">lock</span>
+                <span>Only administrators can change the active models.</span>
+              </p>
             </div>
 
             <div class="popover-section hidden" data-session-only>
@@ -233,10 +234,10 @@
                 <button
                   id="setting-pricing-reset"
                   type="button"
-                  class="popover-link-btn"
+                  class="popover-action-btn"
                   title="Reset active model rates to Gemini API Paid Tier Standard defaults"
                 >
-                  Reset defaults
+                  Reset
                 </button>
               </div>
               <div class="settings-inputs">

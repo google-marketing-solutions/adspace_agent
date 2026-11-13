@@ -1525,29 +1525,63 @@ async fn apply_stream_query_state_delta(
     }
 }
 
-/// Normalizes incoming Agent Engine requests so `temp:<AUTH_ID>` tokens and
-/// `stream_query` state deltas are preserved across session persistence.
+/// Normalizes incoming Agent Engine requests so:
+/// 1. Requests forwarded by the Vertex AI ReasoningEngine proxy without a
+///    `Content-Type: application/json` header are still accepted by `axum::Json`.
+/// 2. Both `class_method` and `classMethod` envelope keys are accepted.
+/// 3. `temp:<AUTH_ID>` tokens and `stream_query` state deltas are preserved
+///    across session persistence.
 async fn normalize_agent_engine_request(
     State(sessions): State<Arc<dyn SessionService>>,
     req: Request,
     next: Next,
 ) -> Response {
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     let Ok(bytes) = to_bytes(body, 16 * 1024 * 1024).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
     let Ok(mut payload) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        parts.headers.remove(header::CONTENT_LENGTH);
         return next
             .run(Request::from_parts(parts, Body::from(bytes)))
             .await;
     };
     let mut mutated = false;
+    if let Some(obj) = payload.as_object_mut()
+        && !obj.contains_key("class_method")
+        && let Some(camel) = obj.remove("classMethod")
+    {
+        obj.insert("class_method".to_string(), camel);
+        mutated = true;
+    }
     let class_method = payload
         .get("class_method")
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
     if let Some(input) = payload.get_mut("input").and_then(|v| v.as_object_mut()) {
+        if class_method == "async_add_session_to_memory"
+            && (!input.contains_key("user_id") || !input.contains_key("session_id"))
+            && let Some(session_obj) = input.get("session").and_then(|v| v.as_object())
+        {
+            let uid = session_obj
+                .get("user_id")
+                .or_else(|| session_obj.get("userId"))
+                .cloned();
+            let sid = session_obj.get("id").cloned();
+            if let Some(uid) = uid {
+                input.entry("user_id".to_string()).or_insert(uid);
+                mutated = true;
+            }
+            if let Some(sid) = sid {
+                input.entry("session_id".to_string()).or_insert(sid);
+                mutated = true;
+            }
+        }
         if let Some(state_obj) = input.get_mut("state").and_then(|v| v.as_object_mut())
             && copy_temp_state_keys(state_obj)
         {
@@ -1588,7 +1622,6 @@ async fn normalize_agent_engine_request(
     } else {
         bytes
     };
-    let mut parts = parts;
     parts.headers.remove(header::CONTENT_LENGTH);
     next.run(Request::from_parts(parts, Body::from(body_bytes)))
         .await
@@ -2776,15 +2809,15 @@ mod tests {
                 guard_adk_routes,
             ));
 
-        // 1. register_operations succeeds without browser cookies even when OAuth is configured.
+        // 1. register_operations succeeds without browser cookies or Content-Type header,
+        //    and accepts both class_method and classMethod envelope keys.
         let reg_resp = ae_router
             .clone()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/api/reasoning_engine")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"class_method":"register_operations"}"#))
+                    .body(Body::from(r#"{"classMethod":"register_operations"}"#))
                     .unwrap(),
             )
             .await

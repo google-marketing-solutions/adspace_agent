@@ -139,11 +139,12 @@ async def test_generate_video_success(mock_genai_client: mock.Mock):
     },
 )
 @mock.patch("adspace_agent.tools.google_genai.genai_client")
-@mock.patch("asyncio.sleep", return_value=None)
+@mock.patch("adspace_agent.tools.google_genai.asyncio")
 async def test_generate_video_polling(
-    mock_sleep: mock.Mock, mock_genai_client: mock.Mock
+    mock_asyncio: mock.Mock, mock_genai_client: mock.Mock
 ):
     """Tests that generate_video polls until the operation is done."""
+    mock_asyncio.sleep = mock.AsyncMock(return_value=None)
     mock_op_pending = mock.Mock()
     mock_op_pending.done = False
 
@@ -169,7 +170,7 @@ async def test_generate_video_polling(
 
     assert result["status"] == "SUCCESS"
     assert mock_genai_client.aio.operations.get.called
-    assert mock_sleep.called
+    assert mock_asyncio.sleep.called
 
 
 @pytest.mark.asyncio
@@ -330,12 +331,13 @@ async def test_generate_video_exception(mock_genai_client: mock.Mock):
     },
 )
 @mock.patch("adspace_agent.tools.google_genai.genai_client")
-@mock.patch("asyncio.sleep", return_value=None)
+@mock.patch("adspace_agent.tools.google_genai.asyncio")
 async def test_generate_video_operations_get_exception(
-    mock_sleep: mock.Mock,
+    mock_asyncio: mock.Mock,
     mock_genai_client: mock.Mock,
 ):
     """Tests that generate_video handles operations.get exceptions."""
+    mock_asyncio.sleep = mock.AsyncMock(return_value=None)
     mock_op_pending = mock.Mock()
     mock_op_pending.done = False
 
@@ -354,7 +356,7 @@ async def test_generate_video_operations_get_exception(
 
     assert result["status"] == "ERROR"
     assert result["error_details"] == "Operation get error"
-    assert mock_sleep.called
+    assert mock_asyncio.sleep.called
 
 
 @pytest.mark.asyncio

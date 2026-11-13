@@ -14,7 +14,7 @@
 """Utility functions for Campaign Manager 360 trafficking operations."""
 
 import asyncio
-import datetime
+import datetime as dt
 import io
 import logging
 import operator
@@ -121,11 +121,9 @@ def format_date_time(
             parsed = parsed.tz_convert("UTC")
         return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    time_part = (
-        datetime.time(23, 59, 59) if is_end_date else datetime.time(0, 0, 0)
-    )
-    local_dt = datetime.datetime.combine(parsed.date(), time_part, tzinfo=tz)
-    utc_dt = local_dt.astimezone(datetime.UTC)
+    time_part = dt.time(23, 59, 59) if is_end_date else dt.time(0, 0, 0)
+    local_dt = dt.datetime.combine(parsed.date(), time_part, tzinfo=tz)
+    utc_dt = local_dt.astimezone(dt.UTC)
     return utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 

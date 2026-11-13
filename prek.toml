@@ -18,7 +18,7 @@
 
 [[repos]]
 repo = "https://github.com/astral-sh/uv-pre-commit"
-rev = "0.12.17"
+rev = "0.13.8"
 hooks = [{ id = "uv-lock" }]
 
 [[repos]]
@@ -33,22 +33,22 @@ hooks = [{ id = "check-executables-have-shebangs" }, { id = "check-json" }, { id
 
 [[repos]]
 repo = "https://github.com/astral-sh/ruff-pre-commit"
-rev = "v0.16.8"
+rev = "v0.17.5"
 hooks = [{ id = "ruff-check", args = ["--fix"] }, { id = "ruff-format" }]
 
 [[repos]]
 repo = "https://github.com/tombi-toml/tombi-pre-commit"
-rev = "v1.5.5"
+rev = "v1.11.2"
 hooks = [{ id = "tombi-format", exclude = '^uv\.lock$' }, { id = "tombi-lint", exclude = '^uv\.lock$' }]
 
 [[repos]]
 repo = "https://github.com/rvben/rumdl-pre-commit"
-rev = "v0.2.75"
+rev = "v0.3.4"
 hooks = [{ id = "rumdl", args = ["--fail-on=error"] }]
 
 [[repos]]
 repo = "https://github.com/commitizen-tools/commitizen"
-rev = "v4.18.1"
+rev = "v4.19.3"
 hooks = [
   { id = "commitizen" },
 ]

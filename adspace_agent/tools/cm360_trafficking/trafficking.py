@@ -13,7 +13,7 @@
 # limitations under the License.
 """Tool for parsing campaign sheets and executing CM360 trafficking."""
 
-import datetime
+import datetime as dt
 import json
 import logging
 import os
@@ -669,18 +669,16 @@ def before_traffic_campaigns_in_cm360_tool_callback(
 
             token_uri = auth_scheme.flows.authorizationCode.tokenUrl
 
-            now = datetime.datetime.now(datetime.UTC)
+            now = dt.datetime.now(dt.UTC)
             expires_at = getattr(oauth, "expires_at", None)
             expires_in = getattr(oauth, "expires_in", None)
 
             if isinstance(expires_at, (int, float)) and expires_at > 0:
-                expiry_dt = datetime.datetime.fromtimestamp(
-                    expires_at, tz=datetime.UTC
-                )
+                expiry_dt = dt.datetime.fromtimestamp(expires_at, tz=dt.UTC)
             elif isinstance(expires_in, (int, float)) and expires_in > 0:
-                expiry_dt = now + datetime.timedelta(seconds=expires_in)
+                expiry_dt = now + dt.timedelta(seconds=expires_in)
             else:
-                expiry_dt = now + datetime.timedelta(hours=1)
+                expiry_dt = now + dt.timedelta(hours=1)
 
             tool_context.state[CREDENTIALS_CACHE_KEY] = {
                 "client_id": client_id,

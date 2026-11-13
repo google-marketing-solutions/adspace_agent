@@ -13,7 +13,7 @@
 # limitations under the License.
 """Campaign Manager 360 actions for grouping, listings, and operations."""
 
-import datetime
+import datetime as dt
 import logging
 from typing import Any, cast
 
@@ -515,8 +515,8 @@ def _get_cm360_service(
         token_info = dict(cached_token_info)
         # Ensure expiry is present so google-auth won't auto-expire the token
         if not token_info.get("expiry"):
-            now = datetime.datetime.now(datetime.UTC)
-            token_info["expiry"] = (now + datetime.timedelta(hours=1)).strftime(
+            now = dt.datetime.now(dt.UTC)
+            token_info["expiry"] = (now + dt.timedelta(hours=1)).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"
             )
 

@@ -38,8 +38,8 @@ export const STORAGE_KEYS = {
 
 export const DEFAULT_MODELS = {
   model: "gemini-4-hydrogen",
-  imageModel: "gemini-3.1-flash-image",
-  videoModel: "veo-3.1-fast-generate-001",
+  imageModel: "gemini-nano-banana-2.1",
+  videoModel: "gemini-omni-1.2-flash",
 };
 
 export const PRESET_MODEL_OPTIONS = {
@@ -51,14 +51,16 @@ export const PRESET_MODEL_OPTIONS = {
     "gemini-3.5-flash-lite",
   ],
   imageModel: [
+    "gemini-nano-banana-2.1",
+    "gemini-3-pro-image",
     "gemini-3.1-flash-image",
-    "imagen-4.0-generate-001",
-    "imagen-4.0-fast-generate-001",
+    "gemini-3.1-flash-lite-image",
   ],
   videoModel: [
+    "gemini-omni-1.2-flash",
+    "gemini-omni-1.1-flash",
     "veo-3.1-fast-generate-001",
     "veo-3.1-generate-001",
-    "veo-3.0-generate-001",
   ],
 };
 

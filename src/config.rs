@@ -27,10 +27,10 @@ pub const APP_NAME: &str = "adspace_agent";
 
 /// Default Gemini model.
 pub const DEFAULT_MODEL: &str = "gemini-4-hydrogen";
-/// Default Veo video generation model.
-pub const DEFAULT_VIDEO_MODEL: &str = "veo-3.1-fast-generate-001";
+/// Default video generation model.
+pub const DEFAULT_VIDEO_MODEL: &str = "gemini-omni-1.2-flash";
 /// Default image generation model.
-pub const DEFAULT_IMAGE_MODEL: &str = "gemini-3.1-flash-image";
+pub const DEFAULT_IMAGE_MODEL: &str = "gemini-nano-banana-2.1";
 
 /// Preset agent LLM models exposed in the Studio settings selector.
 pub const PRESET_MODELS: &[&str] = &[
@@ -41,18 +41,20 @@ pub const PRESET_MODELS: &[&str] = &[
     "gemini-3.5-flash-lite",
 ];
 
-/// Preset Veo video generation models exposed in the Studio settings selector.
+/// Preset video generation models exposed in the Studio settings selector.
 pub const PRESET_VIDEO_MODELS: &[&str] = &[
+    "gemini-omni-1.2-flash",
+    "gemini-omni-1.1-flash",
     "veo-3.1-fast-generate-001",
     "veo-3.1-generate-001",
-    "veo-3.0-generate-001",
 ];
 
 /// Preset image generation models exposed in the Studio settings selector.
 pub const PRESET_IMAGE_MODELS: &[&str] = &[
+    "gemini-nano-banana-2.1",
+    "gemini-3-pro-image",
     "gemini-3.1-flash-image",
-    "imagen-4.0-generate-001",
-    "imagen-4.0-fast-generate-001",
+    "gemini-3.1-flash-lite-image",
 ];
 
 /// Default events-compaction interval (in invocations).
@@ -68,7 +70,7 @@ pub const DEFAULT_COMPACTION_TOKEN_THRESHOLD: u64 = 80_000;
 /// (same scope as [`DEFAULT_COMPACTION_TOKEN_THRESHOLD`]).
 pub const DEFAULT_COMPACTION_EVENT_RETENTION_SIZE: u64 = 6;
 /// Default fast model used for background sliding-window / intra-invocation summarization.
-pub const DEFAULT_SUMMARIZER_MODEL: &str = "gemini-3.5-flash-lite";
+pub const DEFAULT_SUMMARIZER_MODEL: &str = "gemini-4-hydrogen";
 
 /// Google Ads API version used for the discovery document.
 pub const GOOGLE_ADS_API_VERSION: &str = "v26";
@@ -672,7 +674,12 @@ impl ThinkingSettings {
         use adk_gemini::{ThinkingConfig, ThinkingLevel};
 
         let m = model_name.trim().to_ascii_lowercase();
-        if m.contains("image") || m.contains("imagen") || m.contains("veo") {
+        if m.contains("image")
+            || m.contains("banana")
+            || m.contains("imagen")
+            || m.contains("veo")
+            || m.contains("omni")
+        {
             return None;
         }
         let is_gemini_3_or_newer =
@@ -1227,12 +1234,15 @@ mod tests {
         let default_cfg = ThinkingSettings::parse(None, None, None);
         assert_eq!(default_cfg.mode, ThinkingMode::AutoFast);
 
-        let flash38 = default_cfg
-            .thinking_config_for_model("gemini-3.8-flash")
-            .expect("gemini 3.8 flash gets low thinking by default");
-        assert_eq!(flash38.thinking_level, Some(adk_gemini::ThinkingLevel::Low));
-        assert_eq!(flash38.thinking_budget, None);
-        flash38.validate().unwrap();
+        let hydrogen = default_cfg
+            .thinking_config_for_model("gemini-4-hydrogen")
+            .expect("gemini 4 hydrogen gets low thinking by default");
+        assert_eq!(
+            hydrogen.thinking_level,
+            Some(adk_gemini::ThinkingLevel::Low)
+        );
+        assert_eq!(hydrogen.thinking_budget, None);
+        hydrogen.validate().unwrap();
 
         let flash25 = default_cfg
             .thinking_config_for_model("gemini-2.5-flash")
@@ -1241,17 +1251,21 @@ mod tests {
         assert_eq!(flash25.thinking_level, None);
         flash25.validate().unwrap();
 
-        assert!(
-            default_cfg
-                .thinking_config_for_model("gemini-3.1-flash-image")
-                .is_none(),
-            "image models never receive thinking_config"
-        );
+        for media_model in [
+            "gemini-nano-banana-2.1",
+            "gemini-3.1-flash-image",
+            "gemini-omni-1.2-flash",
+        ] {
+            assert!(
+                default_cfg.thinking_config_for_model(media_model).is_none(),
+                "media models never receive thinking_config ({media_model})"
+            );
+        }
 
         let auto_cfg = ThinkingSettings::parse(Some("auto"), None, None);
         assert!(
             auto_cfg
-                .thinking_config_for_model("gemini-3.8-flash")
+                .thinking_config_for_model("gemini-4-hydrogen")
                 .is_none()
         );
 

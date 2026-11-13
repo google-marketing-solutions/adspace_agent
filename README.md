@@ -158,7 +158,7 @@ All settings are environment variables (read from `.env` in development).
 | ----------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION` | —                                                                         | Vertex AI project / location (`global` recommended). Also the default BigQuery project.    |
 | `GOOGLE_GENAI_USE_VERTEXAI`                     | `TRUE`                                                                    | `FALSE` + `GOOGLE_API_KEY` uses the Gemini Developer API instead. Accepts `true/1/yes/on`. |
-| `MODEL`, `IMAGE_MODEL`, `VIDEO_MODEL`           | `gemini-4-hydrogen`, `gemini-3.1-flash-image`, `veo-3.1-fast-generate-001` | Start-up models; administrators can switch them at runtime from the studio.                |
+| `MODEL`, `IMAGE_MODEL`, `VIDEO_MODEL`           | `gemini-4-hydrogen`, `gemini-nano-banana-2.1`, `gemini-omni-1.2-flash`    | Start-up models; administrators can switch them at runtime from the studio.                |
 | `CONTEXT_CACHE_*`, `COMPACTION_*`               | see `.env.sample`                                                         | Gemini context caching and events compaction thresholds.                                   |
 
 ### Sign-in and access

@@ -1931,7 +1931,7 @@ mod tests {
     #[async_trait]
     impl adk_rust::Llm for FixedLlm {
         fn name(&self) -> &str {
-            "gemini-3.5-flash-lite"
+            config::DEFAULT_SUMMARIZER_MODEL
         }
 
         async fn generate_content(
@@ -2009,7 +2009,10 @@ mod tests {
             assert_eq!(usage.total_token_count, usage.prompt_token_count + 7);
             // What the studio prices the call from.
             let annotated = usage.provider_usage.as_ref().expect("annotations");
-            assert_eq!(annotated["gen_ai.request.model"], "gemini-3.5-flash-lite");
+            assert_eq!(
+                annotated["gen_ai.request.model"],
+                config::DEFAULT_SUMMARIZER_MODEL
+            );
             assert_eq!(annotated["gen_ai.usage.output_tokens"], 7);
             assert!(usage.cost.is_some());
         }
@@ -2222,8 +2225,8 @@ mod tests {
         });
         let raw_stream: adk_rust::LlmResponseStream =
             Box::pin(futures::stream::once(async move { Ok(resp) }));
-        let span = adk_rust::telemetry::llm_generate_span("gemini", "gemini-3.8-flash", true);
-        let mut tracked = track_stream_token_usage(raw_stream, span, "gemini-3.8-flash".into());
+        let span = adk_rust::telemetry::llm_generate_span("gemini", "gemini-4-hydrogen", true);
+        let mut tracked = track_stream_token_usage(raw_stream, span, "gemini-4-hydrogen".into());
         let item = tracked
             .next()
             .await
@@ -2232,7 +2235,7 @@ mod tests {
         let usage = item.usage_metadata.expect("usage metadata present");
         assert!(usage.cost.unwrap_or(0.0) > 0.0);
         let provider_usage = usage.provider_usage.expect("provider_usage present");
-        assert_eq!(provider_usage["gen_ai.request.model"], "gemini-3.8-flash");
+        assert_eq!(provider_usage["gen_ai.request.model"], "gemini-4-hydrogen");
         assert_eq!(provider_usage["gen_ai.usage.input_tokens"], 1_000);
         assert_eq!(provider_usage["gen_ai.usage.output_tokens"], 250);
         assert_eq!(provider_usage["gen_ai.usage.total_tokens"], 1_250);
@@ -2259,8 +2262,8 @@ mod tests {
 
         let raw_stream: adk_rust::LlmResponseStream =
             Box::pin(futures::stream::iter(vec![Ok(chunk1), Ok(chunk2)]));
-        let span = adk_rust::telemetry::llm_generate_span("gemini", "gemini-3.8-flash", true);
-        let mut tracked = track_stream_token_usage(raw_stream, span, "gemini-3.8-flash".into());
+        let span = adk_rust::telemetry::llm_generate_span("gemini", "gemini-4-hydrogen", true);
+        let mut tracked = track_stream_token_usage(raw_stream, span, "gemini-4-hydrogen".into());
 
         let first = tracked.next().await.unwrap().unwrap();
         let u1 = first.usage_metadata.expect("chunk1 usage");

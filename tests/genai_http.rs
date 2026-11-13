@@ -104,6 +104,45 @@ async fn model_verb(
     }
 }
 
+async fn create_interaction(
+    AxumState(fake): AxumState<Arc<Fake>>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    if !authorised(&fake, &headers) {
+        return (StatusCode::UNAUTHORIZED, "no").into_response();
+    }
+    if headers.get("api-revision").and_then(|v| v.to_str().ok()) != Some("2026-05-20") {
+        return (StatusCode::BAD_REQUEST, "missing Api-Revision").into_response();
+    }
+    *fake.last_predict_body.lock().unwrap() = Some(body);
+    let video_block = if fake.studio {
+        let base = fake.base.lock().unwrap().clone();
+        json!({
+            "type": "video",
+            "mime_type": "video/mp4",
+            "uri": format!("{base}/files/v1:download"),
+        })
+    } else {
+        json!({
+            "type": "video",
+            "mime_type": "video/mp4",
+            "data": b64(MP4),
+        })
+    };
+    axum::Json(json!({
+        "id": "v1_interaction",
+        "object": "interaction",
+        "status": "completed",
+        "model": "gemini-omni-1.2-flash",
+        "steps": [
+            { "type": "thought", "content": [{"type": "thought", "text": "planning"}] },
+            { "type": "model_output", "content": [video_block] }
+        ]
+    }))
+    .into_response()
+}
+
 fn router(fake: Arc<Fake>) -> Router {
     Router::new()
         // Vertex: /v1/projects/{p}/locations/{l}/publishers/google/models/{model}:{verb}
@@ -111,8 +150,14 @@ fn router(fake: Arc<Fake>) -> Router {
             "/v1/projects/{p}/locations/{l}/publishers/google/models/{model_verb}",
             post(model_verb),
         )
-        // Studio: /v1beta/models/{model}:{verb} and /v1beta/{operation}
+        // Vertex Interactions API: /v1beta1/projects/{p}/locations/{l}/interactions
+        .route(
+            "/v1beta1/projects/{p}/locations/{l}/interactions",
+            post(create_interaction),
+        )
+        // Studio: /v1beta/models/{model}:{verb}, /v1beta/interactions, and /v1beta/{operation}
         .route("/v1beta/models/{model_verb}", post(model_verb))
+        .route("/v1beta/interactions", post(create_interaction))
         .route(
             "/v1beta/operations/{id}",
             get(
@@ -256,4 +301,40 @@ async fn veo_on_studio_polls_the_operation_and_downloads_the_file() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("HTTP 401"), "{err:#}");
+}
+
+#[tokio::test]
+async fn omni_video_uses_interactions_api_on_vertex_and_studio() {
+    // Vertex returns inline base64 data inside `steps[*].content[*]`.
+    let fake = Arc::new(Fake::default());
+    let base = spawn(router(fake.clone())).await;
+    let media = vertex(&base)
+        .generate_video("gemini-omni-1.2-flash", "a rolling marble")
+        .await
+        .unwrap();
+    assert_eq!(media.mime_type, "video/mp4");
+    assert_eq!(media.data, MP4);
+    assert_eq!(
+        fake.last_predict_body.lock().unwrap().clone().unwrap(),
+        json!({
+            "model": "gemini-omni-1.2-flash",
+            "input": "a rolling marble",
+            "store": false,
+        })
+    );
+
+    // Studio URI delivery downloads the video bytes with the API key header.
+    let fake_studio = Arc::new(Fake {
+        studio: true,
+        ..Fake::default()
+    });
+    let base_studio = spawn(router(fake_studio.clone())).await;
+    *fake_studio.base.lock().unwrap() = base_studio.clone();
+    let media = GenAiClient::studio("studio-key")
+        .with_base_url(&base_studio)
+        .generate_video("gemini-omni-1.2-flash", "a drone shot")
+        .await
+        .unwrap();
+    assert_eq!(media.mime_type, "video/mp4");
+    assert_eq!(media.data, MP4);
 }

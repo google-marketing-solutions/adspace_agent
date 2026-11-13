@@ -184,29 +184,41 @@ impl GenAiClient {
         client.map_err(|e| anyhow::anyhow!("failed to build Gemini client for {model}: {e}"))
     }
 
+    fn base_url(&self) -> String {
+        match &self.backend {
+            Backend::Vertex { location, .. } => self.base_override.clone().unwrap_or_else(|| {
+                if location == "global" {
+                    "https://aiplatform.googleapis.com".to_string()
+                } else {
+                    format!("https://{location}-aiplatform.googleapis.com")
+                }
+            }),
+            Backend::Studio { .. } => self
+                .base_override
+                .clone()
+                .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string()),
+        }
+    }
+
     fn model_url(&self, model: &str, verb: &str) -> String {
+        let base = self.base_url();
         match &self.backend {
             Backend::Vertex {
                 project, location, ..
-            } => {
-                let base = self.base_override.clone().unwrap_or_else(|| {
-                    if location == "global" {
-                        "https://aiplatform.googleapis.com".to_string()
-                    } else {
-                        format!("https://{location}-aiplatform.googleapis.com")
-                    }
-                });
-                format!(
-                    "{base}/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:{verb}"
-                )
-            }
-            Backend::Studio { .. } => {
-                let base = self
-                    .base_override
-                    .clone()
-                    .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
-                format!("{base}/v1beta/models/{model}:{verb}")
-            }
+            } => format!(
+                "{base}/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:{verb}"
+            ),
+            Backend::Studio { .. } => format!("{base}/v1beta/models/{model}:{verb}"),
+        }
+    }
+
+    fn interactions_url(&self) -> String {
+        let base = self.base_url();
+        match &self.backend {
+            Backend::Vertex {
+                project, location, ..
+            } => format!("{base}/v1beta1/projects/{project}/locations/{location}/interactions"),
+            Backend::Studio { .. } => format!("{base}/v1beta/interactions"),
         }
     }
 
@@ -295,9 +307,10 @@ impl GenAiClient {
 
     /// Generates one image.
     ///
-    /// Gemini image models (`gemini-*-image*`) use `generateContent` with image
-    /// response modalities through the adk-rust client; any other model is
-    /// treated as an Imagen model and called through `:predict`.
+    /// Gemini / Nano Banana image models (`gemini-nano-banana-*`,
+    /// `gemini-*-image*`) use `generateContent` with image response modalities
+    /// through the adk-rust client; any other model is treated as an Imagen
+    /// model and called through `:predict`.
     ///
     /// # Errors
     ///
@@ -307,7 +320,7 @@ impl GenAiClient {
         model: &str,
         prompt: &str,
     ) -> anyhow::Result<GeneratedMedia> {
-        if model.starts_with("gemini") {
+        if model.starts_with("gemini") || model.contains("banana") {
             let config = GenerationConfig {
                 response_modalities: Some(vec!["TEXT".to_string(), "IMAGE".to_string()]),
                 ..GenerationConfig::default()
@@ -359,7 +372,11 @@ impl GenAiClient {
         })
     }
 
-    /// Generates one video with Veo, waiting for the long-running operation.
+    /// Generates one video.
+    ///
+    /// Gemini Omni models (`gemini-omni-*`) use the Interactions API
+    /// (`/interactions` with `Api-Revision: 2026-05-20`); Veo models use
+    /// `:predictLongRunning` and poll the operation until completion.
     ///
     /// # Errors
     ///
@@ -370,6 +387,9 @@ impl GenAiClient {
         model: &str,
         prompt: &str,
     ) -> anyhow::Result<GeneratedMedia> {
+        if model.starts_with("gemini") {
+            return self.generate_video_via_interactions(model, prompt).await;
+        }
         let body =
             json!({ "instances": [{ "prompt": prompt }], "parameters": { "sampleCount": 1 } });
         let started = self
@@ -450,6 +470,118 @@ impl GenAiClient {
         }
     }
 
+    async fn generate_video_via_interactions(
+        &self,
+        model: &str,
+        prompt: &str,
+    ) -> anyhow::Result<GeneratedMedia> {
+        let url = self.interactions_url();
+        let body = json!({
+            "model": model,
+            "input": prompt,
+            "store": false,
+        });
+        let req = self
+            .authed(
+                self.http
+                    .post(&url)
+                    .header("Api-Revision", "2026-05-20")
+                    .timeout(self.poll_timeout)
+                    .json(&body),
+            )
+            .await?;
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("request to {url} failed"))?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            bail!("{url} returned HTTP {status}: {text}");
+        }
+        let interaction: Value =
+            serde_json::from_str(&text).with_context(|| format!("invalid JSON from {url}"))?;
+        if let Some(error) = interaction.get("error") {
+            bail!("Video generation failed: {error}");
+        }
+        if interaction.get("status").and_then(Value::as_str) == Some("failed") {
+            bail!("Video generation failed: {interaction}");
+        }
+
+        let video_block = interaction
+            .get("steps")
+            .and_then(Value::as_array)
+            .and_then(|steps| {
+                steps
+                    .iter()
+                    .rev()
+                    .filter(|s| {
+                        s.get("type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("model_output")
+                            == "model_output"
+                    })
+                    .filter_map(|s| s.get("content").and_then(Value::as_array))
+                    .flatten()
+                    .find(|c| c.get("type").and_then(Value::as_str) == Some("video"))
+            })
+            .or_else(|| {
+                interaction
+                    .get("outputs")
+                    .and_then(Value::as_array)
+                    .and_then(|outputs| {
+                        outputs
+                            .iter()
+                            .rev()
+                            .find(|c| c.get("type").and_then(Value::as_str) == Some("video"))
+                    })
+            })
+            .context("Video generation failed: No videos generated.")?;
+
+        let mime_type = video_block
+            .get("mime_type")
+            .or_else(|| video_block.get("mimeType"))
+            .and_then(Value::as_str)
+            .unwrap_or("video/mp4")
+            .to_string();
+        if let Some(b64) = video_block.get("data").and_then(Value::as_str) {
+            if b64.is_empty() {
+                bail!("Video generation failed: Empty video content.");
+            }
+            return Ok(GeneratedMedia {
+                mime_type,
+                data: BASE64.decode(b64).context("invalid base64 video data")?,
+            });
+        }
+        if let Some(uri) = video_block.get("uri").and_then(Value::as_str) {
+            return self.download_video_uri(uri, &mime_type).await;
+        }
+        bail!("Video generation failed: Missing video data.")
+    }
+
+    async fn download_video_uri(
+        &self,
+        uri: &str,
+        fallback_mime: &str,
+    ) -> anyhow::Result<GeneratedMedia> {
+        let req = self.authed(self.http.get(uri)).await?;
+        let resp = req.send().await?;
+        if !resp.status().is_success() {
+            bail!("Downloading generated video failed: HTTP {}", resp.status());
+        }
+        let mime_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(fallback_mime)
+            .to_string();
+        let data = resp.bytes().await?.to_vec();
+        if data.is_empty() {
+            bail!("Video generation failed: Empty video content.");
+        }
+        Ok(GeneratedMedia { mime_type, data })
+    }
+
     async fn extract_video(&self, response: &Value) -> anyhow::Result<GeneratedMedia> {
         // Vertex AI shape.
         if let Some(video) = response
@@ -488,22 +620,7 @@ impl GenAiClient {
                 .pointer("/video/uri")
                 .and_then(Value::as_str)
                 .context("Video generation failed: Missing video data.")?;
-            let req = self.authed(self.http.get(uri)).await?;
-            let resp = req.send().await?;
-            if !resp.status().is_success() {
-                bail!("Downloading generated video failed: HTTP {}", resp.status());
-            }
-            let mime_type = resp
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("video/mp4")
-                .to_string();
-            let data = resp.bytes().await?.to_vec();
-            if data.is_empty() {
-                bail!("Video generation failed: Empty video content.");
-            }
-            return Ok(GeneratedMedia { mime_type, data });
+            return self.download_video_uri(uri, "video/mp4").await;
         }
         if response
             .get("raiMediaFilteredCount")
@@ -612,21 +729,33 @@ mod tests {
             global.model_url("imagen-4.0-generate-001", "predict"),
             "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models/imagen-4.0-generate-001:predict"
         );
+        assert_eq!(
+            global.interactions_url(),
+            "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/interactions"
+        );
         let regional = GenAiClient::vertex("p", "us-central1", provider);
         assert_eq!(
             regional.model_url("veo-3.1-fast-generate-001", "predictLongRunning"),
             "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/veo-3.1-fast-generate-001:predictLongRunning"
+        );
+        assert_eq!(
+            regional.interactions_url(),
+            "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/p/locations/us-central1/interactions"
         );
         let studio = GenAiClient::studio("key");
         assert_eq!(
             studio.model_url("veo-3.1-fast-generate-001", "predictLongRunning"),
             "https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-fast-generate-001:predictLongRunning"
         );
+        assert_eq!(
+            studio.interactions_url(),
+            "https://generativelanguage.googleapis.com/v1beta/interactions"
+        );
     }
 
     #[test]
     fn builds_gemini_clients_for_studio_backend() {
         let client = GenAiClient::studio("key");
-        assert!(client.gemini("gemini-3.8-flash").is_ok());
+        assert!(client.gemini("gemini-4-hydrogen").is_ok());
     }
 }

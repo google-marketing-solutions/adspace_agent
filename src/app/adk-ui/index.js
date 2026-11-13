@@ -357,3 +357,307 @@ export const createStandaloneCard = ({ title, description, headerRight, flushBod
 
   return { card, body };
 };
+
+export const inferArtifactKind = (filename, mimeType = "") => {
+  const lower = String(filename || "").toLowerCase();
+  const mime = String(mimeType || "").toLowerCase();
+  if (
+    mime.startsWith("image/") ||
+    /\.(?:png|jpe?g|webp|gif|svg|avif|bmp)$/i.test(lower)
+  ) {
+    return { kind: "image", icon: "image", defaultTitle: "Generated Image" };
+  }
+  if (
+    mime.startsWith("video/") ||
+    /\.(?:mp4|webm|mov|m4v|ogv)$/i.test(lower)
+  ) {
+    return { kind: "video", icon: "movie", defaultTitle: "Generated Video" };
+  }
+  if (
+    mime.startsWith("audio/") ||
+    /\.(?:mp3|wav|ogg|m4a|flac|aac)$/i.test(lower)
+  ) {
+    return { kind: "audio", icon: "audio_file", defaultTitle: "Audio Artifact" };
+  }
+  return { kind: "file", icon: "description", defaultTitle: filename || "Artifact" };
+};
+
+export const extractPartArtifact = (part) => {
+  if (!part || typeof part !== "object") return null;
+  const fn = part.functionResponse || part.function_response || null;
+  const toolName = fn?.name || part.name || "";
+  const resp = fn?.response ?? part.response ?? null;
+  if (!resp || typeof resp !== "object") return null;
+
+  if (
+    typeof resp.filename === "string" &&
+    resp.filename.trim() !== "" &&
+    (!resp.status || String(resp.status).toUpperCase() === "SUCCESS")
+  ) {
+    const filename = resp.filename.trim();
+    const inferred = inferArtifactKind(filename, resp.mime_type || resp.mimeType);
+    const title =
+      toolName === "generate_image"
+        ? "Generated Image"
+        : toolName === "generate_video"
+          ? "Generated Video"
+          : inferred.defaultTitle;
+    return {
+      filename,
+      kind: inferred.kind,
+      icon: inferred.icon,
+      title,
+      toolName,
+      message: typeof resp.message === "string" ? resp.message : null,
+      mimeType: resp.mime_type || resp.mimeType || null,
+    };
+  }
+
+  if (typeof resp.saved_to_artifact === "string" && resp.saved_to_artifact.trim() !== "") {
+    const filename = resp.saved_to_artifact.trim();
+    const inferred = inferArtifactKind(filename, resp.mime_type || resp.mimeType);
+    return {
+      filename,
+      kind: inferred.kind,
+      icon: inferred.icon,
+      title: filename,
+      toolName,
+      mimeType: resp.mime_type || resp.mimeType || null,
+      bytes: typeof resp.bytes === "number" ? resp.bytes : null,
+      preview: typeof resp.preview === "string" ? resp.preview : null,
+    };
+  }
+
+  return null;
+};
+
+const createArtifactHeaderAction = ({ href, label, iconName, download = null }) => {
+  const a = document.createElement("a");
+  a.href = href;
+  if (download) {
+    a.download = download;
+  } else {
+    a.target = "_blank";
+    a.rel = "noreferrer";
+  }
+  a.className = "quiet-button artifact-action-link";
+  style(a, {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "6px",
+    padding: "6px 13px",
+    borderRadius: "999px",
+    border: "1px solid var(--dm-outline)",
+    background: "var(--dm-surface-gray)",
+    color: "var(--dm-text-primary)",
+    fontSize: "12.5px",
+    fontWeight: "500",
+    textDecoration: "none",
+    whiteSpace: "nowrap",
+  });
+  const icon = document.createElement("span");
+  icon.className = "google-symbols";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = iconName;
+  style(icon, { fontSize: "15px" });
+  const text = document.createElement("span");
+  text.textContent = label;
+  a.append(icon, text);
+  return a;
+};
+
+export const buildArtifactSurfaceCard = (art, url) => {
+  const toolbar = document.createElement("div");
+  style(toolbar, {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    flexWrap: "wrap",
+    flexShrink: "0",
+  });
+  if (url) {
+    toolbar.append(
+      createArtifactHeaderAction({
+        href: url,
+        label: "Open",
+        iconName: "open_in_new",
+      }),
+      createArtifactHeaderAction({
+        href: url,
+        label: "Download",
+        iconName: "download",
+        download: art.filename,
+      })
+    );
+  }
+
+  const descParts = [];
+  if (art.filename && art.filename !== art.title) descParts.push(art.filename);
+  if (art.mimeType) descParts.push(art.mimeType);
+  if (typeof art.bytes === "number" && Number.isFinite(art.bytes)) {
+    descParts.push(`${(art.bytes / 1024).toFixed(1)} KB`);
+  }
+
+  const { card, body } = createStandaloneCard({
+    title: art.title || art.filename || "Artifact",
+    description: descParts.join(" · ") || null,
+    headerRight: toolbar.childNodes.length ? toolbar : null,
+  });
+
+  if (art.kind === "image" && url) {
+    const frame = document.createElement("div");
+    frame.className = "artifact-media-frame";
+    style(frame, {
+      position: "relative",
+      width: "100%",
+      borderRadius: "16px",
+      overflow: "hidden",
+      border: "1px solid var(--dm-outline)",
+      background: "var(--dm-surface-gray)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      minHeight: "180px",
+    });
+
+    const link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.title = `Open ${art.filename} in new tab`;
+    style(link, {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      width: "100%",
+    });
+
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = art.filename || art.title || "Generated image";
+    img.loading = "lazy";
+    img.className = "artifact-media-img";
+    style(img, {
+      display: "block",
+      maxWidth: "100%",
+      maxHeight: "640px",
+      width: "auto",
+      height: "auto",
+      objectFit: "contain",
+    });
+
+    link.appendChild(img);
+    frame.appendChild(link);
+    body.appendChild(frame);
+  } else if (art.kind === "video" && url) {
+    const frame = document.createElement("div");
+    frame.className = "artifact-media-frame";
+    style(frame, {
+      position: "relative",
+      width: "100%",
+      borderRadius: "16px",
+      overflow: "hidden",
+      border: "1px solid var(--dm-outline)",
+      background: "#000",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+    });
+
+    const video = document.createElement("video");
+    video.src = url;
+    video.controls = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+    video.className = "artifact-media-video";
+    style(video, {
+      display: "block",
+      width: "100%",
+      maxHeight: "640px",
+      objectFit: "contain",
+    });
+
+    frame.appendChild(video);
+    body.appendChild(frame);
+  } else if (art.kind === "audio" && url) {
+    const audio = document.createElement("audio");
+    audio.src = url;
+    audio.controls = true;
+    audio.preload = "metadata";
+    style(audio, { width: "100%" });
+    body.appendChild(audio);
+  } else {
+    if (art.preview) {
+      const pre = document.createElement("pre");
+      pre.className = "artifact-file-preview";
+      pre.textContent = art.preview;
+      style(pre, {
+        margin: "0",
+        padding: "14px",
+        maxHeight: "320px",
+        overflow: "auto",
+        borderRadius: "14px",
+        border: "1px solid var(--dm-outline)",
+        background: "var(--dm-surface-gray)",
+        color: "var(--dm-text-primary)",
+        font: "12px/1.5 var(--mono)",
+      });
+      body.appendChild(pre);
+    }
+    if (url) {
+      const fileRow = document.createElement("a");
+      fileRow.href = url;
+      fileRow.target = "_blank";
+      fileRow.rel = "noreferrer";
+      style(fileRow, {
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: "12px",
+        padding: "12px 16px",
+        borderRadius: "14px",
+        border: "1px solid var(--dm-outline)",
+        background: "var(--dm-surface-gray)",
+        color: "var(--dm-text-primary)",
+        textDecoration: "none",
+        fontSize: "13.5px",
+        fontWeight: "500",
+      });
+      const left = document.createElement("span");
+      style(left, {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "8px",
+        minWidth: "0",
+      });
+      const icon = document.createElement("span");
+      icon.className = "google-symbols";
+      icon.setAttribute("aria-hidden", "true");
+      icon.textContent = art.icon || "description";
+      const nameSpan = document.createElement("code");
+      nameSpan.textContent = art.filename;
+      style(nameSpan, {
+        fontFamily: "var(--mono)",
+        fontSize: "12.5px",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      });
+      left.append(icon, nameSpan);
+      const right = document.createElement("span");
+      right.textContent = "Open artifact ↗";
+      style(right, {
+        fontSize: "12.5px",
+        color: "var(--dm-text-secondary)",
+        flexShrink: "0",
+      });
+      fileRow.append(left, right);
+      body.appendChild(fileRow);
+    }
+  }
+
+  return {
+    title: art.title || art.filename || "Artifact",
+    cards: [card],
+  };
+};

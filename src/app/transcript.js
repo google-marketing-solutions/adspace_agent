@@ -24,8 +24,84 @@ import { animateCounter } from "./usage/counter.js";
 import { cachedEventUsage, isUserEvent, usageGeneration } from "./usage/telemetry.js";
 import { applyPreferences } from "./prefs.js";
 import { showModalOverlay } from "./adk-ui/modal.js";
-import { buildStandaloneCards, classifyUiResponse, extractUiResponse } from "./adk-ui/index.js";
+import {
+  buildArtifactSurfaceCard,
+  buildStandaloneCards,
+  classifyUiResponse,
+  extractPartArtifact,
+  extractUiResponse,
+  inferArtifactKind,
+} from "./adk-ui/index.js";
 import { updateSessionUsageUi } from "./usage/session-usage.js";
+
+const INTERNAL_ARTIFACT_NAMES = new Set(["cm360_campaign_payload.json"]);
+
+export const artifactUrl = (filename) => {
+  if (!filename || typeof filename !== "string") return null;
+  const sessionId = state.activeSession?.id;
+  const userId =
+    state.activeSession?.user_id ||
+    state.activeSession?.userId ||
+    state.currentUser?.id;
+  const appName =
+    state.activeSession?.app_name ||
+    state.activeSession?.appName ||
+    APP_NAME;
+  if (!sessionId || !userId) return null;
+  return `/api/sessions/${encodeURIComponent(appName)}/${encodeURIComponent(userId)}/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(filename)}`;
+};
+
+export const sessionArtifactNames = new Set();
+
+export const resolveArtifactUrl = (candidate) => {
+  if (!candidate || typeof candidate !== "string") return null;
+  const trimmed = candidate.trim();
+  if (!trimmed || INTERNAL_ARTIFACT_NAMES.has(trimmed)) return null;
+  if (
+    sessionArtifactNames.has(trimmed) ||
+    /^generated_(?:image|video)_[0-9a-f]{16,64}\.[a-z0-9]{2,5}$/i.test(trimmed)
+  ) {
+    return artifactUrl(trimmed);
+  }
+  return null;
+};
+
+export const extractEventArtifacts = (ev) => {
+  const out = [];
+  const seen = new Set();
+  const parts = Array.isArray(ev?.content?.parts) ? ev.content.parts : [];
+  for (const part of parts) {
+    const art = extractPartArtifact(part);
+    if (art && !INTERNAL_ARTIFACT_NAMES.has(art.filename) && !seen.has(art.filename)) {
+      seen.add(art.filename);
+      out.push(art);
+    }
+  }
+  const delta = ev?.actions?.artifact_delta || ev?.actions?.artifactDelta;
+  if (delta && typeof delta === "object") {
+    for (const rawName of Object.keys(delta)) {
+      const filename = String(rawName || "").trim();
+      if (!filename || INTERNAL_ARTIFACT_NAMES.has(filename)) continue;
+      sessionArtifactNames.add(filename);
+      if (!isUserEvent(ev) && !seen.has(filename)) {
+        seen.add(filename);
+        const inferred = inferArtifactKind(filename);
+        out.push({
+          filename,
+          kind: inferred.kind,
+          icon: inferred.icon,
+          title: inferred.defaultTitle,
+          toolName: "",
+          mimeType: null,
+        });
+      }
+    }
+  }
+  for (const art of out) {
+    sessionArtifactNames.add(art.filename);
+  }
+  return out;
+};
 
 export const isPlainTextPart = (part) =>
   part &&
@@ -127,6 +203,7 @@ export const rebuildFromSessionEvents = (
   { forceCanvas = false, suppressOverlays = false } = {}
 ) => {
   state.currentEvents = Array.isArray(events) ? events : [];
+  sessionArtifactNames.clear();
   const prevSurfaceIds = state.canvasSurfaces.map((s) => s.id).join("|");
   const existingById = new Map(state.canvasSurfaces.map((s) => [s.id, s]));
   const nextSurfaces = [];
@@ -208,7 +285,46 @@ export const rebuildFromSessionEvents = (
         }
       }
     });
+
+    const eventArtifacts = extractEventArtifacts(ev);
+    eventArtifacts.forEach((art, artIdx) => {
+      const surfaceId = `surface-artifact-${ev.id || idx}-${artIdx}`;
+      const url = artifactUrl(art.filename);
+      const prev = existingById.get(surfaceId);
+      if (prev && prev.artifactUrl === url) {
+        nextSurfaces.push(prev);
+      } else {
+        const built = buildArtifactSurfaceCard(art, url);
+        if (built.cards.length > 0) {
+          nextSurfaces.push({
+            id: surfaceId,
+            title: built.title,
+            icon: art.icon,
+            filename: art.filename,
+            artifactUrl: url,
+            raw: {
+              type: "artifact",
+              filename: art.filename,
+              kind: art.kind,
+              url,
+              toolName: art.toolName || undefined,
+            },
+            cards: built.cards,
+          });
+        }
+      }
+    });
   });
+
+  if (
+    !suppressOverlays &&
+    prefs.canvasMode === "focused" &&
+    nextSurfaces.length > 0 &&
+    nextSurfaces.some((s) => !existingById.has(s.id))
+  ) {
+    state.activeSurfaceId = nextSurfaces[nextSurfaces.length - 1].id;
+  }
+
   state.canvasSurfaces = nextSurfaces;
   overlayTriggersById = nextOverlays;
   const nextSurfaceIds = state.canvasSurfaces.map((s) => s.id).join("|");
@@ -432,8 +548,9 @@ export const updateMessageArticle = (
       textEl.className = "message-text adk-ui-md";
       article.prepend(textEl);
     }
-    if (textEl._renderedText !== textContent) {
-      textEl._renderedText = textContent;
+    const renderKey = `${textContent}\u0000${sessionArtifactNames.size}`;
+    if (textEl._renderedText !== renderKey) {
+      textEl._renderedText = renderKey;
       const parsedUiEvent = isUser ? parseUiEventMessage(textContent) : null;
       if (parsedUiEvent) {
         article.classList.add("message-ui-event");
@@ -446,7 +563,7 @@ export const updateMessageArticle = (
           textEl.textContent = textContent;
         } else {
           textEl.replaceChildren();
-          parseMarkdownBlocksInto(textEl, textContent);
+          parseMarkdownBlocksInto(textEl, textContent, { resolveArtifactUrl });
         }
       }
     }
@@ -531,7 +648,57 @@ export const updateMessageCol = (col, item) => {
         summary.textContent = isResp ? `Result · ${name}` : `Tool · ${name}`;
         const pre = document.createElement("pre");
         pre.textContent = JSON.stringify(tp, null, 2);
-        details.append(summary, pre);
+        const art = extractPartArtifact(tp);
+        const artUrl = art ? artifactUrl(art.filename) : null;
+        if (art && artUrl) {
+          const artBar = document.createElement("div");
+          artBar.className = "tool-call-artifact";
+
+          const nameLink = document.createElement("a");
+          nameLink.className = "tool-call-artifact-name";
+          nameLink.href = artUrl;
+          nameLink.target = "_blank";
+          nameLink.rel = "noreferrer";
+          const icon = document.createElement("span");
+          icon.className = "google-symbols";
+          icon.setAttribute("aria-hidden", "true");
+          icon.textContent = art.icon || "description";
+          const code = document.createElement("code");
+          code.textContent = art.filename;
+          nameLink.append(icon, code);
+
+          const actions = document.createElement("div");
+          actions.className = "tool-call-artifact-actions";
+
+          const matchingSurface = state.canvasSurfaces.find((s) => s.filename === art.filename);
+          if (matchingSurface) {
+            const canvasBtn = document.createElement("button");
+            canvasBtn.type = "button";
+            canvasBtn.className = "tool-call-artifact-btn";
+            canvasBtn.textContent = "View on Canvas";
+            canvasBtn.addEventListener("click", () => focusSurfaceOnCanvas(matchingSurface.id));
+            actions.appendChild(canvasBtn);
+          }
+
+          const openLink = document.createElement("a");
+          openLink.className = "tool-call-artifact-btn";
+          openLink.href = artUrl;
+          openLink.target = "_blank";
+          openLink.rel = "noreferrer";
+          openLink.textContent = "Open ↗";
+
+          const dlLink = document.createElement("a");
+          dlLink.className = "tool-call-artifact-btn";
+          dlLink.href = artUrl;
+          dlLink.download = art.filename;
+          dlLink.textContent = "Download";
+
+          actions.append(openLink, dlLink);
+          artBar.append(nameLink, actions);
+          details.append(summary, artBar, pre);
+        } else {
+          details.append(summary, pre);
+        }
         if (prevEl) {
           toolGroup.replaceChild(details, prevEl);
         } else {
@@ -545,7 +712,7 @@ export const updateMessageCol = (col, item) => {
   }
 
   // Canvas jump buttons live outside the chat bubble (styled like .cover__buttons)
-  const surfacesSig = item.surfaceRefs.map((s) => s.id).join("|");
+  const surfacesSig = item.surfaceRefs.map((s) => `${s.id}:${s.artifactUrl || ""}`).join("|");
   if (col.dataset.surfacesSig !== surfacesSig) {
     col.dataset.surfacesSig = surfacesSig;
     let btnGroup = col.querySelector(":scope > .chat-canvas-buttons");
@@ -592,6 +759,27 @@ export const updateMessageCol = (col, item) => {
           }
         });
         btnGroup.appendChild(btn);
+
+        if (surf.artifactUrl) {
+          const openBtn = document.createElement("a");
+          openBtn.className = "button button--protected canvas-jump-btn artifact-open-btn";
+          openBtn.href = surf.artifactUrl;
+          openBtn.target = "_blank";
+          openBtn.rel = "noreferrer";
+          openBtn.title = `Open ${surf.filename || surf.title} in new tab`;
+
+          const openIcon = document.createElement("span");
+          openIcon.className = "google-symbols canvas-jump-icon";
+          openIcon.setAttribute("aria-hidden", "true");
+          openIcon.textContent = "open_in_new";
+
+          const openLabel = document.createElement("span");
+          openLabel.className = "button__label canvas-jump-label";
+          openLabel.textContent = surf.filename || "Open";
+
+          openBtn.append(openIcon, openLabel);
+          btnGroup.appendChild(openBtn);
+        }
       }
     }
   }
@@ -620,6 +808,7 @@ export const renderTranscript = () => {
   const surfaceStateStamp = [
     state.canvasSurfaces.length,
     overlayTriggersById.size,
+    sessionArtifactNames.size,
     prefs.showTools ? 1 : 0,
     prefs.showMessageUsage ? 1 : 0,
     prefs.showCost ? 1 : 0,
@@ -681,6 +870,13 @@ export const renderTranscript = () => {
       if ("name" in part || "functionResponse" in part || "function_response" in part) {
         toolParts.push(part);
       }
+    });
+
+    const eventArtifacts = extractEventArtifacts(ev);
+    eventArtifacts.forEach((_, artIdx) => {
+      const surfaceId = `surface-artifact-${ev.id || idx}-${artIdx}`;
+      const found = state.canvasSurfaces.find((s) => s.id === surfaceId);
+      if (found) surfaceRefs.push(found);
     });
 
     const visibleTools = prefs.showTools ? toolParts : [];

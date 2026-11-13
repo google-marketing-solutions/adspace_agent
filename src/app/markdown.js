@@ -14,58 +14,116 @@
 
 // Lightweight Markdown → DOM rendering for transcript text (pure DOM builders, no app state).
 
-export const appendInlineWithCodeTable = (parent, text, codes) => {
+const appendPlainTextWithArtifacts = (parent, textSlice, options = {}) => {
+  if (!textSlice) return;
+  const resolve = options?.resolveArtifactUrl;
+  if (typeof resolve !== "function") {
+    parent.appendChild(document.createTextNode(textSlice));
+    return;
+  }
+  const fileRe = /\b([A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9]{2,8})\b/g;
+  let last = 0;
+  let m;
+  while ((m = fileRe.exec(textSlice)) !== null) {
+    const candidate = m[1];
+    const href = resolve(candidate);
+    if (!href) continue;
+    if (m.index > last) {
+      parent.appendChild(document.createTextNode(textSlice.slice(last, m.index)));
+    }
+    const a = document.createElement("a");
+    a.className = "artifact-inline-link";
+    a.href = href;
+    a.target = "_blank";
+    a.rel = "noreferrer";
+    a.textContent = candidate;
+    parent.appendChild(a);
+    last = fileRe.lastIndex;
+  }
+  if (last < textSlice.length) {
+    parent.appendChild(document.createTextNode(textSlice.slice(last)));
+  }
+};
+
+export const appendInlineWithCodeTable = (parent, text, codes, options = {}) => {
   if (!text) return;
   // NUL is used as a sentinel around masked inline-code tokens (see
   // `appendInlineMarkdown`); it cannot appear in real message text.
   const tokenRegex =
     // eslint-disable-next-line no-control-regex
-    /(\u0000CODE(\d+)\u0000|\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+|\/(?!\/)[^\s)]*)\)|\*\*\*([\s\S]+?)\*\*\*|\*\*([\s\S]+?)\*\*|__(?=\S)([\s\S]*?\S)__|~~([\s\S]+?)~~|(?<!\*)\*(?=\S)([\s\S]*?\S)\*(?!\*)|(?<![a-zA-Z0-9_])_(?=\S)([\s\S]*?\S)_(?![a-zA-Z0-9_]))/g;
+    /(\u0000CODE(\d+)\u0000|\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+|\/(?!\/)[^\s)]*|[A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9]{2,8})\)|\*\*\*([\s\S]+?)\*\*\*|\*\*([\s\S]+?)\*\*|__(?=\S)([\s\S]*?\S)__|~~([\s\S]+?)~~|(?<!\*)\*(?=\S)([\s\S]*?\S)\*(?!\*)|(?<![a-zA-Z0-9_])_(?=\S)([\s\S]*?\S)_(?![a-zA-Z0-9_]))/g;
 
   let lastIdx = 0;
   let match;
   while ((match = tokenRegex.exec(text)) !== null) {
     if (match.index > lastIdx) {
-      parent.appendChild(document.createTextNode(text.slice(lastIdx, match.index)));
+      appendPlainTextWithArtifacts(parent, text.slice(lastIdx, match.index), options);
     }
     if (match[2] !== undefined) {
+      const codeText = codes[Number(match[2])] ?? "";
       const code = document.createElement("code");
-      code.textContent = codes[Number(match[2])] ?? "";
-      parent.appendChild(code);
+      code.textContent = codeText;
+      const artifactHref =
+        typeof options?.resolveArtifactUrl === "function"
+          ? options.resolveArtifactUrl(codeText.trim())
+          : null;
+      if (artifactHref) {
+        const a = document.createElement("a");
+        a.className = "artifact-inline-link";
+        a.href = artifactHref;
+        a.target = "_blank";
+        a.rel = "noreferrer";
+        a.appendChild(code);
+        parent.appendChild(a);
+      } else {
+        parent.appendChild(code);
+      }
     } else if (match[3] !== undefined && match[4] !== undefined) {
-      const a = document.createElement("a");
-      appendInlineWithCodeTable(a, match[3], codes);
-      a.href = match[4];
-      a.target = "_blank";
-      a.rel = "noreferrer";
-      parent.appendChild(a);
+      const rawHref = match[4];
+      const safeHref = /^(?:https?:\/\/|mailto:|\/(?!\/))/i.test(rawHref)
+        ? rawHref
+        : typeof options?.resolveArtifactUrl === "function"
+          ? options.resolveArtifactUrl(rawHref)
+          : null;
+      if (safeHref) {
+        const a = document.createElement("a");
+        appendInlineWithCodeTable(a, match[3], codes, options);
+        a.href = safeHref;
+        a.target = "_blank";
+        a.rel = "noreferrer";
+        parent.appendChild(a);
+      } else {
+        parent.appendChild(document.createTextNode("["));
+        appendInlineWithCodeTable(parent, match[3], codes, options);
+        parent.appendChild(document.createTextNode(`](${rawHref})`));
+      }
     } else if (match[5] !== undefined) {
       const strong = document.createElement("strong");
       const em = document.createElement("em");
-      appendInlineWithCodeTable(em, match[5], codes);
+      appendInlineWithCodeTable(em, match[5], codes, options);
       strong.appendChild(em);
       parent.appendChild(strong);
     } else if (match[6] !== undefined || match[7] !== undefined) {
       const strong = document.createElement("strong");
-      appendInlineWithCodeTable(strong, match[6] ?? match[7], codes);
+      appendInlineWithCodeTable(strong, match[6] ?? match[7], codes, options);
       parent.appendChild(strong);
     } else if (match[8] !== undefined) {
       const del = document.createElement("del");
-      appendInlineWithCodeTable(del, match[8], codes);
+      appendInlineWithCodeTable(del, match[8], codes, options);
       parent.appendChild(del);
     } else if (match[9] !== undefined || match[10] !== undefined) {
       const em = document.createElement("em");
-      appendInlineWithCodeTable(em, match[9] ?? match[10], codes);
+      appendInlineWithCodeTable(em, match[9] ?? match[10], codes, options);
       parent.appendChild(em);
     }
     lastIdx = tokenRegex.lastIndex;
   }
   if (lastIdx < text.length) {
-    parent.appendChild(document.createTextNode(text.slice(lastIdx)));
+    appendPlainTextWithArtifacts(parent, text.slice(lastIdx), options);
   }
 };
 
-export const appendInlineMarkdown = (parent, rawText) => {
+export const appendInlineMarkdown = (parent, rawText, options = {}) => {
   const str = String(rawText ?? "");
   if (!str) return;
   const codes = [];
@@ -74,7 +132,7 @@ export const appendInlineMarkdown = (parent, rawText) => {
     codes.push(codeContent);
     return `\u0000CODE${idx}\u0000`;
   });
-  appendInlineWithCodeTable(parent, masked, codes);
+  appendInlineWithCodeTable(parent, masked, codes, options);
 };
 
 export const isHrLine = (line) => /^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line);
@@ -96,7 +154,7 @@ export const splitTableCells = (line) => {
   return trimmed.split("|").map((c) => c.trim());
 };
 
-export const parseMarkdownBlocksInto = (container, text) => {
+export const parseMarkdownBlocksInto = (container, text, options = {}) => {
   const lines = String(text || "")
     .replace(/\r\n/g, "\n")
     .split("\n");
@@ -154,7 +212,7 @@ export const parseMarkdownBlocksInto = (container, text) => {
           break;
         }
         const li = document.createElement("li");
-        appendInlineMarkdown(li, itemMatch[3]);
+        appendInlineMarkdown(li, itemMatch[3], options);
         listEl.appendChild(li);
         lastLi = li;
         i++;
@@ -164,7 +222,7 @@ export const parseMarkdownBlocksInto = (container, text) => {
       const contIndent = line.match(/^(\s*)/)[1].replace(/\t/g, "  ").length;
       if (lastLi && contIndent > baseIndent) {
         lastLi.appendChild(document.createElement("br"));
-        appendInlineMarkdown(lastLi, line.trim());
+        appendInlineMarkdown(lastLi, line.trim(), options);
         i++;
         continue;
       }
@@ -216,7 +274,7 @@ export const parseMarkdownBlocksInto = (container, text) => {
     if (headingMatch) {
       const level = Math.min(4, headingMatch[1].length);
       const h = document.createElement(`h${level}`);
-      appendInlineMarkdown(h, headingMatch[2]);
+      appendInlineMarkdown(h, headingMatch[2], options);
       container.appendChild(h);
       i++;
       continue;
@@ -230,7 +288,7 @@ export const parseMarkdownBlocksInto = (container, text) => {
         i++;
       }
       const bq = document.createElement("blockquote");
-      parseMarkdownBlocksInto(bq, quoteLines.join("\n"));
+      parseMarkdownBlocksInto(bq, quoteLines.join("\n"), options);
       container.appendChild(bq);
       continue;
     }
@@ -244,7 +302,7 @@ export const parseMarkdownBlocksInto = (container, text) => {
       const trHead = document.createElement("tr");
       for (const hCell of headers) {
         const th = document.createElement("th");
-        appendInlineMarkdown(th, hCell);
+        appendInlineMarkdown(th, hCell, options);
         trHead.appendChild(th);
       }
       thead.appendChild(trHead);
@@ -254,7 +312,7 @@ export const parseMarkdownBlocksInto = (container, text) => {
         const tr = document.createElement("tr");
         headers.forEach((_, colIdx) => {
           const td = document.createElement("td");
-          appendInlineMarkdown(td, cells[colIdx] ?? "");
+          appendInlineMarkdown(td, cells[colIdx] ?? "", options);
           tr.appendChild(td);
         });
         tbody.appendChild(tr);
@@ -291,7 +349,7 @@ export const parseMarkdownBlocksInto = (container, text) => {
       const p = document.createElement("p");
       paraLines.forEach((pLine, idx) => {
         if (idx > 0) p.appendChild(document.createElement("br"));
-        appendInlineMarkdown(p, pLine);
+        appendInlineMarkdown(p, pLine, options);
       });
       container.appendChild(p);
     }

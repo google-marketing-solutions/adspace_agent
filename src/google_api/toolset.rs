@@ -284,9 +284,12 @@ impl GoogleApiTool {
                             "{} {} returned more than {limit} bytes, which is too much to hand to the model.",
                             prepared.method, prepared.url
                         ),
-                        "hint": "Narrow the request: ask for fewer results (pageSize / maxResults), \
-                                 restrict the returned fields with the `fields` parameter, add a \
-                                 filter, or page through the results.",
+                        "hint": "Narrow the request. If it takes a query (GAQL, a report \
+                                 definition), select fewer columns and add a filter or a LIMIT \
+                                 clause there. Otherwise add a filter, restrict the returned \
+                                 fields with the `fields` parameter, or ask for fewer results per \
+                                 page (pageSize / maxResults) where the method accepts it; some, \
+                                 such as Google Ads search, do not.",
                     }
                 }));
             }

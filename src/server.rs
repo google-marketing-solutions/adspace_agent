@@ -1273,6 +1273,21 @@ fn launcher(runtime: &AgentRuntime) -> Launcher {
     l
 }
 
+/// What the compression layer compresses: tower-http's default (which already
+/// skips images, gRPC, event streams and tiny bodies) minus the artifact
+/// downloads that are compressed already, where gzip only costs CPU and drops
+/// `Content-Length`.
+fn compressible() -> impl tower_http::compression::predicate::Predicate {
+    use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate as _};
+    DefaultPredicate::new()
+        .and(NotForContentType::new("video/"))
+        .and(NotForContentType::new("audio/"))
+        .and(NotForContentType::new("application/pdf"))
+        .and(NotForContentType::new("application/zip"))
+        .and(NotForContentType::new("application/gzip"))
+        .and(NotForContentType::new("application/octet-stream"))
+}
+
 /// Assembles the HTTP application: adk-server's routes (authenticated through
 /// [`CookieIdentityExtractor`]), the OAuth / studio routes, the `/ui/` helper
 /// injection, [`guard_adk_routes`], and HTTP response compression.
@@ -1292,7 +1307,7 @@ pub fn build_app(launcher: Launcher, routes: OAuthRoutes) -> anyhow::Result<Rout
             (credentials, admins),
             guard_adk_routes,
         ))
-        .layer(tower_http::compression::CompressionLayer::new());
+        .layer(tower_http::compression::CompressionLayer::new().compress_when(compressible()));
     Ok(app)
 }
 

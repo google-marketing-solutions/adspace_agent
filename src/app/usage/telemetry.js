@@ -196,6 +196,7 @@ export const extractEventUsage = (ev) => {
 let usageCache = new WeakMap();
 let usageCacheSig = "";
 let usageCacheServerPricing = null;
+let usageCacheGeneration = 0;
 
 export const syncUsageCache = () => {
   const sig = `${prefs.model}|${prefs.pricingTier || "standard"}|${JSON.stringify(
@@ -205,7 +206,16 @@ export const syncUsageCache = () => {
     usageCache = new WeakMap();
     usageCacheSig = sig;
     usageCacheServerPricing = state.serverModelPricing;
+    usageCacheGeneration += 1;
   }
+};
+
+// Changes whenever the pricing inputs do (model, tier, custom or server
+// rates), so callers that memoise anything derived from `cachedEventUsage`
+// can tell their copy is stale.
+export const usageGeneration = () => {
+  syncUsageCache();
+  return usageCacheGeneration;
 };
 
 export const cachedEventUsage = (ev) => {

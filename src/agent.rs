@@ -80,9 +80,71 @@ use `render_chart` (bar/line/area/pie), `render_table` (with `sortable: true` an
 followed by a concise written takeaway (never dump raw component JSON in text). Use `render_form` when collecting structured \
 campaign parameters or missing IDs, and `render_confirm` / `render_card` before executing write/trafficking actions.";
 
+/// Builds the routing part of the instruction from the tool collections this
+/// process actually loaded, so the text names nothing that is not configured.
+///
+/// `loaded` are the data collections whose tools are on every request and
+/// `on_demand` the ones the model can load later; both are the names used by
+/// `ENABLED_TOOLSETS`, described by [`config::toolset_summary`]. Without this
+/// the model tends to survey what it has (listing skills, files and BigQuery
+/// datasets) before answering, and to look for ads data in BigQuery.
+pub fn routing_instruction(loaded: &[String], on_demand: &[String]) -> String {
+    let mut text = String::from(
+        "DIRECT ANSWERS: act on the request with the tool that answers it. What you can use is \
+         described in your tool list and in the lists you are given, so do not call listing tools \
+         only to see what is available before you start. \
+         DATA SOURCES: answer a question about a platform from that platform's own tool collection. \
+         If you need an account or customer ID you do not have, ask the user for it; do not search \
+         other sources for it. If the user does not name a platform and it cannot be inferred, ask \
+         which one they mean.",
+    );
+    if !loaded.is_empty() {
+        let described: Vec<String> = loaded
+            .iter()
+            .map(|name| {
+                let summary = config::toolset_summary(name).trim_end_matches('.');
+                format!("`{name}` ({summary})")
+            })
+            .collect();
+        text.push_str(&format!(
+            " Collections loaded now: {}.",
+            described.join("; ")
+        ));
+    }
+    if !on_demand.is_empty() {
+        text.push_str(
+            " Further collections can be loaded on demand; they are listed in the description of \
+             the tool that loads them.",
+        );
+    }
+    let mut stores: Vec<&str> = Vec::new();
+    for name in loaded.iter().chain(on_demand) {
+        let base = name
+            .strip_suffix(config::LAZY_WRITE_TIER_SUFFIX)
+            .unwrap_or(name);
+        if config::is_general_purpose_store(base) && !stores.contains(&base) {
+            stores.push(base);
+        }
+    }
+    if !stores.is_empty() {
+        let names: Vec<String> = stores.iter().map(|s| format!("`{s}`")).collect();
+        text.push_str(&format!(
+            " General-purpose data stores ({}) are not ads platforms: use one only when the user \
+             asks for it by name or refers to something kept in it, and never search one for a \
+             platform's data or for account IDs.",
+            names.join(", ")
+        ));
+    }
+    text
+}
+
 /// Upper bound on distinct *custom* (non-preset) model names interned per
 /// process; see [`intern_model_name`].
 const MAX_INTERNED_MODEL_NAMES: usize = 256;
+
+/// Custom model names interned so far; see [`intern_model_name`].
+static INTERNED_MODEL_NAMES: std::sync::LazyLock<Mutex<HashSet<&'static str>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Returns a `'static` copy of `name` for [`RuntimeModelConfig`]'s active name.
 ///
@@ -99,9 +161,9 @@ fn intern_model_name(name: &str) -> Option<&'static str> {
     {
         return Some(preset);
     }
-    static INTERNED: std::sync::LazyLock<Mutex<HashSet<&'static str>>> =
-        std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
-    let mut set = INTERNED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut set = INTERNED_MODEL_NAMES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(&existing) = set.get(name) {
         return Some(existing);
     }
@@ -723,7 +785,13 @@ impl AgentRuntime {
         let fast_thinking = config::ThinkingSettings::default();
         match build_gemini_model_with_thinking(&summarizer_name, &fast_thinking) {
             Ok(model) => Arc::new(model),
-            Err(_) => self.models.clone(),
+            Err(e) => {
+                tracing::warn!(
+                    "Summarizer model {summarizer_name:?} is unavailable ({e:#}); \
+                     summarizing with the active model instead"
+                );
+                self.models.clone()
+            }
         }
     }
 
@@ -739,6 +807,11 @@ impl AgentRuntime {
 
     /// Intra-invocation compaction configuration (`COMPACTION_TOKEN_THRESHOLD`
     /// and `COMPACTION_EVENT_RETENTION_SIZE`).
+    ///
+    /// Only [`AgentRuntime::turn_runner`] carries it, so it applies to the turn
+    /// resumed after an OAuth grant and not to normal chat turns: adk-server
+    /// 2.3.0's request runners take no intra-compaction setting. The runner
+    /// checks it once, before the agent starts, not between tool calls.
     pub fn intra_compaction_config(
         &self,
     ) -> (
@@ -760,9 +833,14 @@ impl AgentRuntime {
     /// disabling explicit `CachedContent` creation unless opted in).
     pub fn context_cache_config(&self) -> ContextCacheConfig {
         ContextCacheConfig {
-            min_tokens: config::env_u64_or("CONTEXT_CACHE_MIN_TOKENS", 0) as u32,
-            ttl_seconds: config::env_u64_or("CONTEXT_CACHE_TTL_SECONDS", 600) as u32,
-            cache_intervals: config::env_u64_or("CONTEXT_CACHE_INTERVALS", 5) as u32,
+            // Clamp rather than cast: a value of 2^32 would otherwise wrap to 0
+            // and silently switch the cache off.
+            min_tokens: config::env_u64_or("CONTEXT_CACHE_MIN_TOKENS", 0).min(u32::MAX as u64)
+                as u32,
+            ttl_seconds: config::env_u64_or("CONTEXT_CACHE_TTL_SECONDS", 600).min(u32::MAX as u64)
+                as u32,
+            cache_intervals: config::env_u64_or("CONTEXT_CACHE_INTERVALS", 5).min(u32::MAX as u64)
+                as u32,
         }
     }
 
@@ -1290,6 +1368,8 @@ pub async fn create_agent(
         }
     }
 
+    // Data collections whose tools are on every request, for the instruction.
+    let mut loaded: Vec<String> = Vec::new();
     let mut deferred: Vec<LazyToolsetEntry> = Vec::new();
     let mut lazy: Vec<Arc<dyn Toolset>> = Vec::new();
     let mut defer_api = |toolset: GoogleApiToolset, summary: String| {
@@ -1303,6 +1383,7 @@ pub async fn create_agent(
     };
     for toolset in load_google_api_toolsets(settings, &credentials).await {
         if !settings.lazy_toolsets.iter().any(|n| n == toolset.name()) {
+            loaded.push(toolset.name().to_string());
             toolsets.push(Arc::new(toolset));
             continue;
         }
@@ -1345,6 +1426,7 @@ pub async fn create_agent(
             });
             lazy.push(bq);
         } else {
+            loaded.push("bigquery".to_string());
             toolsets.push(bq);
         }
     }
@@ -1367,6 +1449,7 @@ pub async fn create_agent(
                     });
                     lazy.push(genai_ts);
                 } else {
+                    loaded.push("google_genai".to_string());
                     toolsets.push(genai_ts);
                 }
             }
@@ -1377,6 +1460,11 @@ pub async fn create_agent(
     for toolset in lazy {
         toolsets.push(Arc::new(LazyToolset::new(toolset)));
     }
+    let on_demand: Vec<String> = deferred.iter().map(|d| d.name.clone()).collect();
+    let instruction = format!(
+        "{AGENT_INSTRUCTION} {}",
+        routing_instruction(&loaded, &on_demand)
+    );
     if !deferred.is_empty() {
         tracing::info!(
             "Deferred toolsets (loaded on demand via enable_toolsets): {}",
@@ -1405,7 +1493,7 @@ pub async fn create_agent(
 
     let mut builder = LlmAgentBuilder::new(APP_NAME)
         .description(AGENT_DESCRIPTION)
-        .instruction(AGENT_INSTRUCTION)
+        .instruction(instruction)
         .model(model)
         .tool_execution_strategy(ToolExecutionStrategy::Auto)
         .before_callback(save_uploaded_files_callback())
@@ -1611,6 +1699,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn routing_instruction_is_built_from_the_loaded_collections() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        let text = routing_instruction(
+            &names(&["google_ads", "bigquery"]),
+            &names(&["drive", "drive_write", "display_video_360"]),
+        );
+        // Each loaded collection appears with its registry summary.
+        assert!(
+            text.contains(&format!(
+                "`google_ads` ({})",
+                config::toolset_summary("google_ads").trim_end_matches('.')
+            )),
+            "{text}"
+        );
+        assert!(text.contains("`bigquery` ("), "{text}");
+        assert!(text.contains("loaded on demand"), "{text}");
+        // Stores are named once each, whether loaded or on demand; write
+        // tiers and platforms are not.
+        assert!(
+            text.contains(
+                "General-purpose data stores (`bigquery`, `drive`) are not ads platforms"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("drive_write"), "{text}");
+
+        // No store configured: no sentence about stores.
+        let platforms_only = routing_instruction(&names(&["google_ads"]), &[]);
+        assert!(
+            !platforms_only.contains("General-purpose"),
+            "{platforms_only}"
+        );
+        assert!(!platforms_only.contains("on demand"), "{platforms_only}");
+
+        // Nothing configured: the general rules remain and name no collection.
+        let bare = routing_instruction(&[], &[]);
+        assert!(bare.starts_with("DIRECT ANSWERS:"), "{bare}");
+        assert!(!bare.contains("Collections loaded now"), "{bare}");
+        assert!(!bare.contains('`'), "{bare}");
+    }
+
+    #[test]
     fn toolset_configs_follow_enabled_toolsets() {
         let mut settings = Settings {
             model: "m".into(),
@@ -1668,13 +1799,16 @@ mod tests {
 
     #[test]
     fn model_name_interning_reuses_presets_and_dedupes_custom_names() {
-        // Preset names come straight from the constants: no allocation at all.
-        let preset = intern_model_name(PRESET_MODELS[0]).expect("preset interns");
-        assert!(std::ptr::eq(preset, PRESET_MODELS[0]));
-        assert!(std::ptr::eq(
-            intern_model_name(DEFAULT_MODEL).expect("default interns"),
-            DEFAULT_MODEL
-        ));
+        // Preset names are answered from the constants and never enter the
+        // bounded intern table. (Not checked by address: the default is also a
+        // preset, and two equal string constants need not share one.)
+        for name in std::iter::once(&DEFAULT_MODEL).chain(PRESET_MODELS) {
+            assert_eq!(intern_model_name(name), Some(*name));
+            assert!(
+                !INTERNED_MODEL_NAMES.lock().unwrap().contains(*name),
+                "preset {name} was interned as a custom name"
+            );
+        }
 
         // Custom names are interned once and the same pointer handed back.
         let first = intern_model_name("custom-model-intern-test").expect("custom interns");

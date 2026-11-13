@@ -49,7 +49,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=builder /app/target/release/adspace-agent /usr/local/bin/adspace-agent
 COPY assets ./assets
-ENV HOST=0.0.0.0 PORT=8000 RUST_LOG=info
+# RUST_LOG is left unset so the binary's own default filter applies (info, with
+# sqlx / hyper / h2 / reqwest at warn). NO_COLOR keeps terminal colour codes out
+# of Cloud Logging.
+ENV HOST=0.0.0.0 PORT=8000 NO_COLOR=1
 EXPOSE 8000
 ENTRYPOINT ["adspace-agent"]
 CMD ["serve"]

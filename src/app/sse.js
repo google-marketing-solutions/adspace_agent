@@ -26,7 +26,7 @@ import {
   rebuildFromSessionEvents,
   renderTranscript,
 } from "./transcript.js";
-import { apiUrl, renderSessionOptions } from "./sessions.js";
+import { apiUrl, loadSession, renderSessionOptions } from "./sessions.js";
 
 export const renderAttachments = () => {
   els.attachmentChips.replaceChildren();
@@ -237,6 +237,7 @@ export const sendMessage = async (overrideText) => {
       throw new Error(errText || `HTTP ${resp.status}`);
     }
 
+    let sawErrorEvent = false;
     if (resp.body) {
       for await (const dataStr of parseSseStream(resp.body)) {
         if (state.abortController.signal.aborted || state.activeSession?.id !== runSession.id) {
@@ -256,6 +257,7 @@ export const sendMessage = async (overrideText) => {
         const ev = parsed.event ?? parsed;
         if (ev && typeof ev === "object") {
           if (ev.error_message || ev.errorMessage) {
+            sawErrorEvent = true;
             showError(`Agent error: ${ev.error_message || ev.errorMessage}`);
           }
           const existingIdx = state.currentEvents.findIndex((e) => e.id && e.id === ev.id);
@@ -278,14 +280,23 @@ export const sendMessage = async (overrideText) => {
       // Flush final transcript + any non-partial UI overlays immediately.
       flushStreamRender();
     }
-    // Sync the completed turn into the in-memory session record immediately
-    // without blocking the composer on a redundant GET /sessions/{id} round-trip.
     if (!state.abortController.signal.aborted && state.activeSession?.id === runSession.id) {
       announce("Agent replied");
-      runSession.events = state.currentEvents.slice();
-      runSession.lastUpdateTime = Date.now() / 1000;
-      state.sessions = [runSession, ...state.sessions.filter((s) => s.id !== runSession.id)];
-      renderSessionOptions(runSession.id);
+      // The streamed events equal what the server stored only when each one
+      // arrived complete. The server never stores a partial event, so a reply
+      // cut short by an error, or a half-streamed one left by an earlier stop,
+      // is on screen but not in the session: reload to show what is.
+      if (sawErrorEvent || state.currentEvents.some((e) => e?.partial)) {
+        await loadSession(runSession.id);
+      } else {
+        // Otherwise sync the turn into the in-memory session record without
+        // blocking the composer on a redundant GET /sessions/{id} round-trip.
+        runSession.events = state.currentEvents.slice();
+        runSession.lastUpdateTime = Date.now() / 1000;
+      }
+      const latest = state.activeSession?.id === runSession.id ? state.activeSession : runSession;
+      state.sessions = [latest, ...state.sessions.filter((s) => s.id !== latest.id)];
+      renderSessionOptions(latest.id);
     }
   } catch (err) {
     if (err.name !== "AbortError") {

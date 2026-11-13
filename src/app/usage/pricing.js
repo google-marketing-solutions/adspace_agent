@@ -49,10 +49,23 @@ export const ingestServerPricing = (models) => {
 // Base rates for a model. Prefers the table served by the backend (see
 // `ingestServerPricing`); the heuristics below are a fallback that mirrors
 // `config::model_pricing` in src/config.rs rule-for-rule (keep both in sync).
-// Official Paid Tier pricing per 1M tokens (USD) from https://ai.google.dev/gemini-api/docs/pricing
+// Official Paid Tier pricing per 1M tokens (USD) from https://aistudio.google.com/docs/pricing
 export const getFallbackModelPricing = (m) => {
-  if (m.includes("gemini-4") || m.includes("argon")) {
-    // Gemini 4 Argon: $2.00 in, $0.10 cached, $10.00 out
+  if (m.includes("hydrogen")) {
+    // Gemini 4 Hydrogen: $1.50 in, $0.075 cached, $7.50 out
+    return {
+      input: 1.5,
+      inputLong: 1.5,
+      cached: 0.075,
+      cachedLong: 0.075,
+      output: 7.5,
+      outputLong: 7.5,
+      audioIn: 1.5,
+    };
+  }
+  if (m.includes("gemini-4") || m.includes("argon") || m.includes("carbon")) {
+    // Gemini 4 Carbon and Argon, introductory rates through November 30, 2026:
+    // $2.00 in, $0.10 cached, $10.00 out ($4.00 / $0.20 / $20.00 from December 1).
     return {
       input: 2.0,
       inputLong: 2.0,

@@ -541,6 +541,18 @@ impl SkillsToolset {
         self.state.reload().await
     }
 
+    /// What every request is told about skills. The library's own instruction
+    /// says skills must be used when relevant but not which exist, so without
+    /// this the model lists them on every turn to find out.
+    async fn skills_note(&self) -> String {
+        match self.available_skills_block().await {
+            Some(block) => format!(
+                "The following skills are available, and the list is complete, so there is no need to list them again. Load a skill with `load_skill` only when the user's request matches its description:\n{block}"
+            ),
+            None => "No skills are loaded, so there is nothing to list or load.".to_string(),
+        }
+    }
+
     async fn available_skills_block(&self) -> Option<String> {
         let index = self.state.index.read().await;
         if index.is_empty() {
@@ -581,14 +593,10 @@ impl Toolset for SkillsToolset {
     ) -> Result<()> {
         let inner = self.state.inner.read().await.clone();
         inner.process_llm_request(ctx, request).await?;
-        if let Some(block) = self.available_skills_block().await {
-            request.contents.insert(
-                0,
-                adk_rust::Content::new("user").with_text(format!(
-                    "The following skills are available. Load a skill with `load_skill` only when the user's request matches its description:\n{block}"
-                )),
-            );
-        }
+        let note = self.skills_note().await;
+        request
+            .contents
+            .insert(0, adk_rust::Content::new("user").with_text(note));
         Ok(())
     }
 }
@@ -644,6 +652,39 @@ mod tests {
             .collect();
         assert_eq!(generations.len(), 2, "current + previous generation");
         assert_eq!(toolset.state.generations.lock().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn every_request_is_told_which_skills_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("skills");
+        std::fs::create_dir_all(&local).unwrap();
+        let sources = || SkillSources {
+            local_dir: Some(local.clone()),
+            gcs: None,
+            staging_dir: dir.path().join("staging"),
+        };
+
+        // Nothing loaded: say so, so the model does not go and look.
+        let empty = SkillsToolset::load(sources()).await;
+        assert_eq!(
+            empty.skills_note().await,
+            "No skills are loaded, so there is nothing to list or load."
+        );
+
+        std::fs::create_dir_all(local.join("demo-skill")).unwrap();
+        std::fs::write(
+            local.join("demo-skill").join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: Demo skill for tests.\n---\n\nBody\n",
+        )
+        .unwrap();
+        let loaded = SkillsToolset::load(sources()).await;
+        let note = loaded.skills_note().await;
+        assert!(note.contains("the list is complete"), "{note}");
+        assert!(
+            note.contains("- `demo-skill`: Demo skill for tests."),
+            "{note}"
+        );
     }
 
     #[tokio::test]

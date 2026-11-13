@@ -21,7 +21,7 @@ import { formatExactInt, formatUsdShort, initialsOf } from "./format.js";
 import { APP_NAME, els, prefs, state } from "./state.js";
 import { parseMarkdownBlocksInto } from "./markdown.js";
 import { animateCounter } from "./usage/counter.js";
-import { cachedEventUsage, isUserEvent } from "./usage/telemetry.js";
+import { cachedEventUsage, isUserEvent, usageGeneration } from "./usage/telemetry.js";
 import { applyPreferences } from "./prefs.js";
 import { showModalOverlay } from "./adk-ui/modal.js";
 import { buildStandaloneCards, classifyUiResponse, extractUiResponse } from "./adk-ui/index.js";
@@ -614,7 +614,17 @@ export const renderTranscript = () => {
     els.chatTranscript.scrollHeight - els.chatTranscript.scrollTop - els.chatTranscript.clientHeight < 40;
   const stickToBottom = prefs.autoScroll && (nearBottom || isNewSessionView);
   const visibleItems = [];
-  const surfaceStateStamp = `${state.canvasSurfaces.length}:${overlayTriggersById.size}:${prefs.showTools ? 1 : 0}`;
+  // Everything a memoised item, or the row rendered from it, depends on
+  // besides the event itself. The usage prefs and pricing are here because the
+  // row is skipped when its item is unchanged, and the footer reads them.
+  const surfaceStateStamp = [
+    state.canvasSurfaces.length,
+    overlayTriggersById.size,
+    prefs.showTools ? 1 : 0,
+    prefs.showMessageUsage ? 1 : 0,
+    prefs.showCost ? 1 : 0,
+    usageGeneration(),
+  ].join(":");
   const currentUserLabel = state.currentUser?.name || state.currentUser?.email || "You";
 
   state.currentEvents.forEach((ev, idx) => {

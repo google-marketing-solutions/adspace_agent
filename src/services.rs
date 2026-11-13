@@ -198,8 +198,18 @@ pub(crate) async fn open_sqlite_session_service(
     if !is_in_memory {
         connect_opts = connect_opts.journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
     }
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(if is_in_memory { 1 } else { 8 })
+    let mut pool_opts =
+        sqlx::sqlite::SqlitePoolOptions::new().max_connections(if is_in_memory { 1 } else { 8 });
+    if is_in_memory {
+        // An in-memory database lives only as long as its connection, so the
+        // pool must never recycle it (sqlx closes idle connections after 10
+        // minutes and all connections after 30 by default).
+        pool_opts = pool_opts
+            .min_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None);
+    }
+    let pool = pool_opts
         .connect_with(connect_opts)
         .await
         .with_context(|| format!("opening session database {normalized}"))?;
@@ -210,6 +220,10 @@ pub(crate) async fn open_sqlite_session_service(
 /// single writer mutex (preventing SQLite `BEGIN DEFERRED` lock-upgrade
 /// deadlocks), while read operations (`get`, `list`, `get_for_identity`,
 /// `health_check`) execute concurrently without blocking behind in-flight writes.
+///
+/// Reads are not isolated from writes: the inner `get` runs two queries (the
+/// session row, then its events), so a read that overlaps a write can pair the
+/// state from before it with the events from after. The next read is consistent.
 pub struct SerializedSqliteSessionService {
     inner: SqliteSessionService,
     write_lock: Mutex<()>,

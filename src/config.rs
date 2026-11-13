@@ -26,7 +26,7 @@ use thiserror::Error;
 pub const APP_NAME: &str = "adspace_agent";
 
 /// Default Gemini model.
-pub const DEFAULT_MODEL: &str = "gemini-3.8-flash";
+pub const DEFAULT_MODEL: &str = "gemini-4-hydrogen";
 /// Default Veo video generation model.
 pub const DEFAULT_VIDEO_MODEL: &str = "veo-3.1-fast-generate-001";
 /// Default image generation model.
@@ -34,9 +34,11 @@ pub const DEFAULT_IMAGE_MODEL: &str = "gemini-3.1-flash-image";
 
 /// Preset agent LLM models exposed in the Studio settings selector.
 pub const PRESET_MODELS: &[&str] = &[
+    "gemini-4-hydrogen",
+    "gemini-4-carbon",
+    "gemini-4-argon",
     "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
-    "gemini-4-argon",
 ];
 
 /// Preset Veo video generation models exposed in the Studio settings selector.
@@ -57,10 +59,13 @@ pub const PRESET_IMAGE_MODELS: &[&str] = &[
 pub const DEFAULT_COMPACTION_INTERVAL: u64 = 3;
 /// Default events-compaction overlap size (in invocations).
 pub const DEFAULT_COMPACTION_OVERLAP_SIZE: u64 = 1;
-/// Default events-compaction token threshold (triggers intra-invocation compaction
-/// when large tool results push context past 80k tokens).
+/// Default token threshold for intra-invocation compaction. With adk-rust
+/// 2.3.0 that compaction only runs on the turn resumed after an OAuth grant,
+/// once before the agent starts; normal chat turns (`/api/run_sse`) do not
+/// use it, because adk-server's request runners have no setting for it.
 pub const DEFAULT_COMPACTION_TOKEN_THRESHOLD: u64 = 80_000;
-/// Default number of raw events retained after intra-invocation compaction.
+/// Default number of raw events retained after intra-invocation compaction
+/// (same scope as [`DEFAULT_COMPACTION_TOKEN_THRESHOLD`]).
 pub const DEFAULT_COMPACTION_EVENT_RETENTION_SIZE: u64 = 6;
 /// Default fast model used for background sliding-window / intra-invocation summarization.
 pub const DEFAULT_SUMMARIZER_MODEL: &str = "gemini-3.5-flash-lite";
@@ -271,6 +276,14 @@ pub const DEFAULT_LAZY_TOOLSETS: &[&str] = &[
     "storage",
     "youtube",
 ];
+
+/// Whether `name` is a general-purpose data store (a warehouse, a file store)
+/// rather than an ads platform. The agent instruction tells the model to use
+/// these only when the user asks for them, and never as a place to look for a
+/// platform's data.
+pub fn is_general_purpose_store(name: &str) -> bool {
+    matches!(name, "bigquery" | "drive" | "storage")
+}
 
 /// Suffix of the write tier of a deferred toolset (`campaign_manager_360`
 /// holds the read tools, `campaign_manager_360_write` the create / update /
@@ -531,9 +544,9 @@ pub struct CompactionSettings {
     pub compaction_interval: u64,
     /// Include N last invocations from the previous window.
     pub overlap_size: u64,
-    /// Trigger compaction when the token threshold is reached.
+    /// Token threshold for intra-invocation compaction (OAuth-resume turn only).
     pub token_threshold: u64,
-    /// Retain N raw events.
+    /// Raw events kept by intra-invocation compaction (OAuth-resume turn only).
     pub event_retention_size: u64,
 }
 
@@ -606,18 +619,24 @@ impl ThinkingSettings {
 
         // Explicit budget wins when `THINKING_LEVEL` is unset so Gemini 2.5
         // callers can set `THINKING_BUDGET` directly without mutual-exclusion errors.
-        if level_raw.is_none()
-            && let Some(raw) = budget_raw
-        {
-            match raw.trim().parse::<i32>() {
-                Ok(budget) => {
-                    return Self {
-                        mode: ThinkingMode::Budget(budget),
-                        include_thoughts,
-                    };
-                }
-                Err(_) => {
-                    tracing::warn!("Ignoring invalid THINKING_BUDGET={raw:?}; using default");
+        if let Some(raw) = budget_raw {
+            if level_raw.is_some() {
+                tracing::warn!("THINKING_BUDGET={raw:?} is ignored because THINKING_LEVEL is set");
+            } else {
+                match raw.trim().parse::<i32>() {
+                    // `-1` is dynamic; anything lower means nothing.
+                    Ok(budget) if budget >= -1 => {
+                        return Self {
+                            mode: ThinkingMode::Budget(budget),
+                            include_thoughts,
+                        };
+                    }
+                    _ => {
+                        tracing::warn!(
+                            "Ignoring invalid THINKING_BUDGET={raw:?} (expected -1 or a \
+                             non-negative token count); using default"
+                        );
+                    }
                 }
             }
         }
@@ -681,6 +700,13 @@ impl ThinkingSettings {
                     };
                     Some(ThinkingConfig::new().with_thinking_budget(budget))
                 } else {
+                    // Gemini 3.1 Pro rejects Minimal; use Low on non-Flash models,
+                    // as the budget branch below does.
+                    let level = if level == ThinkingLevel::Minimal && !m.contains("flash") {
+                        ThinkingLevel::Low
+                    } else {
+                        level
+                    };
                     Some(ThinkingConfig::new().with_thinking_level(level))
                 }
             }
@@ -925,11 +951,24 @@ pub struct ModelPricing {
 }
 
 /// Returns the per-million-token Paid Tier Standard pricing table for `model`
-/// (from <https://ai.google.dev/gemini-api/docs/pricing>).
+/// (from <https://aistudio.google.com/docs/pricing>).
 pub fn model_pricing(model: &str) -> ModelPricing {
     let m = model.trim().to_ascii_lowercase();
-    if m.contains("gemini-4") || m.contains("argon") {
-        // Gemini 4 Argon (Paid Tier Standard): $2.00 in, $0.10 cached, $10.00 out
+    if m.contains("hydrogen") {
+        // Gemini 4 Hydrogen (Paid Tier Standard): $1.50 in, $0.075 cached, $7.50 out
+        ModelPricing {
+            input_per_million: 1.50,
+            input_long_per_million: 1.50,
+            cached_input_per_million: 0.075,
+            cached_input_long_per_million: 0.075,
+            output_per_million: 7.50,
+            output_long_per_million: 7.50,
+            audio_input_per_million: 1.50,
+        }
+    } else if m.contains("gemini-4") || m.contains("argon") || m.contains("carbon") {
+        // Gemini 4 Carbon and Argon (Paid Tier Standard), introductory rates
+        // through November 30, 2026: $2.00 in, $0.10 cached, $10.00 out. The
+        // pricing page lists $4.00 / $0.20 / $20.00 from December 1, 2026.
         ModelPricing {
             input_per_million: 2.00,
             input_long_per_million: 2.00,
@@ -1216,6 +1255,62 @@ mod tests {
                 .is_none()
         );
 
+        // The Gemini 4 presets, including the default, get low thinking by
+        // default; all three list `low` as a supported level.
+        for model in ["gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon"] {
+            let cfg = default_cfg
+                .thinking_config_for_model(model)
+                .unwrap_or_else(|| panic!("{model} gets a thinking config"));
+            assert_eq!(cfg.thinking_level, Some(adk_gemini::ThinkingLevel::Low));
+        }
+        assert!(PRESET_MODELS.contains(&DEFAULT_MODEL));
+
+        // An explicit `minimal` is downgraded to Low where Minimal is not
+        // supported (non-Flash Gemini 3/4), and kept on Flash.
+        let minimal_cfg = ThinkingSettings::parse(Some("minimal"), None, None);
+        assert_eq!(
+            minimal_cfg
+                .thinking_config_for_model("gemini-4-argon")
+                .unwrap()
+                .thinking_level,
+            Some(adk_gemini::ThinkingLevel::Low)
+        );
+        assert_eq!(
+            minimal_cfg
+                .thinking_config_for_model("gemini-3.1-pro")
+                .unwrap()
+                .thinking_level,
+            Some(adk_gemini::ThinkingLevel::Low)
+        );
+        assert_eq!(
+            minimal_cfg
+                .thinking_config_for_model("gemini-3.8-flash")
+                .unwrap()
+                .thinking_level,
+            Some(adk_gemini::ThinkingLevel::Minimal)
+        );
+        assert_eq!(
+            minimal_cfg
+                .thinking_config_for_model("gemini-2.5-flash")
+                .unwrap()
+                .thinking_budget,
+            Some(0)
+        );
+
+        // A budget below -1 is ignored, and a budget is ignored when a level is set.
+        assert_eq!(
+            ThinkingSettings::parse(None, Some("-5"), None).mode,
+            ThinkingMode::AutoFast
+        );
+        assert_eq!(
+            ThinkingSettings::parse(None, Some("-1"), None).mode,
+            ThinkingMode::Budget(-1)
+        );
+        assert_eq!(
+            ThinkingSettings::parse(Some("high"), Some("1024"), None).mode,
+            ThinkingMode::Level(adk_gemini::ThinkingLevel::High)
+        );
+
         let high_cfg = ThinkingSettings::parse(Some("high"), None, Some("true"));
         let argon = high_cfg
             .thinking_config_for_model("gemini-4-argon")
@@ -1301,5 +1396,13 @@ mod tests {
         // gemini-4-argon: 60k * $2.00/1M ($0.12) + 40k * $0.10/1M ($0.004) + 10k * $10.00/1M ($0.10) = $0.224
         let argon_cost = estimate_usage_cost_usd("gemini-4-argon", &usage);
         assert!((argon_cost - 0.224).abs() < 1e-9, "got {argon_cost}");
+
+        // gemini-4-carbon shares Argon's rates.
+        let carbon_cost = estimate_usage_cost_usd("gemini-4-carbon", &usage);
+        assert!((carbon_cost - 0.224).abs() < 1e-9, "got {carbon_cost}");
+
+        // gemini-4-hydrogen: 60k * $1.50/1M ($0.09) + 40k * $0.075/1M ($0.003) + 10k * $7.50/1M ($0.075) = $0.168
+        let hydrogen_cost = estimate_usage_cost_usd("gemini-4-hydrogen", &usage);
+        assert!((hydrogen_cost - 0.168).abs() < 1e-9, "got {hydrogen_cost}");
     }
 }

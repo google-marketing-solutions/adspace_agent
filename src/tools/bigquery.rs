@@ -27,8 +27,9 @@
 //! Read-only mode (the default, `BIGQUERY_READ_ONLY=true`) asks for the
 //! `bigquery.readonly` scope and lets `bigquery_execute_sql` run a single
 //! `SELECT` / `WITH … SELECT` statement only: a lexical check rejects anything
-//! else before any request is sent, and a dry run must classify the statement
-//! as `SELECT` before it executes.
+//! else before any request is sent. With `BIGQUERY_DRY_RUN=true` a dry run must
+//! also classify the statement as `SELECT` before it executes; that preflight
+//! is off by default.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -883,8 +884,8 @@ impl Tool for BigQueryGetTableSchema {
 ///
 /// Calls `jobs.query` and pages through `jobs.getQueryResults` up to
 /// `max_results` rows. In read-only mode, the default, the query must pass
-/// [`check_read_only_sql`], and a dry run (`jobs.insert` with `dryRun`) must
-/// report a `SELECT` statement before it runs.
+/// [`check_read_only_sql`]; with `BIGQUERY_DRY_RUN=true` a dry run (`jobs.insert`
+/// with `dryRun`) must also report a `SELECT` statement before it runs.
 struct BigQueryExecuteSql {
     shared: Arc<BigQueryShared>,
 }
@@ -1000,6 +1001,12 @@ impl BigQueryExecuteSql {
             let (Some(next), Some(path)) = (next, &results_path) else {
                 break;
             };
+            // The deadline covers paging too, not only the wait for the job:
+            // return what has been read and say there is more.
+            if tokio::time::Instant::now() >= deadline {
+                truncated = true;
+                break;
+            }
             response = self
                 .shared
                 .get(

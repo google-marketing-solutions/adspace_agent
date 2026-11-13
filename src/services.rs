@@ -164,9 +164,11 @@ pub async fn build_session_service() -> anyhow::Result<Arc<dyn SessionService>> 
         return maybe_encrypt_session_service(SerializedSqliteSessionService::new(service));
     }
     if let Some(root_collection) = parse_firestore_uri(&uri) {
-        let project_id = env_opt("GOOGLE_CLOUD_PROJECT").context(
-            "GOOGLE_CLOUD_PROJECT must be set when SESSION_SERVICE_URI uses firestore://",
-        )?;
+        let project_id = env_opt("GOOGLE_PROJECT_ID")
+            .or_else(|| env_opt("GOOGLE_CLOUD_PROJECT"))
+            .context(
+                "GOOGLE_CLOUD_PROJECT must be set when SESSION_SERVICE_URI uses firestore://",
+            )?;
         let root_label = root_collection.as_deref().unwrap_or("adk_sessions");
         tracing::info!("Session service: Firestore (project={project_id}, root={root_label})");
         let service = FirestoreSessionService::new(FirestoreSessionConfig {

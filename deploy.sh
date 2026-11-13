@@ -278,6 +278,7 @@ image_uri = sys.argv[2]
 display_name = sys.argv[3]
 description = sys.argv[4]
 auth_id = sys.argv[5]
+project_id = sys.argv[6]
 
 spec = run_doc.get("spec", {}).get("template", {}).get("spec", {})
 service_account = os.environ.get("SERVICE_ACCOUNT") or spec.get("serviceAccountName") or ""
@@ -306,6 +307,9 @@ for item in raw_env:
     if name == "GOOGLE_CLOUD_LOCATION" and item.get("value"):
         model_location = item["value"]
         continue
+    if name == "GOOGLE_CLOUD_PROJECT" and item.get("value"):
+        project_id = item["value"]
+        continue
     if name in reserved or name.startswith("GOOGLE_CLOUD_AGENT_ENGINE"):
         continue
     if "value" in item:
@@ -326,6 +330,8 @@ for item in raw_env:
 env_map["AGENT_ENGINE"] = "true"
 env_map.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "TRUE")
 env_map.setdefault("GOOGLE_MODEL_LOCATION", model_location)
+if project_id:
+    env_map.setdefault("GOOGLE_PROJECT_ID", project_id)
 if auth_id:
     env_map["GEMINI_ENTERPRISE_AUTH_ID"] = auth_id
 
@@ -456,7 +462,7 @@ payload = {
     "spec": engine_spec,
 }
 print(json.dumps(payload))
-' "$run_spec_json" "$IMAGE" "$AGENT_DISPLAY_NAME" "$AGENT_DESCRIPTION" "$effective_auth_id")"
+' "$run_spec_json" "$IMAGE" "$AGENT_DISPLAY_NAME" "$AGENT_DESCRIPTION" "$effective_auth_id" "$PROJECT_ID")"
 
   local existing_engine=""
   if [[ -n "$REASONING_ENGINE_ID" ]]; then

@@ -808,7 +808,8 @@ impl Settings {
             model: env_or("MODEL", DEFAULT_MODEL),
             video_model: env_or("VIDEO_MODEL", DEFAULT_VIDEO_MODEL),
             image_model: env_or("IMAGE_MODEL", DEFAULT_IMAGE_MODEL),
-            google_cloud_project: env_opt("GOOGLE_CLOUD_PROJECT"),
+            google_cloud_project: env_opt("GOOGLE_PROJECT_ID")
+                .or_else(|| env_opt("GOOGLE_CLOUD_PROJECT")),
             google_cloud_location: env_opt("GOOGLE_MODEL_LOCATION")
                 .unwrap_or_else(|| env_or("GOOGLE_CLOUD_LOCATION", "global")),
             use_vertex_ai: use_vertex_ai(),

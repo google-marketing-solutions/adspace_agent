@@ -1809,7 +1809,8 @@ fn build_gemini_model_with_thinking(
 ) -> anyhow::Result<GeminiModel> {
     let mut model = if config::use_vertex_ai()
         && let (Some(project), Some(location)) = (
-            config::env_opt("GOOGLE_CLOUD_PROJECT"),
+            config::env_opt("GOOGLE_PROJECT_ID")
+                .or_else(|| config::env_opt("GOOGLE_CLOUD_PROJECT")),
             config::env_opt("GOOGLE_MODEL_LOCATION"),
         ) {
         GeminiModel::new_google_cloud_adc(project, location, model_name)

@@ -27,7 +27,7 @@ use adspace_agent::auth::{
     GoogleOAuthFlow, OAuthClientConfig, OAuthToken, SessionCredentialManager,
     USER_CREDENTIALS_STATE_KEY,
 };
-use adspace_agent::google_api::toolset::MAX_RESPONSE_BYTES;
+use adspace_agent::google_api::toolset::{MAX_JSON_READ_BYTES, MAX_RESPONSE_BYTES};
 use adspace_agent::google_api::{
     DiscoveryDocument, DiscoveryFetcher, GoogleApiToolset, GoogleApiToolsetConfig,
 };
@@ -237,6 +237,31 @@ fn api_router(seen: Arc<Seen>) -> Router {
                             .body(Body::from(body))
                             .unwrap();
                     }
+                    if q.get("pageSize").map(String::as_str) == Some("long-list") {
+                        // A real list, pretty-printed as Google APIs send them,
+                        // of about three times the cap.
+                        let things: Vec<Value> = (0..750)
+                            .map(|i| json!({"name": format!("thing-{i}"), "pad": "p".repeat(1000)}))
+                            .collect();
+                        let body = serde_json::to_string_pretty(
+                            &json!({"things": things, "nextPageToken": "page-2"}),
+                        )
+                        .unwrap();
+                        return Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "application/json; charset=UTF-8")
+                            .body(Body::from(body))
+                            .unwrap();
+                    }
+                    if q.get("pageSize").map(String::as_str) == Some("unreadable") {
+                        // Past what is read at all.
+                        let body = "x".repeat(MAX_JSON_READ_BYTES + 1);
+                        return Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap();
+                    }
                     if q.get("pageSize").map(String::as_str) == Some("chunked") {
                         // Same size, streamed without a Content-Length.
                         let chunks: Vec<Result<Vec<u8>, std::io::Error>> = (0..3)
@@ -381,7 +406,8 @@ async fn oversized_responses_become_a_narrowing_hint() {
     let base = spawn(api_router(seen)).await;
     let ts = toolset(&base).await;
     let ctx = SessionToolContext::with_token() as Arc<dyn ToolContext>;
-    for size in ["huge", "chunked"] {
+    // Bodies that are not a list: nothing to cut them down to.
+    for size in ["huge", "chunked", "unreadable"] {
         let out = tool(&ts, "demo_things_list")
             .execute(ctx.clone(), json!({"page_size": size}))
             .await
@@ -394,6 +420,32 @@ async fn oversized_responses_become_a_narrowing_hint() {
             "the body itself is not echoed"
         );
     }
+}
+
+#[tokio::test]
+async fn an_oversized_list_comes_back_trimmed_not_refused() {
+    let seen = Arc::new(Seen::default());
+    let base = spawn(api_router(seen)).await;
+    let ts = toolset(&base).await;
+    let ctx = SessionToolContext::with_token() as Arc<dyn ToolContext>;
+    let out = tool(&ts, "demo_things_list")
+        .execute(ctx, json!({"page_size": "long-list"}))
+        .await
+        .unwrap();
+    assert!(out.get("error").is_none(), "{}", &out.to_string()[..300]);
+    let things = out["things"].as_array().unwrap();
+    // 750 rows of about 1 KiB were sent; about 250 fit under the cap.
+    assert!((230..=255).contains(&things.len()), "{}", things.len());
+    assert_eq!(things[0]["name"], "thing-0");
+    assert_eq!(
+        things.last().unwrap()["name"],
+        format!("thing-{}", things.len() - 1)
+    );
+    assert_eq!(out["truncated"]["list"], "things");
+    assert_eq!(out["truncated"]["returned"], things.len());
+    assert_eq!(out["truncated"]["dropped"], 750 - things.len());
+    assert_eq!(out["nextPageToken"], "page-2");
+    assert!(out.to_string().len() <= MAX_RESPONSE_BYTES);
 }
 
 #[tokio::test]

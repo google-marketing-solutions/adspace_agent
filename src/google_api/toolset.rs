@@ -27,10 +27,118 @@ use super::naming::dedupe_tool_names;
 use super::spec::{MethodSpec, SpecOptions, build_method_specs};
 use crate::auth::{SessionCredentialManager, auth_required};
 
-/// Largest upstream response body handed back to the model. Bigger bodies
-/// (media downloads, unpaged exports) are replaced by a structured error that
-/// asks the model to narrow the request (`pageSize`, `fields`, filters).
+/// Most of an upstream response handed back to the model, measured as the
+/// compact JSON the model receives. A list over this is cut to its leading
+/// items ([`trim_to_fit`]); anything else over it is replaced by a structured
+/// error that asks the model to narrow the request (`pageSize`, `fields`,
+/// filters).
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+/// Largest JSON response read. One over [`MAX_RESPONSE_BYTES`] is read whole
+/// so the leading items of its list can be handed back; past this size it is
+/// refused unread.
+pub const MAX_JSON_READ_BYTES: usize = 8 * 1024 * 1024;
+
+/// Room kept in a trimmed response for the note saying it was trimmed.
+const TRUNCATION_NOTE_BYTES: usize = 1024;
+
+/// Cuts `body` down to `budget` bytes of compact JSON by dropping items from
+/// the end of its list, and says so in a `truncated` member. Returns whether
+/// `body` now fits; when it does not, `body` may no longer be the response
+/// and must not be used.
+///
+/// The list is the member array that takes the most room (`results`,
+/// `items`, `files`, ...); a response that is itself an array becomes
+/// `{"items": [...]}` so the note has somewhere to go. A response that
+/// already fits, which a pretty-printed one over the limit can, is left
+/// alone. One with no list, or whose first item alone is too big, cannot be
+/// trimmed.
+fn trim_to_fit(body: &mut Value, budget: usize) -> bool {
+    let size = |value: &Value| serde_json::to_string(value).map_or(usize::MAX, |text| text.len());
+    let whole = size(body);
+    if whole <= budget {
+        return true;
+    }
+    if body.is_array() {
+        *body = json!({ "items": body.take() });
+    }
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    let Some((field, list_bytes)) = object
+        .iter()
+        .filter(|(_, value)| value.is_array())
+        .map(|(name, value)| (name.clone(), size(value)))
+        .max_by_key(|(_, bytes)| *bytes)
+    else {
+        return false;
+    };
+    // What the response takes without the list's items, plus the note.
+    let fixed = whole.saturating_sub(list_bytes) + "[]".len() + TRUNCATION_NOTE_BYTES;
+    let Some(room) = budget.checked_sub(fixed) else {
+        return false;
+    };
+    let Some(items) = object.get_mut(&field).and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let total = items.len();
+    let mut used = 0usize;
+    let mut kept = 0usize;
+    for item in items.iter() {
+        let bytes = size(item).saturating_add(1);
+        if used.saturating_add(bytes) > room {
+            break;
+        }
+        used += bytes;
+        kept += 1;
+    }
+    if kept == 0 {
+        return false;
+    }
+    items.truncate(kept);
+    let dropped = total - kept;
+    // `truncated` unless the API uses that name itself.
+    let key = if object.contains_key("truncated") {
+        "_truncated"
+    } else {
+        "truncated"
+    };
+    object.insert(
+        key.to_string(),
+        json!({
+            "list": field,
+            "returned": kept,
+            "dropped": dropped,
+            "note": format!(
+                "This response was too large to hand over whole, so only the first {kept} of its \
+                 {total} `{field}` are here. The other {dropped} are not on the next page: a page \
+                 token continues after them. To get them, narrow the request (a filter, fewer \
+                 fields or columns, a LIMIT clause in a query) or ask for a smaller page \
+                 (pageSize / maxResults) where the method takes one."
+            ),
+        }),
+    );
+    true
+}
+
+/// The error handed to the model in place of a response of more than `limit` bytes.
+fn too_large(status: reqwest::StatusCode, method: &str, url: &str, limit: usize) -> Value {
+    json!({
+        "error": {
+            "code": "RESPONSE_TOO_LARGE",
+            "status": status.as_u16(),
+            "message": format!(
+                "{method} {url} returned more than {limit} bytes, which is too much to hand to the model."
+            ),
+            "hint": "Narrow the request. If it takes a query (GAQL, a report \
+                     definition), select fewer columns and add a filter or a LIMIT \
+                     clause there. Otherwise add a filter, restrict the returned \
+                     fields with the `fields` parameter, or ask for fewer results per \
+                     page (pageSize / maxResults) where the method accepts it; some, \
+                     such as Google Ads search, do not.",
+        }
+    })
+}
 
 /// Process-wide HTTP/2 connection pool shared across Discovery fetching and all
 /// Google API / BigQuery toolsets so TLS sessions stay warm across platforms.
@@ -273,28 +381,29 @@ impl GoogleApiTool {
         tracing::info!("Calling {} {}", prepared.method, prepared.url);
         let resp = req.send().await?;
         let status = resp.status();
-        let bytes = match read_body_limited(resp, MAX_RESPONSE_BYTES).await {
+        let bytes = match read_body_limited(resp, MAX_JSON_READ_BYTES).await {
             Ok(bytes) => bytes,
             Err(BodyError::TooLarge(limit)) => {
-                return Ok(json!({
-                    "error": {
-                        "code": "RESPONSE_TOO_LARGE",
-                        "status": status.as_u16(),
-                        "message": format!(
-                            "{} {} returned more than {limit} bytes, which is too much to hand to the model.",
-                            prepared.method, prepared.url
-                        ),
-                        "hint": "Narrow the request. If it takes a query (GAQL, a report \
-                                 definition), select fewer columns and add a filter or a LIMIT \
-                                 clause there. Otherwise add a filter, restrict the returned \
-                                 fields with the `fields` parameter, or ask for fewer results per \
-                                 page (pageSize / maxResults) where the method accepts it; some, \
-                                 such as Google Ads search, do not.",
-                    }
-                }));
+                return Ok(too_large(status, &prepared.method, &prepared.url, limit));
             }
             Err(BodyError::Transport(e)) => return Err(e.into()),
         };
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            // Too much to hand over as it is. A list from a successful call
+            // is cut to the items that fit; nothing else can be cut down.
+            if status.is_success()
+                && let Ok(mut body) = serde_json::from_slice::<Value>(&bytes)
+                && trim_to_fit(&mut body, MAX_RESPONSE_BYTES)
+            {
+                return Ok(body);
+            }
+            return Ok(too_large(
+                status,
+                &prepared.method,
+                &prepared.url,
+                MAX_RESPONSE_BYTES,
+            ));
+        }
         let text = String::from_utf8_lossy(&bytes);
         let body: Value =
             serde_json::from_str(&text).unwrap_or_else(|_| json!({ "content": text.into_owned() }));
@@ -638,6 +747,91 @@ impl Toolset for GoogleApiToolset {
 mod tests {
     use super::*;
     use crate::auth::{GoogleOAuthFlow, OAuthClientConfig};
+
+    fn compact_len(value: &Value) -> usize {
+        serde_json::to_string(value).unwrap().len()
+    }
+
+    /// A list response of `count` rows of about `row_bytes` each.
+    fn list_response(count: usize, row_bytes: usize) -> Value {
+        let rows: Vec<Value> = (0..count)
+            .map(|i| json!({ "id": i, "pad": "x".repeat(row_bytes) }))
+            .collect();
+        json!({ "results": rows, "nextPageToken": "page-2", "totalResultsCount": count.to_string() })
+    }
+
+    #[test]
+    fn an_oversized_list_keeps_its_leading_items_and_says_what_was_dropped() {
+        let budget = 64 * 1024;
+        let mut body = list_response(200, 1000);
+        assert!(compact_len(&body) > budget);
+        assert!(trim_to_fit(&mut body, budget));
+        assert!(compact_len(&body) <= budget, "{}", compact_len(&body));
+
+        let kept = body["results"].as_array().unwrap();
+        // Close to the budget, not a token handful: at about 1 KiB a row, 64 KiB
+        // minus the note holds around sixty.
+        assert!((55..=63).contains(&kept.len()), "{}", kept.len());
+        // The first rows, in order.
+        assert!(kept.iter().enumerate().all(|(i, row)| row["id"] == i));
+        assert_eq!(body["truncated"]["list"], "results");
+        assert_eq!(body["truncated"]["returned"], kept.len());
+        assert_eq!(body["truncated"]["dropped"], 200 - kept.len());
+        let note = body["truncated"]["note"].as_str().unwrap();
+        assert!(note.contains(&format!("first {} of its 200 `results`", kept.len())));
+        assert!(note.contains("not on the next page"));
+        // The rest of the response is untouched.
+        assert_eq!(body["nextPageToken"], "page-2");
+        assert_eq!(body["totalResultsCount"], "200");
+    }
+
+    #[test]
+    fn the_list_is_the_array_that_takes_the_most_room() {
+        let budget = 32 * 1024;
+        let mut body = list_response(100, 1000);
+        body["fieldMask"] = json!(["a", "b", "c"]);
+        // An API that has a `truncated` member of its own keeps it.
+        body["truncated"] = json!(false);
+        assert!(trim_to_fit(&mut body, budget));
+        assert_eq!(body["fieldMask"], json!(["a", "b", "c"]));
+        assert_eq!(body["truncated"], false);
+        assert_eq!(body["_truncated"]["list"], "results");
+        assert!(compact_len(&body) <= budget);
+
+        // A response that is itself a list is wrapped so it can carry the note.
+        let mut bare = Value::Array(
+            (0..100)
+                .map(|i| json!({ "id": i, "pad": "x".repeat(1000) }))
+                .collect(),
+        );
+        assert!(trim_to_fit(&mut bare, budget));
+        assert_eq!(bare["truncated"]["list"], "items");
+        assert_eq!(bare["items"][0]["id"], 0);
+        assert!(compact_len(&bare) <= budget);
+    }
+
+    #[test]
+    fn what_cannot_be_trimmed_is_reported_as_such() {
+        let budget = 32 * 1024;
+        // Already within the limit: left alone, no note.
+        let mut small = list_response(10, 1000);
+        let before = small.clone();
+        assert!(trim_to_fit(&mut small, budget));
+        assert_eq!(small, before);
+
+        // No list to shorten.
+        let mut blob = json!({ "document": { "text": "x".repeat(budget * 2) } });
+        assert!(!trim_to_fit(&mut blob, budget));
+        // The first item alone is over the limit.
+        let mut wide = list_response(3, budget * 2);
+        assert!(!trim_to_fit(&mut wide, budget));
+        // The part outside the list is over the limit on its own.
+        let mut heavy = list_response(50, 1000);
+        heavy["summary"] = json!("y".repeat(budget));
+        assert!(!trim_to_fit(&mut heavy, budget));
+        // Not an object or a list at all.
+        assert!(!trim_to_fit(&mut json!("z".repeat(budget * 2)), budget));
+    }
 
     fn credentials() -> Arc<SessionCredentialManager> {
         Arc::new(SessionCredentialManager::new(GoogleOAuthFlow::new(

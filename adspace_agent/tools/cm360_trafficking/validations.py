@@ -14,7 +14,7 @@
 # ruff: file-ignore[commented-out-code]
 """Validation rules for Campaign Manager 360 trafficking sheets."""
 
-import datetime
+import datetime as dt
 from typing import Any
 
 import pandas as pd
@@ -496,7 +496,7 @@ def validate_ad_name(row: pd.Series, row_num: int) -> dict[str, Any] | None:
     return None
 
 
-def parse_date(val: str | float | None) -> datetime.date | None:
+def parse_date(val: str | float | None) -> dt.date | None:
     """Parses a date string safely.
 
     Args:

@@ -13,25 +13,39 @@
 # limitations under the License.
 """Tests for the data analysis tools."""
 
-from typing import cast
+from unittest.mock import patch
 
+from google.adk.agents import Agent
+from google.adk.code_executors import BuiltInCodeExecutor
+from google.adk.models.google_llm import Gemini
+from google.adk.tools.agent_tool import AgentTool
 import pytest
 
 from adspace_agent.tools import data_analysis
 
 
-def test_python_repl_tool():
-    """Tests that the python_ast_repl_tool can execute code."""
-    tool = data_analysis.python_ast_repl_tool
-    result = cast("int", tool.func("1 + 1"))
-    expected_result = 2
-    assert result == expected_result
+def test_create_data_analysis_agent() -> None:
+    """Tests that create_data_analysis_agent configures BuiltInCodeExecutor."""
+    with patch.dict("os.environ", {"MODEL": "gemini-3.8-flash"}):
+        agent = data_analysis.create_data_analysis_agent()
+    assert isinstance(agent, Agent)
+    assert agent.name == "data_analysis_agent"
+    assert agent.model == Gemini(model="gemini-3.8-flash")
+    assert isinstance(agent.code_executor, BuiltInCodeExecutor)
+
+
+def test_data_analysis_tool() -> None:
+    """Tests that data_analysis_tool wraps the sandboxed code agent."""
+    tool = data_analysis.data_analysis_tool
+    assert isinstance(tool, AgentTool)
+    assert isinstance(tool.agent, Agent)
+    assert isinstance(tool.agent.code_executor, BuiltInCodeExecutor)
 
 
 @pytest.mark.asyncio
-async def test_data_analysis_toolset():
+async def test_data_analysis_toolset() -> None:
     """Tests that the DataAnalysisToolset returns the correct tools."""
     toolset = data_analysis.DataAnalysisToolset()
     tools = await toolset.get_tools()
     assert len(tools) == 1
-    assert tools[0] is data_analysis.python_ast_repl_tool
+    assert tools[0] is data_analysis.data_analysis_tool

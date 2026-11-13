@@ -13,7 +13,7 @@
 # limitations under the License.
 """Tests for the validations module."""
 
-import datetime
+import datetime as dt
 import json
 import typing
 
@@ -280,7 +280,7 @@ async def test_validation_pass_ad_start_time_today(
     tmp_path,
 ) -> None:
     """Tests that validation passes when Ad Start Date is today."""
-    today = datetime.date.today()  # ruff: ignore[call-date-today]
+    today = dt.date.today()  # ruff: ignore[call-date-today]
     today_date = today.strftime("%Y-%m-%d")
     csv_content = make_test_csv(ad_start=today_date, ad_end="8/29/3000")
     file_path = tmp_path / "test_sheet.csv"

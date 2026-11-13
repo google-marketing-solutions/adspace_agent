@@ -42,6 +42,21 @@ DUMMY_ENV = {
     "CLIENT_SECRET": "dummy-client-secret",
 }
 
+DUMMY_OPENAPI = {
+    "components": {
+        "securitySchemes": {
+            "oauth2": {
+                "flows": {
+                    "authorizationCode": {
+                        "scopes": {"https://www.googleapis.com/auth/d": "Dummy"}
+                    }
+                }
+            }
+        }
+    },
+    "paths": {},
+}
+
 _mock_env = mock.patch.dict(os.environ, DUMMY_ENV)
 _mock_env.start()
 
@@ -54,9 +69,16 @@ _mock_google_auth = mock.patch(
 )
 _mock_google_auth.start()
 
+_mock_openapi_converter = mock.patch(
+    "google.adk.tools.google_api_tool.googleapi_to_openapi_converter.GoogleApiToOpenApiConverter.convert",
+    return_value=DUMMY_OPENAPI,
+)
+_mock_openapi_converter.start()
+
 
 def pytest_unconfigure(config: pytest.Config):  # ruff:ignore[unused-function-argument]
     """Clean up mocks after tests are done."""
+    _mock_openapi_converter.stop()
     _mock_google_auth.stop()
     _mock_genai_client.stop()
     _mock_env.stop()

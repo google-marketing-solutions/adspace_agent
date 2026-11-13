@@ -13,24 +13,44 @@
 # limitations under the License.
 """Tools for the AdSpace Agent to interact with data analysis libraries."""
 
+import os
 from typing import override
 
+from google.adk.agents import Agent
 from google.adk.agents.readonly_context import ReadonlyContext
-from google.adk.integrations.langchain import LangchainTool
+from google.adk.code_executors import BuiltInCodeExecutor
+from google.adk.models.google_llm import Gemini
+from google.adk.tools.agent_tool import AgentTool
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
-from langchain_experimental.tools.python.tool import PythonAstREPLTool
 
-python_ast_repl_tool = LangchainTool(
-    name="python_repl_ast",
-    description=(
-        "A Python shell. Use this to execute python commands. Input should be "
-        "a valid python command. When using this tool, sometimes output is "
-        "abbreviated - make sure it does not look abbreviated before using it "
-        "in your answer."
-    ),
-    tool=PythonAstREPLTool(),
-)
+from adspace_agent.config import MODEL
+
+
+def create_data_analysis_agent() -> Agent:
+    """Creates a sub-agent configured with the built-in sandboxed code executor.
+
+    Returns:
+        Agent: The configured data analysis sub-agent.
+    """
+    model_name = os.environ.get("MODEL", MODEL)
+    return Agent(
+        name="data_analysis_agent",
+        model=Gemini(model=model_name),
+        description=(
+            "An agent for performing data analysis and calculations using "
+            "sandboxed built-in Python code execution."
+        ),
+        instruction=(
+            "You are a specialized data analysis agent. Write and execute "
+            "Python code using your built-in code executor to analyze data, "
+            "perform calculations, and answer the given query."
+        ),
+        code_executor=BuiltInCodeExecutor(),
+    )
+
+
+data_analysis_tool = AgentTool(agent=create_data_analysis_agent())
 
 
 class DataAnalysisToolset(BaseToolset):
@@ -41,4 +61,4 @@ class DataAnalysisToolset(BaseToolset):
         self,
         readonly_context: ReadonlyContext | None = None,
     ) -> list[BaseTool]:
-        return [python_ast_repl_tool]
+        return [data_analysis_tool]

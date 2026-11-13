@@ -35,7 +35,6 @@ dependencies = [
   "google-genai",
   "greenlet",
   "holidays",
-  "langchain-experimental",
   "matplotlib",
   "numpy",
   "openpyxl",

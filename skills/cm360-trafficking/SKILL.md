@@ -29,7 +29,7 @@ description: Use this skill ONLY when the user requests trafficking, pushing, or
   **Ads**, **Creatives**, and **Event Tags**) specified in Section 3.
 - **Strict Tool Restriction**: **ONLY** `parse_sheet_tool` and
   `traffic_campaigns_in_cm360_tool` are allowed for this workflow. **NEVER**
-  call any other Python tools, CM360 API tools, `python_repl_ast`, Python
+  call any other Python tools, CM360 API tools, `data_analysis_agent`, Python
   scripts, or data analysis tools. Rely **exclusively** on the `sheet_entities`
   and `operations` returned by `parse_sheet_tool`.
 - **No Retries or Fallback Tools on Failure**: If `parse_sheet_tool` or

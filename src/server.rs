@@ -28,6 +28,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use adk_rust::artifact::{ArtifactService, LoadRequest, SaveRequest};
 use adk_rust::server::shutdown_signal;
 use adk_rust::server::{RequestContext, RequestContextError, RequestContextExtractor};
 use adk_rust::session::SessionService;
@@ -42,6 +43,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{AppendHeaders, Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine as _;
 use futures::stream::StreamExt as _;
 
 use crate::agent::{AgentRuntime, TurnRunner};
@@ -652,6 +654,7 @@ fn scrub_credentials_from_json_with(val: &mut serde_json::Value, extra_keys: &[S
             for key in extra_keys {
                 map.remove(key);
             }
+            map.retain(|k, _| !k.starts_with("temp:") && !k.contains("/authorizations/"));
             for v in map.values_mut() {
                 scrub_credentials_from_json_with(v, extra_keys);
             }
@@ -672,6 +675,8 @@ fn scrub_credentials_from_json_with(val: &mut serde_json::Value, extra_keys: &[S
 #[inline]
 fn bytes_may_contain_credentials(bytes: &[u8]) -> bool {
     memchr::memmem::find(bytes, CREDENTIALS_STATE_KEY.as_bytes()).is_some()
+        || memchr::memmem::find(bytes, b"temp:").is_some()
+        || memchr::memmem::find(bytes, b"/authorizations/").is_some()
         || memchr::memmem::find(bytes, b"\\u").is_some()
         || memchr::memmem::find(bytes, b"\\U").is_some()
         || crate::auth::gemini_enterprise_auth_keys()
@@ -1433,9 +1438,23 @@ fn copy_temp_state_keys(map: &mut serde_json::Map<String, serde_json::Value>) ->
     for (k, v) in map.iter() {
         if let Some(rest) = k.strip_prefix("temp:")
             && !rest.is_empty()
-            && !map.contains_key(rest)
         {
-            additions.push((rest.to_string(), v.clone()));
+            if !map.contains_key(rest) {
+                additions.push((rest.to_string(), v.clone()));
+            }
+            if let Some(short) = rest
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty() && *s != rest)
+            {
+                if !map.contains_key(short) {
+                    additions.push((short.to_string(), v.clone()));
+                }
+                let temp_short = format!("temp:{short}");
+                if !map.contains_key(&temp_short) {
+                    additions.push((temp_short, v.clone()));
+                }
+            }
         }
     }
     let changed = !additions.is_empty();
@@ -1445,7 +1464,639 @@ fn copy_temp_state_keys(map: &mut serde_json::Map<String, serde_json::Value>) ->
     changed
 }
 
-/// Applies `state` / `state_delta` carried on a `stream_query` /
+/// Decodes a flexible base64 string (standard or URL-safe, with or without padding).
+fn decode_flexible_base64(raw: &str) -> Option<Vec<u8>> {
+    let trimmed = raw.trim();
+    base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(trimmed))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed))
+        .ok()
+}
+
+/// Normalizes a single `google.genai.types.Part` JSON value into `adk_core::Part` JSON.
+fn genai_part_to_adk_json(part: &mut serde_json::Value) {
+    let Some(obj) = part.as_object_mut() else {
+        return;
+    };
+    if obj.get("thought").and_then(serde_json::Value::as_bool) == Some(true)
+        && let Some(text) = obj.get("text").and_then(serde_json::Value::as_str)
+    {
+        let mut out = serde_json::Map::new();
+        out.insert(
+            "thinking".to_string(),
+            serde_json::Value::String(text.to_string()),
+        );
+        if let Some(sig) = obj
+            .get("thought_signature")
+            .or_else(|| obj.get("thoughtSignature"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            out.insert(
+                "signature".to_string(),
+                serde_json::Value::String(sig.to_string()),
+            );
+        }
+        *obj = out;
+        return;
+    }
+    if let Some(inline) = obj
+        .get("inline_data")
+        .or_else(|| obj.get("inlineData"))
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+    {
+        let mime_type = inline
+            .get("mime_type")
+            .or_else(|| inline.get("mimeType"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let bytes = match inline.get("data") {
+            Some(serde_json::Value::String(b64)) => decode_flexible_base64(b64).unwrap_or_default(),
+            Some(serde_json::Value::Array(arr)) => arr
+                .iter()
+                .filter_map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok()))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let mut out = serde_json::Map::new();
+        out.insert(
+            "mime_type".to_string(),
+            serde_json::Value::String(mime_type),
+        );
+        out.insert(
+            "data".to_string(),
+            serde_json::Value::Array(bytes.into_iter().map(serde_json::Value::from).collect()),
+        );
+        *obj = out;
+        return;
+    }
+    if let Some(serde_json::Value::String(b64)) = obj.get("data").cloned()
+        && (obj.contains_key("mime_type") || obj.contains_key("mimeType"))
+    {
+        if let Some(mt) = obj.remove("mimeType") {
+            obj.entry("mime_type".to_string()).or_insert(mt);
+        }
+        let bytes = decode_flexible_base64(&b64).unwrap_or_default();
+        obj.insert(
+            "data".to_string(),
+            serde_json::Value::Array(bytes.into_iter().map(serde_json::Value::from).collect()),
+        );
+        return;
+    }
+    if let Some(file) = obj
+        .get("file_data")
+        .or_else(|| obj.get("fileData"))
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+    {
+        let mime_type = file
+            .get("mime_type")
+            .or_else(|| file.get("mimeType"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let file_uri = file
+            .get("file_uri")
+            .or_else(|| file.get("fileUri"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let mut out = serde_json::Map::new();
+        out.insert(
+            "mime_type".to_string(),
+            serde_json::Value::String(mime_type),
+        );
+        out.insert("file_uri".to_string(), serde_json::Value::String(file_uri));
+        *obj = out;
+        return;
+    }
+    if let Some(fc) = obj
+        .get("function_call")
+        .or_else(|| obj.get("functionCall"))
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+    {
+        let name = fc
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let args = fc
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let mut out = serde_json::Map::new();
+        out.insert("name".to_string(), serde_json::Value::String(name));
+        out.insert("args".to_string(), args);
+        if let Some(id) = fc
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            out.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+        }
+        if let Some(sig) = obj
+            .get("thought_signature")
+            .or_else(|| obj.get("thoughtSignature"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            out.insert(
+                "thought_signature".to_string(),
+                serde_json::Value::String(sig.to_string()),
+            );
+        }
+        *obj = out;
+        return;
+    }
+    if let Some(fr) = obj
+        .get("function_response")
+        .or_else(|| obj.get("functionResponse"))
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+    {
+        let name = fr
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let response = fr
+            .get("response")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let mut out = serde_json::Map::new();
+        out.insert(
+            "functionResponse".to_string(),
+            serde_json::json!({
+                "name": name,
+                "response": response,
+            }),
+        );
+        if let Some(id) = fr
+            .get("id")
+            .or_else(|| obj.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            out.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+        }
+        *obj = out;
+    }
+}
+
+/// Normalizes a `message` / `Content` JSON value into `adk_core::Content` JSON.
+fn normalize_agent_engine_content(mut message: serde_json::Value) -> serde_json::Value {
+    match message {
+        serde_json::Value::String(text) => serde_json::json!({
+            "role": "user",
+            "parts": [{"text": text}],
+        }),
+        serde_json::Value::Object(ref mut map) => {
+            let role = map
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .filter(|r| !r.trim().is_empty())
+                .unwrap_or("user")
+                .to_string();
+            map.insert("role".to_string(), serde_json::Value::String(role));
+            if let Some(parts) = map
+                .get_mut("parts")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for part in parts.iter_mut() {
+                    genai_part_to_adk_json(part);
+                }
+            } else if let Some(text) = map.remove("text") {
+                map.insert("parts".to_string(), serde_json::json!([{"text": text}]));
+            } else {
+                map.insert("parts".to_string(), serde_json::json!([]));
+            }
+            message
+        }
+        _ => serde_json::json!({
+            "role": "user",
+            "parts": [{"text": message.to_string()}],
+        }),
+    }
+}
+
+/// Converts a serialized `adk_core::Part` JSON value into `google.genai.types.Part` JSON.
+fn adk_part_to_genai_json(part: &serde_json::Value) -> serde_json::Value {
+    let Some(obj) = part.as_object() else {
+        return serde_json::json!({ "text": part.to_string() });
+    };
+    if let Some(thinking) = obj.get("thinking").and_then(serde_json::Value::as_str) {
+        let mut out = serde_json::Map::new();
+        out.insert(
+            "text".to_string(),
+            serde_json::Value::String(thinking.to_string()),
+        );
+        out.insert("thought".to_string(), serde_json::Value::Bool(true));
+        if let Some(sig) = obj
+            .get("signature")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            out.insert(
+                "thought_signature".to_string(),
+                serde_json::Value::String(sig.to_string()),
+            );
+        }
+        return serde_json::Value::Object(out);
+    }
+    if let Some(text) = obj.get("text").and_then(serde_json::Value::as_str) {
+        let mut out = serde_json::Map::new();
+        out.insert(
+            "text".to_string(),
+            serde_json::Value::String(text.to_string()),
+        );
+        if let Some(thought) = obj.get("thought").and_then(serde_json::Value::as_bool) {
+            out.insert("thought".to_string(), serde_json::Value::Bool(thought));
+        }
+        if let Some(sig) = obj
+            .get("thought_signature")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            out.insert(
+                "thought_signature".to_string(),
+                serde_json::Value::String(sig.to_string()),
+            );
+        }
+        return serde_json::Value::Object(out);
+    }
+    if let Some(name) = obj.get("name").and_then(serde_json::Value::as_str)
+        && let Some(args) = obj.get("args")
+    {
+        let mut fc = serde_json::Map::new();
+        fc.insert(
+            "name".to_string(),
+            serde_json::Value::String(name.to_string()),
+        );
+        let args_obj = if args.is_object() {
+            args.clone()
+        } else {
+            serde_json::json!({ "args": args })
+        };
+        fc.insert("args".to_string(), args_obj);
+        if let Some(id) = obj
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            fc.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+        }
+        let mut out = serde_json::Map::new();
+        out.insert("function_call".to_string(), serde_json::Value::Object(fc));
+        if let Some(sig) = obj
+            .get("thought_signature")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            out.insert(
+                "thought_signature".to_string(),
+                serde_json::Value::String(sig.to_string()),
+            );
+        }
+        return serde_json::Value::Object(out);
+    }
+    if let Some(fr) = obj
+        .get("functionResponse")
+        .or_else(|| obj.get("function_response"))
+        .and_then(serde_json::Value::as_object)
+    {
+        let mut fr_out = serde_json::Map::new();
+        if let Some(name) = fr.get("name").and_then(serde_json::Value::as_str) {
+            fr_out.insert(
+                "name".to_string(),
+                serde_json::Value::String(name.to_string()),
+            );
+        }
+        let resp_val = fr
+            .get("response")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let resp_obj = if resp_val.is_object() {
+            resp_val
+        } else {
+            serde_json::json!({ "result": resp_val })
+        };
+        fr_out.insert("response".to_string(), resp_obj);
+        if let Some(id) = obj
+            .get("id")
+            .or_else(|| fr.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            fr_out.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+        }
+        let mut out = serde_json::Map::new();
+        out.insert(
+            "function_response".to_string(),
+            serde_json::Value::Object(fr_out),
+        );
+        return serde_json::Value::Object(out);
+    }
+    if let Some(mime_type) = obj.get("mime_type").and_then(serde_json::Value::as_str) {
+        if let Some(data_val) = obj.get("data") {
+            let b64 = match data_val {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Array(arr) => {
+                    let bytes: Vec<u8> = arr
+                        .iter()
+                        .filter_map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok()))
+                        .collect();
+                    base64::engine::general_purpose::STANDARD.encode(&bytes)
+                }
+                _ => String::new(),
+            };
+            return serde_json::json!({
+                "inline_data": {
+                    "mime_type": mime_type,
+                    "data": b64,
+                }
+            });
+        }
+        if let Some(file_uri) = obj.get("file_uri").and_then(serde_json::Value::as_str) {
+            return serde_json::json!({
+                "file_data": {
+                    "mime_type": mime_type,
+                    "file_uri": file_uri,
+                }
+            });
+        }
+    }
+    if obj.contains_key("inline_data")
+        || obj.contains_key("file_data")
+        || obj.contains_key("function_call")
+        || obj.contains_key("function_response")
+        || obj.contains_key("executable_code")
+        || obj.contains_key("code_execution_result")
+    {
+        return part.clone();
+    }
+    serde_json::json!({ "text": part.to_string() })
+}
+
+/// Converts a serialized `adk_core::Event` JSON object into the Python `google-adk`
+/// `Event.model_dump_json(exclude_none=True)` schema expected by Vertex AI Agent Engine
+/// and Gemini Enterprise.
+fn event_to_python_adk_json(event: &mut serde_json::Value) {
+    scrub_credentials_from_json(event);
+    let Some(map) = event.as_object_mut() else {
+        return;
+    };
+    if !map.contains_key("author")
+        && !map.contains_key("invocation_id")
+        && !map.contains_key("actions")
+    {
+        return;
+    }
+
+    let inv_id = map
+        .get("invocation_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    map.insert(
+        "invocation_id".to_string(),
+        serde_json::Value::String(inv_id),
+    );
+
+    if let Some(ts_str) = map
+        .get("timestamp")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&ts_str)
+        && let Some(num) = serde_json::Number::from_f64(dt.timestamp_micros() as f64 / 1_000_000.0)
+    {
+        map.insert("timestamp".to_string(), serde_json::Value::Number(num));
+    }
+
+    if let Some(content_val) = map.get_mut("content") {
+        if let Some(content_obj) = content_val.as_object_mut() {
+            let role = match content_obj
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("model")
+            {
+                "model" | "assistant" | "agent" => "model",
+                _ => "user",
+            };
+            content_obj.insert(
+                "role".to_string(),
+                serde_json::Value::String(role.to_string()),
+            );
+            if let Some(parts) = content_obj
+                .get_mut("parts")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                let converted: Vec<serde_json::Value> =
+                    parts.iter().map(adk_part_to_genai_json).collect();
+                *parts = converted;
+            }
+        } else if content_val.is_null() {
+            map.remove("content");
+        }
+    }
+
+    if let Some(fr_val) = map.get("finish_reason").cloned() {
+        match fr_val.as_str() {
+            Some(s) => {
+                let mapped = match s {
+                    "Stop" | "STOP" => "STOP",
+                    "MaxTokens" | "MAX_TOKENS" => "MAX_TOKENS",
+                    "Safety" | "SAFETY" => "SAFETY",
+                    "Recitation" | "RECITATION" => "RECITATION",
+                    _ => "OTHER",
+                };
+                map.insert(
+                    "finish_reason".to_string(),
+                    serde_json::Value::String(mapped.to_string()),
+                );
+            }
+            None => {
+                map.remove("finish_reason");
+            }
+        }
+    }
+
+    if let Some(usage_val) = map.remove("usage_metadata")
+        && let Some(u) = usage_val.as_object()
+    {
+        let mut clean_usage = serde_json::Map::new();
+        for key in [
+            "prompt_token_count",
+            "candidates_token_count",
+            "total_token_count",
+        ] {
+            if let Some(v) = u.get(key).filter(|v| !v.is_null()) {
+                clean_usage.insert(key.to_string(), v.clone());
+            }
+        }
+        if let Some(v) = u
+            .get("cached_content_token_count")
+            .or_else(|| u.get("cache_read_input_token_count"))
+            .filter(|v| !v.is_null())
+        {
+            clean_usage.insert("cached_content_token_count".to_string(), v.clone());
+        }
+        if let Some(v) = u
+            .get("thoughts_token_count")
+            .or_else(|| u.get("thinking_token_count"))
+            .filter(|v| !v.is_null())
+        {
+            clean_usage.insert("thoughts_token_count".to_string(), v.clone());
+        }
+        if !clean_usage.is_empty() {
+            map.insert(
+                "usage_metadata".to_string(),
+                serde_json::Value::Object(clean_usage),
+            );
+        }
+    }
+
+    if let Some(actions_val) = map.remove("actions")
+        && let Some(a) = actions_val.as_object()
+    {
+        let mut clean_actions = serde_json::Map::new();
+        let state_delta = a
+            .get("state_delta")
+            .or_else(|| a.get("stateDelta"))
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        clean_actions.insert(
+            "state_delta".to_string(),
+            serde_json::Value::Object(state_delta),
+        );
+        let artifact_delta = a
+            .get("artifact_delta")
+            .or_else(|| a.get("artifactDelta"))
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        clean_actions.insert(
+            "artifact_delta".to_string(),
+            serde_json::Value::Object(artifact_delta),
+        );
+        if a.get("skip_summarization")
+            .or_else(|| a.get("skipSummarization"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            clean_actions.insert(
+                "skip_summarization".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+        if let Some(transfer) = a
+            .get("transfer_to_agent")
+            .or_else(|| a.get("transferToAgent"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            clean_actions.insert(
+                "transfer_to_agent".to_string(),
+                serde_json::Value::String(transfer.to_string()),
+            );
+        }
+        if a.get("escalate").and_then(serde_json::Value::as_bool) == Some(true) {
+            clean_actions.insert("escalate".to_string(), serde_json::Value::Bool(true));
+        }
+        clean_actions.insert(
+            "requested_auth_configs".to_string(),
+            a.get("requested_auth_configs")
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+                .map(serde_json::Value::Object)
+                .unwrap_or_else(|| serde_json::json!({})),
+        );
+        clean_actions.insert(
+            "requested_tool_confirmations".to_string(),
+            a.get("requested_tool_confirmations")
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+                .map(serde_json::Value::Object)
+                .unwrap_or_else(|| serde_json::json!({})),
+        );
+        map.insert(
+            "actions".to_string(),
+            serde_json::Value::Object(clean_actions),
+        );
+    }
+
+    if map
+        .get("branch")
+        .is_some_and(|v| v.is_null() || v.as_str() == Some(""))
+    {
+        map.remove("branch");
+    }
+    if map
+        .get("long_running_tool_ids")
+        .is_some_and(|v| v.is_null() || v.as_array().is_some_and(Vec::is_empty))
+    {
+        map.remove("long_running_tool_ids");
+    }
+
+    for rust_only in ["llm_request", "event_metadata", "provider_metadata"] {
+        map.remove(rust_only);
+    }
+    map.retain(|_, v| !v.is_null());
+}
+
+/// Extracts delegated OAuth access tokens from `_StreamRunRequest.authorizations`
+/// (or top-level `authorizations`) and inserts them into `delta_map`.
+fn extract_authorizations_into_delta(
+    auths: &serde_json::Map<String, serde_json::Value>,
+    delta_map: &mut serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    let mut found = false;
+    let configured_keys = crate::auth::gemini_enterprise_auth_keys();
+    for (auth_id, auth_val) in auths {
+        let token = auth_val
+            .as_str()
+            .or_else(|| {
+                auth_val
+                    .get("access_token")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or_else(|| {
+                auth_val
+                    .get("accessToken")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(str::trim)
+            .filter(|t| !t.is_empty());
+        let Some(token) = token else {
+            continue;
+        };
+        found = true;
+        let token_val = serde_json::Value::String(token.to_string());
+        delta_map.insert(format!("temp:{auth_id}"), token_val.clone());
+        delta_map.insert(auth_id.clone(), token_val.clone());
+        if let Some(short) = auth_id
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty() && *s != auth_id)
+        {
+            delta_map.insert(format!("temp:{short}"), token_val.clone());
+            delta_map.insert(short.to_string(), token_val.clone());
+        }
+        for key in &configured_keys {
+            delta_map
+                .entry(key.clone())
+                .or_insert_with(|| token_val.clone());
+        }
+    }
+    found
+}
+
+/// Applies `state` / `state_delta` / `authorizations` carried on a `stream_query` /
 /// `async_stream_query` input before delegating to `adk_server::agent_engine`.
 async fn apply_stream_query_state_delta(
     sessions: &dyn SessionService,
@@ -1453,24 +2104,32 @@ async fn apply_stream_query_state_delta(
 ) {
     let Some(user_id) = input
         .get("user_id")
+        .or_else(|| input.get("userId"))
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string)
     else {
         return;
     };
-    let mut delta: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut delta_map = serde_json::Map::new();
     for field in ["state", "state_delta", "stateDelta"] {
         if let Some(serde_json::Value::Object(mut obj)) = input.get(field).cloned() {
             copy_temp_state_keys(&mut obj);
             for (k, v) in obj {
-                delta.insert(k, v);
+                delta_map.insert(k, v);
             }
         }
     }
-    if delta.is_empty() {
+    if let Some(auths) = input
+        .get("authorizations")
+        .and_then(serde_json::Value::as_object)
+    {
+        extract_authorizations_into_delta(auths, &mut delta_map);
+    }
+    if delta_map.is_empty() {
         return;
     }
+    let delta: HashMap<String, serde_json::Value> = delta_map.into_iter().collect();
     let session_id = match input.get("session_id").and_then(|v| v.as_str()) {
         Some(id) if !id.is_empty() => id.to_string(),
         _ => {
@@ -1528,17 +2187,399 @@ async fn apply_stream_query_state_delta(
     }
 }
 
-/// Normalizes incoming Agent Engine requests so:
+/// Converts a historical event from `_StreamRunRequest.events` into an [`adk_rust::Event`].
+fn parse_historical_event(raw: &serde_json::Value) -> Option<adk_rust::Event> {
+    let obj = raw.as_object()?;
+    let inv_id = obj
+        .get("invocation_id")
+        .or_else(|| obj.get("invocationId"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("history");
+    let mut ev = match obj
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        Some(id) => adk_rust::Event::with_id(id, inv_id),
+        None => adk_rust::Event::new(inv_id),
+    };
+    ev.author = obj
+        .get("author")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("user")
+        .to_string();
+    if let Some(content_val) = obj.get("content").filter(|v| !v.is_null()).cloned() {
+        let normalized = normalize_agent_engine_content(content_val);
+        if let Ok(content) = serde_json::from_value::<adk_rust::Content>(normalized) {
+            ev.llm_response.content = Some(content);
+        }
+    }
+    if let Some(actions) = obj.get("actions").and_then(serde_json::Value::as_object) {
+        if let Some(mut sd) = actions
+            .get("state_delta")
+            .or_else(|| actions.get("stateDelta"))
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+        {
+            copy_temp_state_keys(&mut sd);
+            ev.actions.state_delta = sd.into_iter().collect();
+        }
+        if let Some(ad) = actions
+            .get("artifact_delta")
+            .or_else(|| actions.get("artifactDelta"))
+            .and_then(serde_json::Value::as_object)
+        {
+            for (k, v) in ad {
+                if let Some(ver) = v.as_i64() {
+                    ev.actions.artifact_delta.insert(k.clone(), ver);
+                }
+            }
+        }
+    }
+    Some(ev)
+}
+
+/// Saves artifacts supplied in `_StreamRunRequest.artifacts` into `artifact_service`.
+async fn save_request_artifacts(
+    artifacts: &dyn ArtifactService,
+    user_id: &str,
+    session_id: &str,
+    raw_artifacts: &[serde_json::Value],
+) {
+    for item in raw_artifacts {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let Some(file_name) = obj
+            .get("file_name")
+            .or_else(|| obj.get("fileName"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let Some(versions) = obj.get("versions").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let mut sorted: Vec<(Option<i64>, serde_json::Value)> = versions
+            .iter()
+            .filter_map(|v| {
+                let v_obj = v.as_object()?;
+                let ver = v_obj.get("version").and_then(|ver| {
+                    ver.as_i64()
+                        .or_else(|| ver.as_str().and_then(|s| s.parse::<i64>().ok()))
+                });
+                let data = v_obj.get("data")?.clone();
+                Some((ver, data))
+            })
+            .collect();
+        sorted.sort_by_key(|(ver, _)| ver.unwrap_or(0));
+        for (version, mut data) in sorted {
+            genai_part_to_adk_json(&mut data);
+            if let Ok(part) = serde_json::from_value::<adk_rust::Part>(data) {
+                let _ = artifacts
+                    .save(SaveRequest {
+                        app_name: APP_NAME.to_string(),
+                        user_id: user_id.to_string(),
+                        session_id: session_id.to_string(),
+                        file_name: file_name.to_string(),
+                        part,
+                        version,
+                    })
+                    .await;
+            }
+        }
+    }
+}
+
+/// Context captured from a `streaming_agent_run_with_events` request so its
+/// NDJSON response stream can be wrapped in `_StreamingRunResponse` objects.
+#[derive(Clone)]
+struct StreamRunWithEventsContext {
+    user_id: String,
+    session_id: String,
+    ephemeral_session: bool,
+    sessions: Arc<dyn SessionService>,
+    artifacts: Arc<dyn ArtifactService>,
+}
+
+/// Formats one NDJSON line emitted by `adk_server::agent_engine::dispatch_stream`
+/// into either a `_StreamingRunResponse` line (for `streaming_agent_run_with_events`)
+/// or a Python-ADK `Event` line (for `stream_query` / `async_stream_query`).
+async fn format_agent_engine_ndjson_line(
+    line: &[u8],
+    run_ctx: Option<&StreamRunWithEventsContext>,
+) -> Vec<u8> {
+    let trimmed = line
+        .strip_suffix(b"\n")
+        .unwrap_or(line)
+        .strip_suffix(b"\r")
+        .unwrap_or(line);
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let Ok(mut json_val) = serde_json::from_slice::<serde_json::Value>(trimmed) else {
+        return scrub_ndjson_line(line);
+    };
+    scrub_credentials_from_json(&mut json_val);
+
+    let is_event = json_val.as_object().is_some_and(|m| {
+        m.contains_key("author") || m.contains_key("invocation_id") || m.contains_key("actions")
+    });
+
+    if let Some(ctx) = run_ctx {
+        if !is_event {
+            // Convert mid-stream problem-JSON error into a valid _StreamingRunResponse error event.
+            let detail = json_val
+                .get("detail")
+                .or_else(|| json_val.get("error"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Agent execution error")
+                .to_string();
+            let code = json_val
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("INTERNAL_ERROR")
+                .to_string();
+            let now_secs = chrono::Utc::now().timestamp_micros() as f64 / 1_000_000.0;
+            let wrapped = serde_json::json!({
+                "events": [{
+                    "id": uuid::Uuid::new_v4().to_string(),
+                    "invocation_id": "",
+                    "author": APP_NAME,
+                    "timestamp": now_secs,
+                    "error_code": code,
+                    "error_message": detail,
+                    "content": {
+                        "role": "model",
+                        "parts": [{"text": detail}],
+                    },
+                    "turn_complete": true,
+                    "actions": {
+                        "state_delta": {},
+                        "artifact_delta": {},
+                        "requested_auth_configs": {},
+                        "requested_tool_confirmations": {},
+                    }
+                }],
+                "session_id": ctx.session_id,
+            });
+            if let Ok(mut out) = serde_json::to_vec(&wrapped) {
+                out.push(b'\n');
+                return out;
+            }
+            return scrub_ndjson_line(line);
+        }
+
+        let artifact_delta: Vec<(String, i64)> = json_val
+            .get("actions")
+            .and_then(|a| a.get("artifact_delta").or_else(|| a.get("artifactDelta")))
+            .and_then(serde_json::Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_i64().map(|ver| (k.clone(), ver)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        event_to_python_adk_json(&mut json_val);
+
+        let mut artifacts_out = Vec::new();
+        for (file_name, version) in artifact_delta {
+            if let Ok(loaded) = ctx
+                .artifacts
+                .load(LoadRequest {
+                    app_name: APP_NAME.to_string(),
+                    user_id: ctx.user_id.clone(),
+                    session_id: ctx.session_id.clone(),
+                    file_name: file_name.clone(),
+                    version: Some(version),
+                })
+                .await
+                && let Ok(raw_part) = serde_json::to_value(&loaded.part)
+            {
+                let part_json = adk_part_to_genai_json(&raw_part);
+                artifacts_out.push(serde_json::json!({
+                    "file_name": file_name,
+                    "versions": [{
+                        "version": version,
+                        "data": part_json,
+                    }],
+                }));
+            }
+        }
+
+        let mut resp = serde_json::Map::new();
+        resp.insert("events".to_string(), serde_json::json!([json_val]));
+        if !artifacts_out.is_empty() {
+            resp.insert(
+                "artifacts".to_string(),
+                serde_json::Value::Array(artifacts_out),
+            );
+        }
+        if !ctx.session_id.is_empty() {
+            resp.insert(
+                "session_id".to_string(),
+                serde_json::Value::String(ctx.session_id.clone()),
+            );
+        }
+        if let Ok(mut out) = serde_json::to_vec(&serde_json::Value::Object(resp)) {
+            out.push(b'\n');
+            return out;
+        }
+        return scrub_ndjson_line(line);
+    }
+
+    if is_event {
+        event_to_python_adk_json(&mut json_val);
+    }
+    if let Ok(mut out) = serde_json::to_vec(&json_val) {
+        out.push(b'\n');
+        return out;
+    }
+    scrub_ndjson_line(line)
+}
+
+/// Re-streams an Agent Engine NDJSON response, converting each event line into
+/// the Python `google-adk` schema (and wrapping `streaming_agent_run_with_events`
+/// lines in `_StreamingRunResponse`).
+fn transform_agent_engine_stream_response(
+    response: Response,
+    run_ctx: Option<StreamRunWithEventsContext>,
+) -> Response {
+    let (mut parts, body) = response.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    let upstream = body.into_data_stream();
+    let stream = futures::stream::unfold(
+        (upstream, Vec::<u8>::new(), run_ctx, false),
+        |(mut upstream, mut buf, run_ctx, done)| async move {
+            if done {
+                return None;
+            }
+            loop {
+                if let Some(at) = memchr::memchr(b'\n', &buf) {
+                    let line: Vec<u8> = buf.drain(..=at).collect();
+                    let formatted = format_agent_engine_ndjson_line(&line, run_ctx.as_ref()).await;
+                    if !formatted.is_empty() {
+                        return Some((
+                            Ok::<_, axum::Error>(Bytes::from(formatted)),
+                            (upstream, buf, run_ctx, false),
+                        ));
+                    }
+                    continue;
+                }
+                if buf.len() > MAX_SCRUBBED_SSE_EVENT_BYTES {
+                    buf.clear();
+                    return Some((
+                        Err(axum::Error::new(
+                            "NDJSON event line too large to process; stream aborted",
+                        )),
+                        (upstream, buf, run_ctx, true),
+                    ));
+                }
+                match upstream.next().await {
+                    Some(Ok(chunk)) => {
+                        buf.extend_from_slice(&chunk);
+                    }
+                    Some(Err(e)) => {
+                        return Some((Err(e), (upstream, buf, run_ctx, true)));
+                    }
+                    None => {
+                        let tail = if buf.is_empty() {
+                            Vec::new()
+                        } else {
+                            let rem = std::mem::take(&mut buf);
+                            format_agent_engine_ndjson_line(&rem, run_ctx.as_ref()).await
+                        };
+                        if let Some(ref ctx) = run_ctx
+                            && ctx.ephemeral_session
+                        {
+                            let _ = ctx
+                                .sessions
+                                .delete(adk_rust::session::DeleteRequest {
+                                    app_name: APP_NAME.to_string(),
+                                    user_id: ctx.user_id.clone(),
+                                    session_id: ctx.session_id.clone(),
+                                })
+                                .await;
+                        }
+                        if tail.is_empty() {
+                            return None;
+                        }
+                        return Some((Ok(Bytes::from(tail)), (upstream, buf, run_ctx, true)));
+                    }
+                }
+            }
+        },
+    )
+    .fuse();
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+
+/// Converts any `events` arrays inside a unary `/api/reasoning_engine` response
+/// (`get_session`, `create_session`, `list_sessions`) into Python `google-adk` format.
+async fn transform_agent_engine_unary_response(response: Response) -> Response {
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = to_bytes(body, MAX_SCRUBBED_JSON_BYTES).await else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
+    let Ok(mut json_val) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Response::from_parts(parts, Body::from(bytes));
+    };
+    scrub_credentials_from_json(&mut json_val);
+    if let Some(output) = json_val
+        .get_mut("output")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if let Some(events) = output
+            .get_mut("events")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for ev in events.iter_mut() {
+                event_to_python_adk_json(ev);
+            }
+        }
+        if let Some(sessions) = output
+            .get_mut("sessions")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for sess in sessions.iter_mut() {
+                if let Some(events) = sess
+                    .get_mut("events")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    for ev in events.iter_mut() {
+                        event_to_python_adk_json(ev);
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(cleaned) = serde_json::to_vec(&json_val) {
+        parts.headers.remove(header::CONTENT_LENGTH);
+        return Response::from_parts(parts, Body::from(cleaned));
+    }
+    Response::from_parts(parts, Body::from(bytes))
+}
+
+/// Normalizes incoming Agent Engine requests and outgoing responses so:
 /// 1. Requests forwarded by the Vertex AI ReasoningEngine proxy without a
 ///    `Content-Type: application/json` header are still accepted by `axum::Json`.
 /// 2. Both `class_method` and `classMethod` envelope keys are accepted.
-/// 3. `temp:<AUTH_ID>` tokens and `stream_query` state deltas are preserved
-///    across session persistence.
+/// 3. Gemini Enterprise's `streaming_agent_run_with_events` (`_StreamRunRequest`
+///    carrying `message`, `authorizations`, `events`, `artifacts`, and optional
+///    `user_id`/`session_id`) is translated into `AgentRunRequest` on input and
+///    wrapped in `_StreamingRunResponse` (`{"events": [...], "artifacts": [...], "session_id": "..."}`)
+///    on output.
+/// 4. `temp:<AUTH_ID>` tokens and `stream_query` state deltas are preserved
+///    across session persistence while scrubbed from all outgoing responses.
 async fn normalize_agent_engine_request(
-    State(sessions): State<Arc<dyn SessionService>>,
+    State((sessions, artifacts)): State<(Arc<dyn SessionService>, Arc<dyn ArtifactService>)>,
     req: Request,
     next: Next,
 ) -> Response {
+    let is_stream_path = req.uri().path() == "/api/stream_reasoning_engine";
     let (mut parts, body) = req.into_parts();
     parts.headers.insert(
         header::CONTENT_TYPE,
@@ -1567,6 +2608,8 @@ async fn normalize_agent_engine_request(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
+    let mut stream_run_ctx: Option<StreamRunWithEventsContext> = None;
+
     if let Some(input) = payload.get_mut("input").and_then(|v| v.as_object_mut()) {
         if class_method == "async_add_session_to_memory"
             && (!input.contains_key("user_id") || !input.contains_key("session_id"))
@@ -1591,33 +2634,206 @@ async fn normalize_agent_engine_request(
         {
             mutated = true;
         }
-        if matches!(class_method.as_str(), "stream_query" | "async_stream_query")
-            && (input.contains_key("state_delta")
-                || input.contains_key("stateDelta")
-                || input.contains_key("state"))
-        {
-            apply_stream_query_state_delta(sessions.as_ref(), input).await;
-            mutated = true;
-        }
-        if class_method == "streaming_agent_run_with_events"
-            && let Some(raw_req) = input.get("request_json").and_then(|v| v.as_str())
-            && let Ok(mut inner) = serde_json::from_str::<serde_json::Value>(raw_req)
-            && let Some(inner_obj) = inner.as_object_mut()
-        {
-            let mut inner_mutated = false;
-            for field in ["state_delta", "stateDelta"] {
-                if let Some(delta_obj) = inner_obj.get_mut(field).and_then(|v| v.as_object_mut())
-                    && copy_temp_state_keys(delta_obj)
-                {
-                    inner_mutated = true;
-                }
-            }
-            if inner_mutated && let Ok(updated) = serde_json::to_string(&inner) {
-                input.insert(
-                    "request_json".to_string(),
-                    serde_json::Value::String(updated),
-                );
+        if matches!(class_method.as_str(), "stream_query" | "async_stream_query") {
+            if !input.contains_key("user_id") {
+                let uid = input
+                    .get("userId")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("default_user")
+                    .to_string();
+                input.insert("user_id".to_string(), serde_json::Value::String(uid));
                 mutated = true;
+            }
+            if let Some(msg) = input.get("message").cloned()
+                && msg.is_object()
+            {
+                input.insert("message".to_string(), normalize_agent_engine_content(msg));
+                mutated = true;
+            }
+            if input.contains_key("state_delta")
+                || input.contains_key("stateDelta")
+                || input.contains_key("state")
+                || input.contains_key("authorizations")
+            {
+                apply_stream_query_state_delta(sessions.as_ref(), input).await;
+                mutated = true;
+            }
+        }
+        if class_method == "streaming_agent_run_with_events" {
+            let parsed_inner = match input.get("request_json") {
+                Some(serde_json::Value::String(raw_req)) => {
+                    serde_json::from_str::<serde_json::Value>(raw_req).ok()
+                }
+                Some(serde_json::Value::Object(map)) => {
+                    Some(serde_json::Value::Object(map.clone()))
+                }
+                _ => None,
+            };
+            if let Some(mut inner) = parsed_inner
+                && let Some(inner_obj) = inner.as_object_mut()
+            {
+                let user_id = inner_obj
+                    .get("user_id")
+                    .or_else(|| inner_obj.get("userId"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("default_user")
+                    .to_string();
+                inner_obj.insert(
+                    "user_id".to_string(),
+                    serde_json::Value::String(user_id.clone()),
+                );
+
+                let raw_session_id = inner_obj
+                    .get("session_id")
+                    .or_else(|| inner_obj.get("sessionId"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                let ephemeral_session = raw_session_id.is_none();
+                let session_id = raw_session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                inner_obj.insert(
+                    "session_id".to_string(),
+                    serde_json::Value::String(session_id.clone()),
+                );
+
+                if let Some(raw_msg) = inner_obj
+                    .get("new_message")
+                    .or_else(|| inner_obj.get("newMessage"))
+                    .or_else(|| inner_obj.get("message"))
+                    .cloned()
+                {
+                    let normalized_msg = normalize_agent_engine_content(raw_msg);
+                    inner_obj.insert("new_message".to_string(), normalized_msg);
+                }
+
+                let mut delta_map = serde_json::Map::new();
+                for field in ["state", "state_delta", "stateDelta"] {
+                    if let Some(serde_json::Value::Object(mut obj)) = inner_obj.remove(field) {
+                        copy_temp_state_keys(&mut obj);
+                        for (k, v) in obj {
+                            delta_map.insert(k, v);
+                        }
+                    }
+                }
+                let mut has_authorizations = false;
+                if let Some(auths) = inner_obj
+                    .get("authorizations")
+                    .and_then(serde_json::Value::as_object)
+                {
+                    has_authorizations = extract_authorizations_into_delta(auths, &mut delta_map);
+                }
+                copy_temp_state_keys(&mut delta_map);
+                if !delta_map.is_empty() {
+                    inner_obj.insert(
+                        "state_delta".to_string(),
+                        serde_json::Value::Object(delta_map.clone()),
+                    );
+                }
+
+                // Initialize session with historical events if the session does not yet exist.
+                let history_events = inner_obj
+                    .get("events")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if !history_events.is_empty() {
+                    let exists = sessions
+                        .get(adk_rust::session::GetRequest {
+                            app_name: APP_NAME.to_string(),
+                            user_id: user_id.clone(),
+                            session_id: session_id.clone(),
+                            num_recent_events: Some(1),
+                            after: None,
+                        })
+                        .await
+                        .is_ok();
+                    if !exists {
+                        let mut initial_state: HashMap<String, serde_json::Value> = delta_map
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        initial_state.insert(
+                            "agent_engine:upstream_session_id".to_string(),
+                            serde_json::Value::String(session_id.clone()),
+                        );
+                        if sessions
+                            .create(adk_rust::session::CreateRequest {
+                                app_name: APP_NAME.to_string(),
+                                user_id: user_id.clone(),
+                                session_id: Some(session_id.clone()),
+                                state: initial_state,
+                            })
+                            .await
+                            .is_ok()
+                            && let (Ok(app_name), Ok(uid), Ok(sid)) = (
+                                adk_rust::AppName::try_from(APP_NAME),
+                                adk_rust::UserId::try_from(user_id.as_str()),
+                                adk_rust::SessionId::try_from(session_id.as_str()),
+                            )
+                        {
+                            for raw_ev in &history_events {
+                                if let Some(ev) = parse_historical_event(raw_ev) {
+                                    let _ = sessions
+                                        .append_event_for_identity(
+                                            adk_rust::session::AppendEventRequest {
+                                                identity: adk_rust::AdkIdentity {
+                                                    app_name: app_name.clone(),
+                                                    user_id: uid.clone(),
+                                                    session_id: sid.clone(),
+                                                },
+                                                event: ev,
+                                            },
+                                        )
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(req_artifacts) = inner_obj
+                    .get("artifacts")
+                    .and_then(serde_json::Value::as_array)
+                    .filter(|a| !a.is_empty())
+                {
+                    save_request_artifacts(
+                        artifacts.as_ref(),
+                        &user_id,
+                        &session_id,
+                        req_artifacts,
+                    )
+                    .await;
+                }
+
+                tracing::info!(
+                    class_method = %class_method,
+                    user_id = %user_id,
+                    session_id = %session_id,
+                    ephemeral_session = ephemeral_session,
+                    has_authorizations = has_authorizations,
+                    history_events = history_events.len(),
+                    "normalized streaming_agent_run_with_events request"
+                );
+
+                stream_run_ctx = Some(StreamRunWithEventsContext {
+                    user_id,
+                    session_id,
+                    ephemeral_session,
+                    sessions: sessions.clone(),
+                    artifacts: artifacts.clone(),
+                });
+
+                if let Ok(updated) = serde_json::to_string(&inner) {
+                    input.insert(
+                        "request_json".to_string(),
+                        serde_json::Value::String(updated),
+                    );
+                    mutated = true;
+                }
             }
         }
     }
@@ -1627,8 +2843,17 @@ async fn normalize_agent_engine_request(
         bytes
     };
     parts.headers.remove(header::CONTENT_LENGTH);
-    next.run(Request::from_parts(parts, Body::from(body_bytes)))
-        .await
+    let response = next
+        .run(Request::from_parts(parts, Body::from(body_bytes)))
+        .await;
+    if !response.status().is_success() {
+        return response;
+    }
+    if is_stream_path {
+        transform_agent_engine_stream_response(response, stream_run_ctx)
+    } else {
+        transform_agent_engine_unary_response(response).await
+    }
 }
 
 /// Builds the Vertex AI Agent Engine (ReasoningEngine BYOC) dispatch router
@@ -1644,7 +2869,10 @@ pub fn build_agent_engine_router(runtime: &AgentRuntime) -> anyhow::Result<Route
         .with_artifact_service(runtime.artifact_service.clone());
     Ok(
         adk_rust::server::agent_engine_router(state).layer(middleware::from_fn_with_state(
-            runtime.session_service.clone(),
+            (
+                runtime.session_service.clone(),
+                runtime.artifact_service.clone(),
+            ),
             normalize_agent_engine_request,
         )),
     )
@@ -2763,6 +3991,7 @@ mod tests {
     #[tokio::test]
     async fn agent_engine_dispatch_registers_operations_persists_temp_state_and_scrubs_credentials()
     {
+        use adk_rust::artifact::InMemoryArtifactService;
         use adk_rust::session::InMemorySessionService;
         use tower::ServiceExt as _;
 
@@ -2782,30 +4011,52 @@ mod tests {
                 &self,
                 ctx: Arc<dyn adk_rust::InvocationContext>,
             ) -> adk_rust::Result<adk_rust::EventStream> {
+                if let Some(artifacts) = ctx.artifacts() {
+                    let _ = artifacts
+                        .save(
+                            "report.csv",
+                            &adk_rust::Part::Text {
+                                text: "col1,col2\n1,2\n".to_string(),
+                            },
+                        )
+                        .await;
+                }
                 let mut ev = adk_rust::Event::new(ctx.invocation_id());
                 ev.author = APP_NAME.to_string();
                 ev.actions.state_delta.insert(
                     USER_CREDENTIALS_STATE_KEY.to_string(),
                     serde_json::json!({"access_token": "ya29.stream-secret"}),
                 );
-                ev.llm_response.content = Some(adk_rust::Content::new("model").with_text("ack"));
+                ev.actions
+                    .artifact_delta
+                    .insert("report.csv".to_string(), 1);
+                ev.llm_response.content = Some(
+                    adk_rust::Content::new("model")
+                        .with_thinking("thinking step")
+                        .with_text("ack"),
+                );
+                ev.llm_response.finish_reason = Some(adk_rust::FinishReason::Stop);
+                ev.llm_response.turn_complete = true;
                 Ok(Box::pin(futures::stream::iter(vec![Ok(ev)])))
             }
         }
 
         let sessions: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let artifacts: Arc<dyn ArtifactService> = Arc::new(InMemoryArtifactService::new());
         let runner = Arc::new(
             adk_rust::runner::Runner::builder()
                 .app_name(APP_NAME)
                 .agent(Arc::new(EchoAgent))
                 .session_service(sessions.clone())
+                .artifact_service(artifacts.clone())
                 .build()
                 .unwrap(),
         );
-        let state = adk_rust::server::AgentEngineState::new(runner);
+        let state = adk_rust::server::AgentEngineState::new(runner)
+            .with_artifact_service(artifacts.clone());
         let ae_router = adk_rust::server::agent_engine_router(state)
             .layer(middleware::from_fn_with_state(
-                sessions.clone(),
+                (sessions.clone(), artifacts.clone()),
                 normalize_agent_engine_request,
             ))
             .layer(middleware::from_fn_with_state(
@@ -2891,6 +4142,7 @@ mod tests {
 
         // 3. async_stream_query applies state_delta and scrubs credentials from the NDJSON stream.
         let stream_resp = ae_router
+            .clone()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -2938,6 +4190,76 @@ mod tests {
         assert_eq!(
             updated.state().get("adspace-oauth"),
             Some(serde_json::json!("ya29.updated-delegated"))
+        );
+
+        // 4. streaming_agent_run_with_events accepts Gemini Enterprise's _StreamRunRequest
+        //    (message, authorizations, session_id) and returns _StreamingRunResponse lines
+        //    with Python-ADK Event formatting and artifacts.
+        let ge_req_json = serde_json::to_string_pretty(&serde_json::json!({
+            "message": {
+                "role": "user",
+                "parts": [{"text": "run report"}]
+            },
+            "session_id": "12828825004904213795",
+            "authorizations": {
+                "projects/123/locations/global/authorizations/adspace_agent": {
+                    "access_token": "ya29.ge-auth-token"
+                }
+            }
+        }))
+        .unwrap();
+        let ge_resp = ae_router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/stream_reasoning_engine")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "class_method": "streaming_agent_run_with_events",
+                            "input": {
+                                "request_json": ge_req_json
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ge_resp.status(), StatusCode::OK);
+        let ge_ndjson = String::from_utf8(
+            to_bytes(ge_resp.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!ge_ndjson.contains("ya29.stream-secret"), "{ge_ndjson}");
+        assert!(!ge_ndjson.contains("ya29.ge-auth-token"), "{ge_ndjson}");
+        let line_val: serde_json::Value =
+            serde_json::from_str(ge_ndjson.lines().next().unwrap()).unwrap();
+        assert_eq!(line_val["session_id"], "12828825004904213795");
+        let ev0 = &line_val["events"][0];
+        assert!(ev0["timestamp"].is_f64(), "{ev0}");
+        assert_eq!(ev0["finish_reason"], "STOP");
+        assert_eq!(ev0["content"]["parts"][0]["thought"], true);
+        assert_eq!(ev0["content"]["parts"][0]["text"], "thinking step");
+        assert_eq!(ev0["content"]["parts"][1]["text"], "ack");
+        assert_eq!(line_val["artifacts"][0]["file_name"], "report.csv");
+
+        let ge_session = sessions
+            .get(adk_rust::session::GetRequest {
+                app_name: APP_NAME.to_string(),
+                user_id: "default_user".to_string(),
+                session_id: "12828825004904213795".to_string(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            ge_session.state().get("adspace_agent"),
+            Some(serde_json::json!("ya29.ge-auth-token"))
         );
     }
 }

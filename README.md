@@ -271,7 +271,7 @@ signed-in user's own sessions and never carry the signed OAuth `state`.
 | `campaign_manager_360` (additionally)                                                                                                          | `parse_sheet_tool` / `traffic_campaigns_in_cm360_tool` (`src/tools/cm360_trafficking`): validates a trafficking sheet, diffs it against CM360, stages the operations as a versioned artifact and executes them once approved. Each staged payload can be executed exactly once; re-parse to retry. The workflow instructions ship with the toolset — no separate skill is needed.                                                                                                                                                         |
 | `bigquery`                                                                                                                                     | Native `BigQueryToolset` (`src/tools/bigquery.rs`): `bigquery_list_datasets`, `bigquery_list_tables`, `bigquery_get_table_schema`, `bigquery_execute_sql` over the BigQuery REST API with the **user's** token. Read-only by default (a single `SELECT`/`WITH` statement, checked before any request is sent and then confirmed by a BigQuery dry run unless `BIGQUERY_DRY_RUN=false`; one query may bill at most `BIGQUERY_MAX_BYTES_BILLED`); `BIGQUERY_READ_ONLY=false` allows DML. Default project `GOOGLE_CLOUD_PROJECT`, overridable per call with `project_id`. The service account needs no BigQuery permissions; users need `bigquery.jobs.create` on the project they query. |
 | `google_genai`                                                                                                                                 | `get_info_about_youtube_video`, `generate_image` (Imagen) and `generate_video` (Veo long-running operation) through the Vertex AI backend; results are saved as session artifacts.                                                                                                                                                                                                                                                                                                                                                        |
-| always on                                                                                                                                      | Python execution (below), `list_user_files`, adk-rust's `load_artifacts` and `preload_memory`, progressive skills (`list_skills`, `load_skill`, `load_skill_resource`, `reload_skills`), and `adk-ui` generative UI tools (`render_chart`, `render_table`, `render_layout`, `render_card`, `render_form`, `render_confirm`, `render_modal`, `render_alert`, `render_progress`, `render_toast`) rendered live in the studio canvas.                                                                                                        |
+| always on                                                                                                                                      | Python execution (below), `expected_range` (each day's expected range from the days before it), `list_user_files`, adk-rust's `load_artifacts` and `preload_memory`, progressive skills (`list_skills`, `load_skill`, `load_skill_resource`, `reload_skills`), and `adk-ui` generative UI tools (`render_chart`, `render_table`, `render_layout`, `render_card`, `render_form`, `render_confirm`, `render_modal`, `render_alert`, `render_progress`, `render_toast`) and this repo's `render_band_chart`, rendered live in the studio canvas.                                                                                                        |
 | Gemini built-ins (`GEMINI_BUILTIN_TOOLS`)                                                                                                      | `google_search`, `url_context`, `google_maps` by default. These run server-side inside Gemini, as does the default `gemini_code_execution`.                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ### Python data analysis
@@ -466,6 +466,8 @@ gcloud run deploy adspace-agent-rs \
   --memory 32Gi \
   --cpu 8 \
   --port 8000 \
+  --timeout 900 \
+  --liveness-probe httpGet.path=/healthcheck,periodSeconds=30,failureThreshold=3,timeoutSeconds=5 \
   --session-affinity \
   --set-secrets "\
 CLIENT_ID=adspace-agent-rs-client-id:latest,\
@@ -486,6 +488,13 @@ ARTIFACT_SERVICE_URI=gs://{YOUR_ARTIFACT_BUCKET}"
 
 Add `https://{YOUR_CLOUD_RUN_URL}/oauth2/callback` to the OAuth client's
 authorized redirect URIs.
+
+`/healthcheck` answers `200 ok` whenever the server is responding and checks
+nothing else, which is what a liveness probe needs. Do not point one at
+`/api/health`: that asks each backing service whether it is reachable (Cloud
+Storage, for a `gs://` artifact store), so a slow dependency or a missing
+permission on it would have healthy instances restarted. `--timeout 900` lets
+a long turn finish; the default cuts a request off at 300 seconds.
 
 > [!IMPORTANT]
 > **Access.** Always deploy with `CLIENT_ID` / `CLIENT_SECRET` set: without them

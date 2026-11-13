@@ -483,6 +483,22 @@ async fn app_js(Path(path): Path<String>, headers: HeaderMap) -> Response {
     }
 }
 
+/// Path of the liveness check: [`healthcheck`].
+pub const HEALTHCHECK_PATH: &str = "/healthcheck";
+
+/// Answers `200 ok` when the server is responding, and looks at nothing
+/// else. It is the target for a liveness probe, which restarts the instance
+/// when it fails.
+///
+/// adk-server's `/api/health` is the wrong target for that: it asks each
+/// backing service whether it is reachable (for a GCS artifact store, a
+/// request to Cloud Storage on every check), so a slow or unreachable
+/// dependency, or a missing permission on it, would have healthy instances
+/// restarted.
+async fn healthcheck() -> &'static str {
+    "ok"
+}
+
 /// Serves the robot SVG favicon (`/favicon.svg` and `/favicon.ico`).
 async fn studio_favicon() -> Response {
     (
@@ -1225,6 +1241,7 @@ pub fn oauth_router(routes: OAuthRoutes) -> Router {
         .route("/app/{*path}", get(app_js))
         .route("/favicon.ico", get(studio_favicon))
         .route("/favicon.svg", get(studio_favicon))
+        .route(HEALTHCHECK_PATH, get(healthcheck))
         .with_state(routes)
 }
 
@@ -1623,6 +1640,26 @@ mod tests {
                 .unwrap();
             assert_eq!(fav.status(), StatusCode::OK);
         }
+
+        // 1c. The liveness check answers without a cookie.
+        let alive = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(HEALTHCHECK_PATH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(alive.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(alive.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"ok"
+        );
 
         // 2. `/auth/me` is unauthenticated without a cookie.
         let resp = app

@@ -14,6 +14,7 @@
 """Testing the agent module."""
 
 import importlib
+import os
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -26,6 +27,20 @@ import pytest
 
 import adspace_agent.agent as agent_module
 from adspace_agent.agent import create_agent
+from adspace_agent.config import BID_MANAGER_TOOL_FILTER
+from adspace_agent.config import CAMPAIGN_MANAGER_360_TOOL_FILTER
+from adspace_agent.config import DEFAULT_GOOGLE_ADS_TOOL_FILTER
+from adspace_agent.config import DISPLAY_VIDEO_360_TOOL_FILTER
+from adspace_agent.config import MERCHANT_CENTER_INVENTORIES_TOOL_FILTER
+from adspace_agent.config import MERCHANT_CENTER_PRODUCTS_TOOL_FILTER
+from adspace_agent.config import MERCHANT_CENTER_REPORTS_TOOL_FILTER
+from adspace_agent.config import SEARCH_ADS_360_TOOL_FILTER
+from adspace_agent.tools.cm360_trafficking import (
+    before_traffic_campaigns_in_cm360_tool_callback,
+)
+from adspace_agent.tools.mutate_policy import (
+    enforce_mutate_tool_policy_callback,
+)
 from adspace_agent.tools.skills import SkillsToolset
 from adspace_agent.tools.untrusted_content import (
     fence_untrusted_tool_output_callback,
@@ -121,6 +136,73 @@ def test_agent_after_tool_callback(agent):
     assert agent.after_tool_callback is fence_untrusted_tool_output_callback
 
 
+def test_agent_before_tool_callback_default(agent):
+    """Test that default agent registers mutation policy and CM360 auth."""
+    assert agent.before_tool_callback == [
+        enforce_mutate_tool_policy_callback,
+        before_traffic_campaigns_in_cm360_tool_callback,
+    ]
+
+
+def test_create_agent_marketing_toolsets_have_readonly_filters():
+    """Test all marketing GoogleApiToolsets default to read-only filters."""
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "CLIENT_ID": "test_client_id",
+                "CLIENT_SECRET": "test_client_secret",
+                "GOOGLE_ADS_DEVELOPER_TOKEN": "test_token",
+            },
+            clear=False,
+        ),
+        patch("adspace_agent.agent.load_dotenv"),
+        patch(
+            "adspace_agent.agent.GoogleApiToOpenApiConverter.convert",
+            return_value=DUMMY_OPENAPI,
+        ),
+    ):
+        for key in (
+            "BID_MANAGER_TOOL_FILTER",
+            "CAMPAIGN_MANAGER_360_TOOL_FILTER",
+            "DISPLAY_VIDEO_360_TOOL_FILTER",
+            "GOOGLE_ADS_TOOL_FILTER",
+            "MERCHANT_CENTER_INVENTORIES_TOOL_FILTER",
+            "MERCHANT_CENTER_PRODUCTS_TOOL_FILTER",
+            "MERCHANT_CENTER_REPORTS_TOOL_FILTER",
+            "SEARCH_ADS_360_TOOL_FILTER",
+            "ENABLED_TOOLSETS",
+        ):
+            os.environ.pop(key, None)
+        fresh_agent = create_agent()
+
+    by_api = {
+        (t.api_name, t.api_version): t.tool_filter
+        for t in fresh_agent.tools
+        if isinstance(t, agent_module.GoogleApiToolset)
+    }
+    assert by_api["doubleclickbidmanager", "v2"] == BID_MANAGER_TOOL_FILTER
+    assert by_api["dfareporting", "v5"] == CAMPAIGN_MANAGER_360_TOOL_FILTER
+    assert by_api["displayvideo", "v4"] == DISPLAY_VIDEO_360_TOOL_FILTER
+    assert (
+        by_api["googleads", agent_module.GOOGLE_ADS_API_VERSION]
+        == DEFAULT_GOOGLE_ADS_TOOL_FILTER
+    )
+    assert (
+        by_api["merchantapi", "inventories_v1"]
+        == MERCHANT_CENTER_INVENTORIES_TOOL_FILTER
+    )
+    assert (
+        by_api["merchantapi", "products_v1"]
+        == MERCHANT_CENTER_PRODUCTS_TOOL_FILTER
+    )
+    assert (
+        by_api["merchantapi", "reports_v1"]
+        == MERCHANT_CENTER_REPORTS_TOOL_FILTER
+    )
+    assert by_api["searchads360", "v0"] == SEARCH_ADS_360_TOOL_FILTER
+
+
 def test_agent_tools(agent):
     """Test that the agent has tools."""
     assert len(agent.tools) > 0
@@ -153,7 +235,9 @@ def test_create_agent_with_env_vars():
         # 5 core non-CM360 built-in tools + 3 enabled Google toolsets = 8 tools
         expected_tool_count = 8
         assert len(agent.tools) == expected_tool_count
-        assert agent.before_tool_callback is None
+        assert agent.before_tool_callback == [
+            enforce_mutate_tool_policy_callback
+        ]
         assert agent.after_tool_callback is fence_untrusted_tool_output_callback
         mock_cm360_factory.assert_not_called()
 
@@ -166,6 +250,10 @@ def test_create_agent_with_env_vars():
         assert len(google_api_toolsets) == expected_google_api_count
         assert any(
             t.tool_filter == ["tool1", "tool2"] for t in google_api_toolsets
+        )
+        assert any(
+            t.tool_filter == BID_MANAGER_TOOL_FILTER
+            for t in google_api_toolsets
         )
 
 

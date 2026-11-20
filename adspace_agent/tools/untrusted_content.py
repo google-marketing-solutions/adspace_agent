@@ -22,6 +22,7 @@ from google.adk.tools.tool_context import ToolContext
 
 UNTRUSTED_CONTENT_OPEN_TAG_PREFIX: str = "<untrusted_external_content"
 UNTRUSTED_CONTENT_CLOSE_TAG: str = "</untrusted_external_content>"
+UNTRUSTED_TURN_INVOCATION_KEY: str = "temp:untrusted_content_invocation_id"
 
 UNTRUSTED_TOOL_NAMES: frozenset[str] = frozenset({
     "get_info_about_youtube_video",
@@ -170,8 +171,6 @@ def _fence_dict_response(
         needed.
     """
     if tool_name == "get_info_about_youtube_video":
-        if tool_response.get("status") == "ERROR":
-            return None
         video_response = tool_response.get("response")
         if isinstance(video_response, str):
             return (
@@ -212,7 +211,7 @@ def _fence_dict_response(
 def fence_untrusted_tool_output_callback(
     tool: BaseTool,
     args: dict[str, Any],  # ruff: ignore[unused-function-argument]
-    tool_context: ToolContext,  # ruff: ignore[unused-function-argument]
+    tool_context: ToolContext,
     tool_response: dict[str, Any],
 ) -> dict[str, Any] | None:
     """ADK after_tool_callback that fences outputs from external content tools.
@@ -230,14 +229,25 @@ def fence_untrusted_tool_output_callback(
     if not is_untrusted_content_tool(tool.name) or not tool_response:
         return None
 
+    if isinstance(tool_response, dict):
+        if tool_response.get("pending") is True:
+            return None
+        if (
+            tool.name == "get_info_about_youtube_video"
+            and tool_response.get("status") == "ERROR"
+        ):
+            return None
+
+    invocation_id = getattr(tool_context, "invocation_id", None)
+    state = getattr(tool_context, "state", None)
+    if isinstance(invocation_id, str) and invocation_id and state is not None:
+        state[UNTRUSTED_TURN_INVOCATION_KEY] = invocation_id
+
     if not isinstance(tool_response, dict):
         return {
             "untrusted_content": wrap_untrusted_text(
                 str(tool_response), source=tool.name
             )
         }
-
-    if tool_response.get("pending") is True:
-        return None
 
     return _fence_dict_response(tool.name, tool_response)

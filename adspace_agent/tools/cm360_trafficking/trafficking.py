@@ -715,7 +715,8 @@ class CM360TraffickingParserToolset(BaseToolset):
         super().__init__()
         self.parse_sheet_tool = FunctionTool(func=parse_sheet_tool)
         self.traffic_campaigns_in_cm360_tool = FunctionTool(
-            func=traffic_campaigns_in_cm360_tool
+            func=traffic_campaigns_in_cm360_tool,
+            require_confirmation=True,
         )
 
     @override

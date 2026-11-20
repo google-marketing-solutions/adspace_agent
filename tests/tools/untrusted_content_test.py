@@ -370,3 +370,67 @@ def test_callback_handles_fenced_error_text_and_json_responses() -> None:
         comments["untrusted_content"]
     )
     assert json.dumps(comments_payload) in comments["untrusted_content"]
+
+
+def test_callback_records_tainted_invocation_id_in_state() -> None:
+    """Tests callback records invocation_id only for valid untrusted calls."""
+    tainted_state: dict[str, object] = {}
+    ctx = mock.MagicMock()
+    ctx.invocation_id = "inv-123"
+    ctx.state = tainted_state
+
+    untrusted_content.fence_untrusted_tool_output_callback(
+        tool=_make_mock_tool("youtube_comments_list"),
+        args={},
+        tool_context=ctx,
+        tool_response={"items": []},
+    )
+    assert (
+        tainted_state[untrusted_content.UNTRUSTED_TURN_INVOCATION_KEY]
+        == "inv-123"
+    )
+
+    prefenced_state: dict[str, object] = {}
+    ctx_video = mock.MagicMock()
+    ctx_video.invocation_id = "inv-video-456"
+    ctx_video.state = prefenced_state
+    prefenced_res = untrusted_content.fence_untrusted_tool_output_callback(
+        tool=_make_mock_tool("get_info_about_youtube_video"),
+        args={},
+        tool_context=ctx_video,
+        tool_response={
+            "status": "SUCCESS",
+            "response": untrusted_content.wrap_untrusted_text(
+                "summary", source="get_info_about_youtube_video"
+            ),
+        },
+    )
+    assert prefenced_res is None
+    assert (
+        prefenced_state[untrusted_content.UNTRUSTED_TURN_INVOCATION_KEY]
+        == "inv-video-456"
+    )
+
+    clean_state: dict[str, object] = {}
+    ctx_clean = mock.MagicMock()
+    ctx_clean.invocation_id = "inv-clean"
+    ctx_clean.state = clean_state
+    untrusted_content.fence_untrusted_tool_output_callback(
+        tool=_make_mock_tool("get_current_date"),
+        args={},
+        tool_context=ctx_clean,
+        tool_response={"date": "2026-11-20"},
+    )
+    untrusted_content.fence_untrusted_tool_output_callback(
+        tool=_make_mock_tool("drive_files_export"),
+        args={},
+        tool_context=ctx_clean,
+        tool_response={"pending": True},
+    )
+    untrusted_content.fence_untrusted_tool_output_callback(
+        tool=_make_mock_tool("get_info_about_youtube_video"),
+        args={},
+        tool_context=ctx_clean,
+        tool_response={"status": "ERROR", "error_details": "Invalid ID"},
+    )
+    assert untrusted_content.UNTRUSTED_TURN_INVOCATION_KEY not in clean_state

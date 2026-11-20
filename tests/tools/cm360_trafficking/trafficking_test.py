@@ -607,3 +607,23 @@ async def test_parse_sheet_tool_clears_cache_on_auth_failure() -> None:
         )
         assert res["status"] == "ERROR"
         assert ctx.state[CREDENTIALS_CACHE_KEY] is None
+
+
+@pytest.mark.asyncio
+async def test_cm360_toolset_requires_confirmation_for_push_tool() -> None:
+    """Tests traffic_campaigns_in_cm360_tool sets require_confirmation=True."""
+    toolset = trafficking.CM360TraffickingParserToolset()
+    tools = await toolset.get_tools()
+    by_name = {tool.name: tool for tool in tools}
+    ctx = typing.cast("typing.Any", MockToolContext("test.csv"))
+
+    assert (
+        await by_name[
+            "traffic_campaigns_in_cm360_tool"
+        ].check_require_confirmation({}, ctx)
+        is True
+    )
+    assert (
+        await by_name["parse_sheet_tool"].check_require_confirmation({}, ctx)
+        is False
+    )

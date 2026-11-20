@@ -35,23 +35,22 @@ name = "adspace-agent"
 path = "src/main.rs"
 
 [dependencies]
-# Named only for `launcher::TelemetryConfig`, which adk-rust does not re-export.
-adk-cli = { version = "2.3.0", default-features = false }
-adk-gemini = { version = "2.3.0", features = ["vertex"] }
+# Direct dep for `launcher::{Launcher, TelemetryConfig}` while keeping `adk-rust` free of its `cli` default features.
+adk-cli = { git = "https://github.com/zavora-ai/adk-rust", rev = "3d346d49b5af66bc69ff59a7de9be37c20cbd25b", default-features = false }
+adk-gemini = { git = "https://github.com/zavora-ai/adk-rust", rev = "3d346d49b5af66bc69ff59a7de9be37c20cbd25b", features = ["vertex"] }
 adk-rust = {
-  version = "2.3.0",
+  git = "https://github.com/zavora-ai/adk-rust",
+  rev = "3d346d49b5af66bc69ff59a7de9be37c20cbd25b",
   default-features = false,
   features = [
     "agent-engine",
     "artifacts",
-    "cli",
     "code-tools",
     "gcs-artifacts",
     "gemini-vertex",
     "memory",
     "memory-tools",
     "minimal",
-    "plugin",
     "server",
     "skills",
     "skills-progressive-disclosure",
@@ -60,8 +59,9 @@ adk-rust = {
     "vertex-sandbox",
   ]
 }
-adk-session = { version = "2.3.0", features = ["encrypted-session", "firestore", "sqlite"] }
-adk-ui = { version = "2.2.0", features = ["adk-core"] }
+adk-session = { git = "https://github.com/zavora-ai/adk-rust", rev = "3d346d49b5af66bc69ff59a7de9be37c20cbd25b", features = ["encrypted-session", "firestore", "sqlite"] }
+adk-surface = { git = "https://github.com/zavora-ai/adk-rust", rev = "3d346d49b5af66bc69ff59a7de9be37c20cbd25b", default-features = false, features = ["web", "genui"] }
+adk-ui = { git = "https://github.com/zavora-ai/adk-ui", rev = "efa1c7433cdce2c8ee6c81af284b9283f0663ec1" }
 axum = "0.8.9"
 
 anyhow = "1.0.104"
@@ -82,7 +82,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["deflate",
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.11.1"
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
 tower-http = { version = "0.6.11", default-features = false, features = ["compression-deflate", "compression-gzip"] }
@@ -98,6 +98,9 @@ tower = { version = "0.5.3", features = ["util"] }
 [features]
 default = []
 # Opt-in: adk-rust's in-process Monty Python interpreter as a `PYTHON_EXECUTOR=monty`
-# backend. Off by default because its dependency chain (monty → jiter → pyo3)
-# does not currently resolve against crates.io.
+# backend. Off by default to avoid pulling the extra Monty/Ruff crate tree unless needed.
 monty = ["adk-rust/code-embedded-python"]
+
+# `adk-ui` 3.0.0 depends on `adk-surface = "3.0.0"` from crates.io until ADK-Rust 3.0 is published.
+[patch.crates-io]
+adk-surface = { git = "https://github.com/zavora-ai/adk-rust", rev = "3d346d49b5af66bc69ff59a7de9be37c20cbd25b" }

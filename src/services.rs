@@ -33,7 +33,9 @@ use adk_rust::session::{
     ListRequest, Session, SessionService, SqliteSessionService,
 };
 use adk_session::{
-    EncryptedSession, EncryptionKey, FirestoreSessionConfig, FirestoreSessionService,
+    ArchiveMark, EncryptedSession, EncryptionKey, FirestoreSessionConfig, FirestoreSessionService,
+    ForkRequest, HistoryOutcome, ImportSessionRequest, RewriteHistoryRequest, SessionBundle,
+    SessionHistory,
 };
 use anyhow::Context;
 use async_trait::async_trait;
@@ -320,23 +322,80 @@ impl SessionService for SerializedSqliteSessionService {
             .await
     }
 
+    async fn history(&self, identity: &AdkIdentity) -> adk_rust::Result<SessionHistory> {
+        self.with_retry(|| self.inner.history(identity)).await
+    }
+
+    async fn rewrite_history(
+        &self,
+        req: RewriteHistoryRequest,
+    ) -> adk_rust::Result<HistoryOutcome> {
+        let _guard = self.write_lock.lock().await;
+        self.with_retry(|| self.inner.rewrite_history(req.clone()))
+            .await
+    }
+
+    async fn import_session(
+        &self,
+        req: ImportSessionRequest,
+    ) -> adk_rust::Result<Box<dyn Session>> {
+        let _guard = self.write_lock.lock().await;
+        self.with_retry(|| self.inner.import_session(req.clone()))
+            .await
+    }
+
+    async fn fork(&self, req: ForkRequest) -> adk_rust::Result<HistoryOutcome> {
+        let _guard = self.write_lock.lock().await;
+        self.with_retry(|| self.inner.fork(req.clone())).await
+    }
+
     async fn rewind(
         &self,
-        session_id: &str,
+        identity: &AdkIdentity,
         target_event_id: &str,
     ) -> adk_rust::Result<Box<dyn Session>> {
         let _guard = self.write_lock.lock().await;
-        self.with_retry(|| self.inner.rewind(session_id, target_event_id))
+        self.with_retry(|| self.inner.rewind(identity, target_event_id))
             .await
     }
 
     async fn rewind_steps(
         &self,
-        session_id: &str,
+        identity: &AdkIdentity,
         steps: usize,
     ) -> adk_rust::Result<Box<dyn Session>> {
         let _guard = self.write_lock.lock().await;
-        self.with_retry(|| self.inner.rewind_steps(session_id, steps))
+        self.with_retry(|| self.inner.rewind_steps(identity, steps))
+            .await
+    }
+
+    async fn archive(
+        &self,
+        identity: &AdkIdentity,
+        reason: Option<String>,
+    ) -> adk_rust::Result<ArchiveMark> {
+        let _guard = self.write_lock.lock().await;
+        self.with_retry(|| self.inner.archive(identity, reason.clone()))
+            .await
+    }
+
+    async fn unarchive(&self, identity: &AdkIdentity) -> adk_rust::Result<()> {
+        let _guard = self.write_lock.lock().await;
+        self.with_retry(|| self.inner.unarchive(identity)).await
+    }
+
+    async fn export_session(&self, identity: &AdkIdentity) -> adk_rust::Result<SessionBundle> {
+        self.with_retry(|| self.inner.export_session(identity))
+            .await
+    }
+
+    async fn list_active(&self, req: ListRequest) -> adk_rust::Result<Vec<Box<dyn Session>>> {
+        self.with_retry(|| self.inner.list_active(req.clone()))
+            .await
+    }
+
+    async fn list_archived(&self, req: ListRequest) -> adk_rust::Result<Vec<Box<dyn Session>>> {
+        self.with_retry(|| self.inner.list_archived(req.clone()))
             .await
     }
 

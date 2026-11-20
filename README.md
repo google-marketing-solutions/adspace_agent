@@ -16,7 +16,8 @@ Gemini code execution available as built-ins. Every Google API call is made
 
 This is the Rust port of
 [google-marketing-solutions/adspace_agent](https://github.com/google-marketing-solutions/adspace_agent),
-built on [adk-rust](https://github.com/zavora-ai/adk-rust) 2.3.0.
+built on [adk-rust](https://github.com/zavora-ai/adk-rust) 3.0 (edge, including `adk-surface` `web` + `genui`)
+and [adk-ui](https://github.com/zavora-ai/adk-ui) 3.0.
 
 - [How it works](#how-it-works)
 - [Getting started](#getting-started)
@@ -60,6 +61,11 @@ flowchart LR
   Application Default Credentials are used solely for infrastructure: the
   Gemini / Imagen / Veo model backend, Cloud Storage artifacts and skills, and
   the optional Vertex sandbox.
+- **Confirmation before writes.** All mutating write-API tool calls (Google
+  Discovery mutations, Google Ads `batchJobs.run`, CM360 campaign trafficking,
+  and BigQuery SQL when `BIGQUERY_READ_ONLY=false`) are held by ADK-Rust's
+  confirmation gate until the session's signed-in owner approves or denies the
+  exact call parameters in Studio (`/app/`), `/ui/`, or the console REPL.
 - **Studio UI.** `/app/` is a purpose-built chat UI with Google Sign-In, an
   interactive `adk-ui` canvas (charts, tables, KPI tiles, forms), file uploads,
   usage/cost tracking and a trace view. It is plain browser JavaScript shipped
@@ -159,18 +165,20 @@ All settings are environment variables (read from `.env` in development).
 | ----------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION` | —                                                                         | Vertex AI project / location (`global` recommended). Also the default BigQuery project.    |
 | `GOOGLE_GENAI_USE_VERTEXAI`                     | `TRUE`                                                                    | `FALSE` + `GOOGLE_API_KEY` uses the Gemini Developer API instead. Accepts `true/1/yes/on`. |
-| `MODEL`, `IMAGE_MODEL`, `VIDEO_MODEL`           | `gemini-4-hydrogen`, `gemini-nano-banana-2.1`, `gemini-omni-1.2-flash`    | Start-up models; administrators can switch them at runtime from the studio.                |
+| `MODEL`, `IMAGE_MODEL`, `VIDEO_MODEL`           | `gemini-4-neon`, `gemini-nano-banana-2.1`, `gemini-omni-1.2-flash`        | Start-up models; administrators can switch them at runtime from the studio.                |
 | `CONTEXT_CACHE_*`, `COMPACTION_*`               | see `.env.sample`                                                         | Gemini context caching and events compaction thresholds.                                   |
 
 ### Sign-in and access
 
-| Variable                     | Default                      | Purpose                                                                                                                                                                                                                                                            |
-| ---------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `CLIENT_ID`, `CLIENT_SECRET` | —                            | OAuth client used both for Google Sign-In and for the per-user API grants. **Unset = no sign-in** (local development only).                                                                                                                                        |
-| `PUBLIC_BASE_URL`            | `http://localhost:8000`      | Builds the redirect URI; with `https://` the cookies are `Secure`.                                                                                                                                                                                                 |
-| `ADMIN_EMAILS`               | —                            | Comma-separated Google accounts allowed to switch the server-wide models (`POST /auth/models`) and to open the stock ADK dev UI at `/ui/` once sign-in is configured (everyone else is redirected to `/app/`). With sign-in configured and this unset, nobody can. |
-| `OAUTH_STATE_SECRET`         | derived from `CLIENT_SECRET` | Extra secret mixed into the HMAC key that signs OAuth states and the sign-in cookie.                                                                                                                                                                               |
-| `SHUTDOWN_GRACE_SECS`        | `8`                          | How long in-flight requests may finish after SIGTERM.                                                                                                                                                                                                              |
+| Variable                     | Default                                             | Purpose                                                                                                                                                                                                                                                                  |
+| ---------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CLIENT_ID`, `CLIENT_SECRET` | —                                                   | OAuth client used both for Google Sign-In and for the per-user API grants. **Unset = no sign-in** (local development only).                                                                                                                                              |
+| `PUBLIC_BASE_URL`            | `http://localhost:8000`                             | Builds the redirect URI; with `https://` the cookies are `Secure`, and its host is added to `adk-server`'s allowed hosts.                                                                                                                                                |
+| `ALLOWED_HOSTS`              | loopback (+ `PUBLIC_BASE_URL` host, `.run.app` on Cloud Run `K_SERVICE`) | Comma-separated extra HTTP `Host` values accepted by `adk-server` 3.0's `host_guard`.                                                                                                                                                               |
+| `ALLOWED_ORIGINS`            | —                                                   | Comma-separated CORS allowed origins configured on `adk-server`'s `SecurityConfig`.                                                                                                                                                                                      |
+| `ADMIN_EMAILS`               | —                                                   | Comma-separated Google accounts allowed to switch the server-wide models (`POST /auth/models`) and to open the `adk-surface` web home (`/ui/`, `/api/surface/*`) once sign-in is configured (everyone else is redirected from `/ui/` to `/app/` and gets `403` on `/api/surface/*`). With sign-in configured and this unset, nobody can. |
+| `OAUTH_STATE_SECRET`         | derived from `CLIENT_SECRET`                        | Extra secret mixed into the HMAC key that signs OAuth states and the sign-in cookie.                                                                                                                                                                                     |
+| `SHUTDOWN_GRACE_SECS`        | `8`                                                 | How long in-flight requests may finish after SIGTERM.                                                                                                                                                                                                                    |
 
 ### Toolsets
 
@@ -195,7 +203,7 @@ All settings are environment variables (read from `.env` in development).
 
 | Variable                                                     | Default                   | Purpose                                                                                                   |
 | ------------------------------------------------------------ | ------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `SESSION_SERVICE_URI`                                        | `sqlite:///./sessions.db` | `memory://`, `sqlite:///path.db` or `firestore://` (needs `GOOGLE_CLOUD_PROJECT`).                        |
+| `SESSION_SERVICE_URI`                                        | `sqlite:///./sessions.db` | `memory://`, `sqlite:///path.db` (`sqlx` 0.9) or `firestore://` (needs `GOOGLE_CLOUD_PROJECT`).            |
 | `SESSION_ENCRYPTION_KEY`, `SESSION_ENCRYPTION_PREVIOUS_KEYS` | —                         | AES-256-GCM encryption of session state, including the stored OAuth tokens; previous keys allow rotation. |
 | `ARTIFACT_SERVICE_URI`                                       | `memory://`               | `gs://bucket` or `file://./.artifacts` for uploads, generated media and staged CM360 payloads.            |
 | `MEMORY_SERVICE_URI`                                         | `memory://`               | Cross-session memory backing `preload_memory`.                                                            |
@@ -252,10 +260,10 @@ the user-scoped entry is written.
 
 ### Who can call what
 
-| `CLIENT_ID` / `CLIENT_SECRET` | Who is the caller                                                                                                                                                                                                                   | `/ui/` dev UI                   | `POST /auth/models`                          |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- | -------------------------------------------- |
-| unset (local development)     | everyone is the anonymous user `user`; the port must not be reachable by anyone else                                                                                                                                                | available                       | anyone (or `ADMIN_EMAILS` when set)          |
-| set                           | the signed-in Google user — **every** `/api/…` route (sessions, `/api/run*`, artifacts, debug) answers `401` without the cookie and `403` for another user's session, whether the user id comes from the path or from the JSON body | disabled (redirects to `/app/`) | administrators listed in `ADMIN_EMAILS` only |
+| `CLIENT_ID` / `CLIENT_SECRET` | Who is the caller                                                                                                                                                                                                                   | `/ui/` web home (`adk-surface`)                   | `POST /auth/models`                          |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | -------------------------------------------- |
+| unset (local development)     | everyone is the anonymous user `user` (with `operator` scope); the port must not be reachable by anyone else                                                                                                                         | available                                         | anyone (or `ADMIN_EMAILS` when set)          |
+| set                           | the signed-in Google user — **every** `/api/…` route (sessions, `/api/run*`, artifacts, debug) answers `401` without the cookie and `403` for another user's session, whether the user id comes from the path or from the JSON body | `ADMIN_EMAILS` only (non-admins redirect to `/app/`, `/api/surface/*` returns `403`) | administrators listed in `ADMIN_EMAILS` only |
 
 Identity is enforced by adk-server's own auth layer through a
 `RequestContextExtractor` backed by the cookie, plus a response guard that
@@ -272,7 +280,7 @@ signed-in user's own sessions and never carry the signed OAuth `state`.
 | `campaign_manager_360` (additionally)                                                                                                          | `parse_sheet_tool` / `traffic_campaigns_in_cm360_tool` (`src/tools/cm360_trafficking`): validates a trafficking sheet, diffs it against CM360, stages the operations as a versioned artifact and executes them once approved. Each staged payload can be executed exactly once; re-parse to retry. The workflow instructions ship with the toolset — no separate skill is needed.                                                                                                                                                         |
 | `bigquery`                                                                                                                                     | Native `BigQueryToolset` (`src/tools/bigquery.rs`): `bigquery_list_datasets`, `bigquery_list_tables`, `bigquery_get_table_schema`, `bigquery_execute_sql` over the BigQuery REST API with the **user's** token. Read-only by default (a single `SELECT`/`WITH` statement, checked before any request is sent and then confirmed by a BigQuery dry run unless `BIGQUERY_DRY_RUN=false`; one query may bill at most `BIGQUERY_MAX_BYTES_BILLED`); `BIGQUERY_READ_ONLY=false` allows DML. Default project `GOOGLE_CLOUD_PROJECT`, overridable per call with `project_id`. The service account needs no BigQuery permissions; users need `bigquery.jobs.create` on the project they query. |
 | `google_genai`                                                                                                                                 | `get_info_about_youtube_video`, `generate_image` (Imagen) and `generate_video` (Veo long-running operation) through the Vertex AI backend; results are saved as session artifacts.                                                                                                                                                                                                                                                                                                                                                        |
-| always on                                                                                                                                      | Python execution (below), `expected_range` (each day's expected range from the days before it), `list_user_files`, adk-rust's `load_artifacts` and `preload_memory`, progressive skills (`list_skills`, `load_skill`, `load_skill_resource`, `reload_skills`), and `adk-ui` generative UI tools (`render_chart`, `render_table`, `render_layout`, `render_card`, `render_form`, `render_confirm`, `render_modal`, `render_alert`, `render_progress`, `render_toast`) and this repo's `render_band_chart`, rendered live in the studio canvas.                                                                                                        |
+| always on                                                                                                                                      | Python execution (below), `expected_range` (each day's expected range from the days before it), `list_user_files`, adk-rust's `load_artifacts` and `preload_memory`, progressive skills (`list_skills`, `load_skill`, `load_skill_resource`, `reload_skills`), `adk-ui` 3.0 / `adk-surface` `DrawToolset` generative UI tools (`render_form`, `render_card`, `render_table`, `render_screen`, `patch_surface`, `delete_surface` on the `studio` catalog), and this repo's `render_band_chart`, rendered live in the studio canvas and `/ui/`.                                                                                                        |
 | Gemini built-ins (`GEMINI_BUILTIN_TOOLS`)                                                                                                      | `google_search`, `url_context`, `google_maps` by default. These run server-side inside Gemini, as does the default `gemini_code_execution`.                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ### Python data analysis
@@ -315,37 +323,33 @@ rejected when staging from GCS.
 
 ## Frontend layout
 
-There are two browser hosts and one `adk-ui` renderer:
+Two browser surfaces are served from `src/server.rs`:
 
-- **The studio, `/app/`** — `src/studio.html` loads `<script type="module"
-  src="/app/app.js">`; the client lives in `src/app/` as native ES modules.
-- **The stock ADK dev UI, `/ui/`** — a third-party React page proxied by the
-  server, which injects `<script type="module" src="/oauth2/helper.js">`
-  before `</body>`. That script is `src/app/ui-helper.js` (also served as
-  `/app/ui-helper.js`): it does the OAuth popup plumbing, finds `render_*`
-  tool blocks in the React transcript, and renders them with the **same**
-  `src/app/adk-ui/*` modules the studio uses. It imports them with absolute
-  `/app/...` specifiers because it is served from `/oauth2/`.
+- **The studio, `/app/`** (also `GET /` redirects to `/app/`) — `src/studio.html`
+  loads `<script type="module" src="/app/app.js">`; the client lives in
+  `src/app/` as native ES modules and renders A2UI v0.9.1 / `DrawToolset`
+  surfaces (`forms` 1.0, `insight` 1.0, `studio` 1.0) plus `render_band_chart`
+  into the right-hand canvas.
+- **The `adk-surface` web home, `/ui/`** — mounted directly from
+  `adk_surface::web::{router, genui::router_wired, home}` with `adk-ui` 3.0's
+  `insight` and `studio` catalogs registered on `SurfaceEngine`, guarded by
+  `ADMIN_EMAILS` / `operator` scope when sign-in is enabled.
 
 `server.rs` embeds every file in the `app_modules!` list with `include_str!`
 and serves it at `/app/<path>` (anything not in that list is 404). Adding a
 module means adding the file, the `app_modules!` entry and a
 `<link rel="modulepreload">` in `studio.html`. Two stylesheets:
-`src/adk-ui.css` (`/app/adk-ui.css`) holds everything the shared renderer
-needs — the `--dm-*` surface tokens, button tokens and overlay z-layers,
-toasts, the modal overlay, alert cards, `.adk-ui-md` markdown typography,
-`.google-symbols`, `.hidden` — and is linked by `studio.html` and injected by
-the helper; `src/studio.css` (`/app/app.css`) is everything else about the
-studio, including the host palette tokens (`--text-*`, `--surface-card`,
-`--border-*`, `--accent-*`, `--mono`) that the ADK UI defines for itself on
-`/ui/`, which is what keeps the cards theme-native there.
-`scripts/check-dark-tokens.sh` verifies the mirrored dark-theme blocks in
-both files.
+`src/adk-ui.css` (`/app/adk-ui.css`) holds the `--dm-*` surface tokens, button
+tokens and overlay z-layers, toasts, the modal overlay, alert cards,
+`.adk-ui-md` markdown typography, `.google-symbols`, `.hidden`; `src/studio.css`
+(`/app/app.css`) holds everything else about the studio, including the host
+palette tokens (`--text-*`, `--surface-card`, `--border-*`, `--accent-*`,
+`--mono`). `scripts/check-dark-tokens.sh` verifies the mirrored dark-theme
+blocks in both files.
 
 ```text
 src/app/
 ├── app.js                 studio entry: imports everything, wires late bindings, runs the init block
-├── ui-helper.js           /ui/ entry (served as /oauth2/helper.js): OAuth popup, transcript scanning, host adapter
 ├── state.js               `state` (shared mutable singletons), `prefs`, `els` (DOM handles), constants
 ├── dom.js                 $(), style(), svgEl(), popovers, focus helpers, showToast, createIcon — no app state
 ├── status.js              setStatus() / showError() + the `onStatusChange` hook
@@ -355,16 +359,17 @@ src/app/
 ├── auth.js                /auth/me, login / logout, openPopup()
 ├── oauth-popup.js         in-flight OAuth consent (SSE events, BroadcastChannel, postMessage)
 ├── sessions.js            ADK session list / create / load / delete
-├── transcript.js          transcript + canvas rendering, streamed-event merging
+├── transcript.js          transcript + canvas rendering, surface versioning, streamed-event merging
 ├── sse.js                 sendMessage(), SSE parsing, composer and attachment handlers
 ├── settings-ui.js         settings popover controls, model pickers, pricing inputs, pane resizer
 ├── stage.js               WebGL dotted-grid stage (`AdSpaceStage`)
 ├── stage-bridge.js        mounts the stage, syncs theme / activity with the app
-├── adk-ui/                the renderer shared by both hosts — imports no app state
-│   ├── index.js           UiResponse extraction / classification, standalone cards
-│   ├── components.js      renderInnerComponent (the component switch) + button handler
+├── adk-ui/                the Studio interactive UI renderer — imports no app state
+│   ├── a2ui.js            A2UI v0.9.1 / DrawToolset wire decoder, JSON pointer & check evaluator — pure
+│   ├── index.js           UiResponse / drawn extraction, classification, standalone cards
+│   ├── components.js      A2UI v0.9.1 / adk-ui 3.0 + legacy component renderers and form submission
 │   ├── modal.js           modal / confirm overlay with focus trap
-│   ├── charts.js          SVG chart renderer — pure
+│   ├── charts.js          SVG chart renderer (incl. stacked, valueFormat, band) — pure
 │   └── tables.js          sortable / filterable table renderer — pure
 └── usage/
     ├── pricing.js         server + fallback model pricing, custom overrides
@@ -375,18 +380,12 @@ src/app/
 
 Rules of the road:
 
-- **The shared renderer imports no app state.** `adk-ui/*`, `dom.js`,
+- **The `adk-ui` renderer imports no app state.** `adk-ui/*`, `dom.js`,
   `format.js` and `markdown.js` never import `state.js` (nor does
-  `usage/counter.js`); that is what lets `/ui/` load them. Everything the
-  renderer needs from its host is injected by the host entry point through
-  a documented setter — `bindSendMessage(fn, { isBusy })`,
+  `usage/counter.js`). Everything the renderer needs from the studio is injected
+  by `app.js` through documented setters — `bindSendMessage(fn, { isBusy })`,
   `bindModalHost({ root, inertTarget })`, `bindModalComponentRenderer`,
-  `bindIconRenderer` — with defaults that suit a page shipping
-  `#ui-modal-root` and the Google Symbols font. `app.js` passes the studio's
-  `sendMessage` / `state.isRunning` / `els.workspace`; `ui-helper.js` passes
-  the ADK composer, the React `#root` and an inline-SVG icon renderer (the
-  `/ui/` CSP blocks the icon web font) and remaps the `--dm-*` tokens onto
-  the ADK palette.
+  `bindIconRenderer`.
 - **Shared mutable state lives on `state.state`.** ES module `let` exports are
   read-only to importers, so cross-module mutable values (`currentUser`,
   `activeSession`, `isRunning`, …) are properties of the exported `state`
@@ -396,9 +395,7 @@ Rules of the road:
   (`onStatusChange`, `bindPreferenceRenderers`, `bindModalComponentRenderer`,
   `bindSendMessage`).
 - No bundler: every file must be valid as-is in the browser (ES2022, no JSX,
-  no TypeScript). `/ui/` additionally runs under `default-src 'self'`: no
-  inline styles or scripts, no cross-origin fonts — the helper styles through
-  CSSOM only.
+  no TypeScript).
 
 ## Deployment
 

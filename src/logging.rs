@@ -28,7 +28,7 @@
 //! The level filter is `RUST_LOG` in both formats.
 
 use std::fmt;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value, json};
 use tracing::field::{Field, Visit};
@@ -75,10 +75,16 @@ impl LogFormat {
 }
 
 static FORMAT: OnceLock<LogFormat> = OnceLock::new();
+static SPAN_EXPORTER: OnceLock<Arc<adk_rust::telemetry::AdkSpanExporter>> = OnceLock::new();
 
 /// The format [`init`] installed; `Text` before it has run.
 pub fn format() -> LogFormat {
     FORMAT.get().copied().unwrap_or(LogFormat::Text)
+}
+
+/// The in-process span exporter installed in [`LogFormat::Text`] mode, if any.
+pub fn span_exporter() -> Option<Arc<adk_rust::telemetry::AdkSpanExporter>> {
+    SPAN_EXPORTER.get().cloned()
 }
 
 /// Installs the process-wide logger. Call once, from `main`, before any
@@ -95,11 +101,12 @@ pub fn init(service_name: &str) {
     );
     let _ = FORMAT.set(format);
     match format {
-        LogFormat::Text => {
-            if let Err(e) = adk_rust::telemetry::init_with_adk_exporter(service_name) {
-                eprintln!("warning: telemetry initialization failed: {e}");
+        LogFormat::Text => match adk_rust::telemetry::init_with_adk_exporter(service_name) {
+            Ok(exporter) => {
+                let _ = SPAN_EXPORTER.set(exporter);
             }
-        }
+            Err(e) => eprintln!("warning: telemetry initialization failed: {e}"),
+        },
         LogFormat::Json => {
             let filter = EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));

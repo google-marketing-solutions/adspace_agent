@@ -14,17 +14,12 @@
  * limitations under the License.
  */
 
-/* AdSpace Agent — shared `adk-ui` renderer stylesheet
+/* AdSpace Agent — `adk-ui` renderer stylesheet
  *
  * Everything the renderer in src/app/adk-ui/* (plus dom.js / markdown.js)
- * relies on, so one stylesheet serves both hosts: the studio (`/app/`,
- * linked from studio.html next to app.css) and the ADK web UI (`/ui/`, where
- * src/app/ui-helper.js injects it). It therefore defines ONLY tokens that no
- * host page defines itself (the `--dm-*` surface tokens, the studio button
- * tokens and the overlay z-layers); host palette tokens such as
- * `--text-primary`, `--surface-card`, `--border-default`, `--accent-*` and
- * `--mono` come from the host (studio.css or the ADK UI's own stylesheet),
- * which is what keeps the cards theme-native in `/ui/`.
+ * relies on, linked by studio.html next to app.css. Defines ONLY tokens that
+ * studio.css does not define itself (the `--dm-*` surface tokens, button
+ * tokens and overlay z-layers).
  */
 :root {
   --protected-btn-outline: rgba(33, 34, 38, 0.12);
@@ -314,6 +309,15 @@
   }
   100% {
     opacity: 0.45;
+  }
+}
+
+@keyframes ui-progress-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(350%);
   }
 }
 

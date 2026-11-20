@@ -21,6 +21,10 @@ import { APP_NAME, els, state } from "./state.js";
 import { showError } from "./status.js";
 import { syncSettingsAvailability } from "./prefs.js";
 import { closeModalOverlay } from "./adk-ui/modal.js";
+import {
+  clearSessionApprovals,
+  fetchSessionApprovals,
+} from "./approvals.js";
 import { rebuildFromSessionEvents } from "./transcript.js";
 
 export const apiUrl = (path) => `/api${path}`;
@@ -110,6 +114,7 @@ export const createNewSession = () => {
       if (state.isRunning && state.abortController) state.abortController.abort();
       ++loadSeq;
       state.sessions = [created, ...state.sessions.filter((s) => s.id !== created.id)];
+      clearSessionApprovals();
       renderSessionOptions(created.id);
       applySessionData(created, true);
     } catch (err) {
@@ -129,16 +134,22 @@ export const loadSession = async (sessionId) => {
   // cannot keep appending the old session's events into the new one.
   if (isSessionSwitch && state.isRunning && state.abortController) state.abortController.abort();
   try {
-    const resp = await fetch(
-      apiUrl(
-        `/apps/${encodeURIComponent(APP_NAME)}/users/${encodeURIComponent(
-          state.currentUser.id
-        )}/sessions/${encodeURIComponent(sessionId)}`
-      )
-    );
+    const [resp, approvals] = await Promise.all([
+      fetch(
+        apiUrl(
+          `/apps/${encodeURIComponent(APP_NAME)}/users/${encodeURIComponent(
+            state.currentUser.id
+          )}/sessions/${encodeURIComponent(sessionId)}`
+        )
+      ),
+      fetchSessionApprovals(sessionId),
+    ]);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
     if (seq !== loadSeq) return; // stale: a newer load has started
+    state.sessionApprovals = approvals ?? [];
+    state.submittingApprovalIds.clear();
+    state.approvalsGeneration += 1;
     applySessionData(data, isSessionSwitch);
   } catch (err) {
     if (seq !== loadSeq) return;

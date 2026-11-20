@@ -26,12 +26,24 @@ import { applyPreferences } from "./prefs.js";
 import { showModalOverlay } from "./adk-ui/modal.js";
 import {
   buildArtifactSurfaceCard,
+  buildStandaloneA2uiCards,
   buildStandaloneCards,
   classifyUiResponse,
   extractPartArtifact,
   extractUiResponse,
   inferArtifactKind,
 } from "./adk-ui/index.js";
+import {
+  extractDrawnEnvelope,
+  extractToolCallName,
+  isUiToolName,
+  reconstructSurfacesFromEvents,
+} from "./adk-ui/a2ui.js";
+import {
+  buildEventConfirmationMap,
+  decideApproval,
+  isBoilerplateConfirmationText,
+} from "./approvals.js";
 import { updateSessionUsageUi } from "./usage/session-usage.js";
 
 const INTERNAL_ARTIFACT_NAMES = new Set(["cm360_campaign_payload.json"]);
@@ -197,6 +209,7 @@ export const mergeStreamedEvent = (prev, incoming) => {
 
 export const shownOverlayIds = new Set();
 let overlayTriggersById = new Map();
+let eventPartSurfaces = new Map();
 
 export const rebuildFromSessionEvents = (
   events,
@@ -204,100 +217,124 @@ export const rebuildFromSessionEvents = (
 ) => {
   state.currentEvents = Array.isArray(events) ? events : [];
   sessionArtifactNames.clear();
-  const prevSurfaceIds = state.canvasSurfaces.map((s) => s.id).join("|");
+  const prevSurfaceSig = state.canvasSurfaces
+    .map((s) => `${s.id}@${s.renderSig || ""}`)
+    .join("|");
   const existingById = new Map(state.canvasSurfaces.map((s) => [s.id, s]));
   const nextSurfaces = [];
   const nextOverlays = new Map();
 
-  state.currentEvents.forEach((ev, idx) => {
-    const parts = ev?.content?.parts || [];
-    let uiIndex = 0;
-    parts.forEach((part) => {
-      const uiResp = extractUiResponse(part);
-      if (!uiResp) return;
-      const slotIndex = uiIndex++;
-      const surfaceId = `surface-${ev.id || idx}-${slotIndex}`;
-      const overlayKey = `${state.activeSession?.id || "anon"}:${ev.id || idx}:${slotIndex}`;
-      const classified = classifyUiResponse(part, uiResp);
+  const { liveEntries, partToSurfaceId } = reconstructSurfacesFromEvents(state.currentEvents);
+  eventPartSurfaces = partToSurfaceId;
 
-      if (classified.toasts.length > 0) {
-        const toastKey = `toast:${overlayKey}`;
-        if (suppressOverlays) {
-          shownOverlayIds.add(toastKey);
-        } else if (!ev.partial && !shownOverlayIds.has(toastKey)) {
-          shownOverlayIds.add(toastKey);
-          classified.toasts.forEach(showToast);
-        }
-      }
-
-      if (classified.kind === "toast") {
-        return;
-      }
-
-      if (classified.kind === "modal") {
-        const modalKey = `modal:${overlayKey}`;
-        nextOverlays.set(surfaceId, {
-          id: surfaceId,
-          title: classified.modal?.title || "Dialog",
-          cta: "Open Modal",
-          icon: "dialogs",
-          onOpen: () => showModalOverlay(classified.modal),
-        });
-        if (suppressOverlays) {
-          shownOverlayIds.add(modalKey);
-        } else if (!ev.partial && !shownOverlayIds.has(modalKey)) {
-          shownOverlayIds.add(modalKey);
-          showModalOverlay(classified.modal);
-        }
-        return;
-      }
-
-      if (classified.kind === "confirm") {
-        const confirmKey = `confirm:${overlayKey}`;
-        nextOverlays.set(surfaceId, {
-          id: surfaceId,
-          title: classified.confirmCard?.title || "Confirm Action",
-          cta: "Review",
-          icon: "help",
-          onOpen: () => showModalOverlay(classified.confirmCard, { isConfirm: true }),
-        });
-        if (suppressOverlays) {
-          shownOverlayIds.add(confirmKey);
-        } else if (!ev.partial && !shownOverlayIds.has(confirmKey)) {
-          shownOverlayIds.add(confirmKey);
-          showModalOverlay(classified.confirmCard, { isConfirm: true });
-        }
-        return;
-      }
-
-      const prev = existingById.get(surfaceId);
-      if (prev) {
+  for (const entry of liveEntries) {
+    if (entry.kind === "a2ui") {
+      const prev = existingById.get(entry.id);
+      if (prev && prev.renderSig === entry.renderSig) {
         nextSurfaces.push(prev);
       } else {
-        const built = buildStandaloneCards(classified.uiResp, classified.toolName);
+        const built = buildStandaloneA2uiCards(entry);
         if (built.cards.length > 0) {
           nextSurfaces.push({
-            id: surfaceId,
+            id: entry.id,
+            version: entry.version,
+            renderSig: entry.renderSig,
             title: built.title,
-            raw: classified.uiResp,
+            raw: entry.raw,
             cards: built.cards,
           });
         }
       }
-    });
+      continue;
+    }
 
+    const ev = entry.ev;
+    const evKey = ev?.id || entry.id;
+    const overlayKey = `${state.activeSession?.id || "anon"}:${evKey}:${entry.id}`;
+    const classified = classifyUiResponse({ name: entry.toolName }, entry.legacyResp);
+
+    if (classified.toasts.length > 0) {
+      const toastKey = `toast:${overlayKey}`;
+      if (suppressOverlays) {
+        shownOverlayIds.add(toastKey);
+      } else if (!ev?.partial && !shownOverlayIds.has(toastKey)) {
+        shownOverlayIds.add(toastKey);
+        classified.toasts.forEach(showToast);
+      }
+    }
+
+    if (classified.kind === "toast") {
+      continue;
+    }
+
+    if (classified.kind === "modal") {
+      const modalKey = `modal:${overlayKey}`;
+      nextOverlays.set(entry.id, {
+        id: entry.id,
+        title: classified.modal?.title || "Dialog",
+        cta: "Open Modal",
+        icon: "dialogs",
+        onOpen: () => showModalOverlay(classified.modal),
+      });
+      if (suppressOverlays) {
+        shownOverlayIds.add(modalKey);
+      } else if (!ev?.partial && !shownOverlayIds.has(modalKey)) {
+        shownOverlayIds.add(modalKey);
+        showModalOverlay(classified.modal);
+      }
+      continue;
+    }
+
+    if (classified.kind === "confirm") {
+      const confirmKey = `confirm:${overlayKey}`;
+      nextOverlays.set(entry.id, {
+        id: entry.id,
+        title: classified.confirmCard?.title || "Confirm Action",
+        cta: "Review",
+        icon: "help",
+        onOpen: () => showModalOverlay(classified.confirmCard, { isConfirm: true }),
+      });
+      if (suppressOverlays) {
+        shownOverlayIds.add(confirmKey);
+      } else if (!ev?.partial && !shownOverlayIds.has(confirmKey)) {
+        shownOverlayIds.add(confirmKey);
+        showModalOverlay(classified.confirmCard, { isConfirm: true });
+      }
+      continue;
+    }
+
+    const prev = existingById.get(entry.id);
+    if (prev && prev.renderSig === entry.renderSig) {
+      nextSurfaces.push(prev);
+    } else {
+      const built = buildStandaloneCards(classified.uiResp, classified.toolName);
+      if (built.cards.length > 0) {
+        nextSurfaces.push({
+          id: entry.id,
+          renderSig: entry.renderSig,
+          title: built.title,
+          raw: classified.uiResp,
+          cards: built.cards,
+        });
+      }
+    }
+  }
+
+  state.currentEvents.forEach((ev, idx) => {
     const eventArtifacts = extractEventArtifacts(ev);
     eventArtifacts.forEach((art, artIdx) => {
       const surfaceId = `surface-artifact-${ev.id || idx}-${artIdx}`;
       const url = artifactUrl(art.filename);
+      const renderSig = `artifact:${url || ""}:${art.filename}`;
       const prev = existingById.get(surfaceId);
-      if (prev && prev.artifactUrl === url) {
+      if (prev && prev.renderSig === renderSig) {
         nextSurfaces.push(prev);
       } else {
         const built = buildArtifactSurfaceCard(art, url);
         if (built.cards.length > 0) {
           nextSurfaces.push({
             id: surfaceId,
+            renderSig,
             title: built.title,
             icon: art.icon,
             filename: art.filename,
@@ -316,21 +353,22 @@ export const rebuildFromSessionEvents = (
     });
   });
 
-  if (
-    !suppressOverlays &&
-    prefs.canvasMode === "focused" &&
-    nextSurfaces.length > 0 &&
-    nextSurfaces.some((s) => !existingById.has(s.id))
-  ) {
-    state.activeSurfaceId = nextSurfaces[nextSurfaces.length - 1].id;
+  const changedSurface = nextSurfaces.findLast((s) => {
+    const prev = existingById.get(s.id);
+    return !prev || prev.renderSig !== s.renderSig;
+  });
+  if (!suppressOverlays && prefs.canvasMode === "focused" && changedSurface) {
+    state.activeSurfaceId = changedSurface.id;
   }
 
   state.canvasSurfaces = nextSurfaces;
   overlayTriggersById = nextOverlays;
-  const nextSurfaceIds = state.canvasSurfaces.map((s) => s.id).join("|");
+  const nextSurfaceSig = state.canvasSurfaces
+    .map((s) => `${s.id}@${s.renderSig || ""}`)
+    .join("|");
 
   renderTranscript();
-  if (forceCanvas || prevSurfaceIds !== nextSurfaceIds) {
+  if (forceCanvas || prevSurfaceSig !== nextSurfaceSig) {
     renderCanvas();
   }
 };
@@ -590,6 +628,107 @@ export const toolPartSig = (tp) => {
   return sig;
 };
 
+const CONFIRMATION_BADGES = {
+  pending: { label: "Confirmation required", icon: "shield", note: "" },
+  approved: { label: "Approved", icon: "check_circle", note: "Approved — execution allowed." },
+  rejected: { label: "Denied", icon: "cancel", note: "Denied by user." },
+  cancelled: { label: "Cancelled", icon: "cancel", note: "Confirmation cancelled." },
+  expired: { label: "Expired", icon: "schedule", note: "Approval expired before execution." },
+  responded: { label: "Answered", icon: "check_circle", note: "Confirmation answered." },
+};
+
+const renderConfirmationCard = (confirmation) => {
+  const { toolName, args, summary, decisionState, approval } = confirmation;
+  const meta = CONFIRMATION_BADGES[decisionState] || CONFIRMATION_BADGES.pending;
+  const isSubmitting = Boolean(
+    approval?.id && state.submittingApprovalIds.has(approval.id)
+  );
+
+  const card = document.createElement("section");
+  card.className = `tool-confirm-card tool-confirm-card--${decisionState}`;
+  card.setAttribute("aria-label", `Confirmation for ${toolName}`);
+
+  const header = document.createElement("div");
+  header.className = "tool-confirm-header";
+
+  const titleWrap = document.createElement("div");
+  titleWrap.className = "tool-confirm-title-wrap";
+  const icon = document.createElement("span");
+  icon.className = "google-symbols tool-confirm-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = meta.icon;
+  const toolEl = document.createElement("code");
+  toolEl.className = "tool-confirm-tool";
+  toolEl.textContent = toolName;
+  titleWrap.append(icon, toolEl);
+
+  const badge = document.createElement("span");
+  badge.className = "tool-confirm-badge";
+  badge.textContent = meta.label;
+  header.append(titleWrap, badge);
+  card.appendChild(header);
+
+  const defaultSummary = `Tool '${toolName}' requires confirmation`;
+  const altSummary = `Approve a call to '${toolName}'`;
+  if (summary && summary !== defaultSummary && summary !== altSummary) {
+    const summaryEl = document.createElement("p");
+    summaryEl.className = "tool-confirm-summary";
+    summaryEl.textContent = summary;
+    card.appendChild(summaryEl);
+  }
+
+  const details = document.createElement("details");
+  details.className = "tool-confirm-args";
+  details.open = decisionState === "pending";
+  const argsSummary = document.createElement("summary");
+  argsSummary.textContent = "Arguments";
+  const pre = document.createElement("pre");
+  pre.textContent = JSON.stringify(args ?? {}, null, 2);
+  details.append(argsSummary, pre);
+  card.appendChild(details);
+
+  if (decisionState === "pending") {
+    const actions = document.createElement("div");
+    actions.className = "tool-confirm-actions";
+    if (approval?.id) {
+      const approveBtn = document.createElement("button");
+      approveBtn.type = "button";
+      approveBtn.className = "button button--primary tool-confirm-btn";
+      approveBtn.disabled = Boolean(state.isRunning || isSubmitting);
+      const approveLabel = document.createElement("span");
+      approveLabel.className = "button__label";
+      approveLabel.textContent = isSubmitting ? "Submitting…" : "Approve & Run";
+      approveBtn.appendChild(approveLabel);
+      approveBtn.addEventListener("click", () => decideApproval(approval, "approve"));
+
+      const denyBtn = document.createElement("button");
+      denyBtn.type = "button";
+      denyBtn.className = "button button--protected tool-confirm-btn";
+      denyBtn.disabled = Boolean(state.isRunning || isSubmitting);
+      const denyLabel = document.createElement("span");
+      denyLabel.className = "button__label";
+      denyLabel.textContent = "Deny";
+      denyBtn.appendChild(denyLabel);
+      denyBtn.addEventListener("click", () => decideApproval(approval, "reject"));
+
+      actions.append(approveBtn, denyBtn);
+    } else {
+      const hint = document.createElement("span");
+      hint.className = "tool-confirm-note";
+      hint.textContent = "Loading approval details…";
+      actions.appendChild(hint);
+    }
+    card.appendChild(actions);
+  } else if (meta.note) {
+    const noteEl = document.createElement("div");
+    noteEl.className = "tool-confirm-note";
+    noteEl.textContent = meta.note;
+    card.appendChild(noteEl);
+  }
+
+  return card;
+};
+
 export const updateMessageCol = (col, item) => {
   const hasBubble = item.partial || Boolean(item.textContent);
   let article = col.querySelector(":scope > article.message");
@@ -711,6 +850,42 @@ export const updateMessageCol = (col, item) => {
     }
   }
 
+  // Write API tool confirmation card (pending Approve/Deny or settled outcome)
+  const conf = item.confirmation;
+  const confirmSig = conf
+    ? JSON.stringify([
+        conf.eventId,
+        conf.decisionState,
+        conf.approval?.id || null,
+        conf.approval?.version ?? null,
+        conf.summary || "",
+        conf.args || null,
+        Boolean(state.isRunning),
+        conf.approval?.id ? state.submittingApprovalIds.has(conf.approval.id) : false,
+      ])
+    : "";
+  if (col.dataset.confirmSig !== confirmSig) {
+    col.dataset.confirmSig = confirmSig;
+    const existingCard = col.querySelector(":scope > .tool-confirm-card");
+    if (!conf) {
+      if (existingCard) existingCard.remove();
+    } else {
+      const nextCard = renderConfirmationCard(conf);
+      if (existingCard) {
+        col.replaceChild(nextCard, existingCard);
+      } else {
+        const beforeEl =
+          col.querySelector(":scope > .chat-canvas-buttons") ||
+          col.querySelector(":scope > .message-usage");
+        if (beforeEl) {
+          col.insertBefore(nextCard, beforeEl);
+        } else {
+          col.appendChild(nextCard);
+        }
+      }
+    }
+  }
+
   // Canvas jump buttons live outside the chat bubble (styled like .cover__buttons)
   const surfacesSig = item.surfaceRefs.map((s) => `${s.id}:${s.artifactUrl || ""}`).join("|");
   if (col.dataset.surfacesSig !== surfacesSig) {
@@ -806,15 +981,21 @@ export const renderTranscript = () => {
   // besides the event itself. The usage prefs and pricing are here because the
   // row is skipped when its item is unchanged, and the footer reads them.
   const surfaceStateStamp = [
-    state.canvasSurfaces.length,
+    state.canvasSurfaces.map((s) => `${s.id}@${s.renderSig || ""}`).join("|"),
     overlayTriggersById.size,
     sessionArtifactNames.size,
     prefs.showTools ? 1 : 0,
     prefs.showMessageUsage ? 1 : 0,
     prefs.showCost ? 1 : 0,
     usageGeneration(),
+    state.approvalsGeneration || 0,
+    state.isRunning ? 1 : 0,
   ].join(":");
   const currentUserLabel = state.currentUser?.name || state.currentUser?.email || "You";
+  const confirmationsByEventIdx = buildEventConfirmationMap(
+    state.currentEvents,
+    state.sessionApprovals
+  );
 
   state.currentEvents.forEach((ev, idx) => {
     // Non-partial historical event objects are immutable across streaming frames;
@@ -850,21 +1031,26 @@ export const renderTranscript = () => {
 
     const toolParts = [];
     const surfaceRefs = [];
-    let uiIndex = 0;
 
-    parts.forEach((part) => {
+    parts.forEach((part, partIdx) => {
       if (!part || typeof part !== "object") return;
-      const callName =
-        part?.name || part?.functionCall?.name || part?.function_call?.name || "";
-      if (callName && String(callName).startsWith("render_")) {
-        return; // Skip raw `render_*` functionCall in chat
+      const callName = extractToolCallName(part);
+      if (isUiToolName(callName)) {
+        return; // Skip raw `DrawToolset` / `render_*` functionCall pills in chat
       }
       const uiResp = extractUiResponse(part);
       if (uiResp) {
-        const surfaceId = `surface-${ev.id || idx}-${uiIndex++}`;
+        const drawnHit = extractDrawnEnvelope(part);
+        const surfaceId =
+          eventPartSurfaces.get(`${idx}:${partIdx}`) ||
+          drawnHit?.drawn?.surfaceId ||
+          `surface-${ev.id || idx}-0`;
         const found =
-          state.canvasSurfaces.find((s) => s.id === surfaceId) || overlayTriggersById.get(surfaceId);
-        if (found) surfaceRefs.push(found);
+          state.canvasSurfaces.find((s) => s.id === surfaceId) ||
+          overlayTriggersById.get(surfaceId);
+        if (found && !surfaceRefs.some((s) => s.id === found.id)) {
+          surfaceRefs.push(found);
+        }
         return;
       }
       if ("name" in part || "functionResponse" in part || "function_response" in part) {
@@ -880,7 +1066,13 @@ export const renderTranscript = () => {
     });
 
     const visibleTools = prefs.showTools ? toolParts : [];
-    if (!textContent && visibleTools.length === 0 && surfaceRefs.length === 0) {
+    const confirmation = confirmationsByEventIdx.get(idx) || null;
+    const renderedText =
+      confirmation && isBoilerplateConfirmationText(textContent, confirmation.toolName)
+        ? ""
+        : textContent;
+
+    if (!renderedText && visibleTools.length === 0 && surfaceRefs.length === 0 && !confirmation) {
       if (!ev?.partial && ev && typeof ev === "object") {
         visibleItemMemo.set(ev, {
           stamp: surfaceStateStamp,
@@ -902,9 +1094,10 @@ export const renderTranscript = () => {
       isUser,
       authorLabel,
       partial: !!ev.partial,
-      textContent,
+      textContent: renderedText,
       visibleTools,
       surfaceRefs,
+      confirmation,
       usage: isUser ? null : cachedEventUsage(ev),
     };
     if (!ev?.partial && ev && typeof ev === "object") {

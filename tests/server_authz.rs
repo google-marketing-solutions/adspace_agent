@@ -23,8 +23,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use adk_rust::Launcher;
+use adk_rust::SingleAgentLoader;
 use adk_rust::agent::LlmAgentBuilder;
+use adk_rust::server::ServerConfig;
 use adk_rust::session::{CreateRequest, GetRequest, InMemorySessionService, SessionService};
 use adk_rust::{Content, Llm, LlmRequest, LlmResponse, LlmResponseStream};
 use adspace_agent::auth::{
@@ -64,6 +65,10 @@ struct TestServer {
 
 impl TestServer {
     async fn start(oauth_configured: bool) -> Self {
+        Self::start_with_admins(oauth_configured, AdminAllowList::default()).await
+    }
+
+    async fn start_with_admins(oauth_configured: bool, admins: AdminAllowList) -> Self {
         let flow = GoogleOAuthFlow::new(OAuthClientConfig {
             client_id: if oauth_configured { "cid" } else { "" }.into(),
             client_secret: if oauth_configured { "secret" } else { "" }.into(),
@@ -78,16 +83,14 @@ impl TestServer {
                 .build()
                 .unwrap(),
         );
-        let launcher = Launcher::new(agent)
-            .app_name(APP_NAME)
-            .with_session_service(sessions.clone());
+        let config = ServerConfig::new(Arc::new(SingleAgentLoader::new(agent)), sessions.clone());
         let app = build_app(
-            launcher,
+            config,
             OAuthRoutes {
                 credentials: credentials.clone(),
                 sessions: sessions.clone(),
                 resume: None,
-                admins: AdminAllowList::default(),
+                admins,
             },
         )
         .unwrap();
@@ -285,7 +288,9 @@ async fn every_api_route_requires_the_owning_users_cookie() {
     assert!(!stream.contains("ya29.victim-secret"), "{stream}");
     assert!(server.event_count(&victim).await > before);
 
-    // 4. With Google Sign-In configured the stock dev UI is gone.
+    // 4. With Google Sign-In configured the stock dev UI and surface APIs
+    //    reject anonymous and non-admin callers, non-loopback Host headers are
+    //    blocked by host_guard, and GET / still leads to /app/.
     let resp = server
         .http
         .get(format!("{}/ui/", server.base))
@@ -293,6 +298,87 @@ async fn every_api_route_requires_the_owning_users_cookie() {
         .await
         .unwrap();
     assert!(resp.url().path().starts_with("/app"), "{}", resp.url());
+
+    let resp = server
+        .get("/api/surface/genui/capabilities", None)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let resp = server
+        .get("/api/surface/genui/capabilities", Some(&attacker_cookie))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let resp = server
+        .http
+        .get(format!("{}/api/apps", server.base))
+        .header(reqwest::header::HOST, "rebind.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn admin_cookie_allows_surface_home_and_apis_when_oauth_configured() {
+    let server =
+        TestServer::start_with_admins(true, AdminAllowList::new(["admin@example.com".to_string()]))
+            .await;
+    let admin_cookie = server.cookie("admin@example.com");
+    let user_cookie = server.cookie("member@example.com");
+
+    // 1. Unauthenticated callers get 401 on /api/surface/* and redirect on /ui/.
+    let resp = server
+        .get("/api/surface/genui/capabilities", None)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let resp = server
+        .http
+        .get(format!("{}/ui/", server.base))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.url().path().starts_with("/app"), "{}", resp.url());
+
+    // 2. Signed-in non-admin callers get 403 on /api/surface/* and redirect on /ui/.
+    let resp = server
+        .get("/api/surface/genui/capabilities", Some(&user_cookie))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let resp = server.get("/ui/", Some(&user_cookie)).send().await.unwrap();
+    assert!(resp.url().path().starts_with("/app"), "{}", resp.url());
+
+    // 3. Administrators listed in ADMIN_EMAILS receive 200 on both /ui/ and /api/surface/*.
+    let resp = server
+        .get("/ui/", Some(&admin_cookie))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(resp.headers().contains_key("content-security-policy"));
+
+    let caps: serde_json::Value = server
+        .get("/api/surface/genui/capabilities", Some(&admin_cookie))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        caps["catalogs"].to_string().contains("adk-ui-studio"),
+        "{caps}"
+    );
 }
 
 #[tokio::test]
@@ -318,6 +404,30 @@ async fn without_sign_in_only_the_anonymous_default_user_exists() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Studio keeps GET / -> /app/ while the adk-surface web home sits at /ui/.
+    let no_redirect = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let root_resp = no_redirect
+        .get(format!("{}/", server.base))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        root_resp.status().is_redirection(),
+        "{}",
+        root_resp.status()
+    );
+    assert_eq!(
+        root_resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok()),
+        Some("/app/")
+    );
+
     let resp = server
         .http
         .get(format!("{}/ui/", server.base))
@@ -325,4 +435,21 @@ async fn without_sign_in_only_the_anonymous_default_user_exists() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "dev UI stays available");
+    assert!(
+        resp.headers().contains_key("content-security-policy"),
+        "adk-surface web home should attach CSP headers"
+    );
+
+    let caps: serde_json::Value = server
+        .get("/api/surface/genui/capabilities", None)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let catalogs = caps["catalogs"].to_string();
+    assert!(catalogs.contains("adk-ui-studio"), "{caps}");
 }

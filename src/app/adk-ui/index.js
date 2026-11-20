@@ -19,7 +19,15 @@ import { style } from "../dom.js";
 import { parseMarkdownBlocksInto } from "../markdown.js";
 import { renderChartInner } from "./charts.js";
 import { renderTableParts } from "./tables.js";
-import { buildAlertParts, renderInnerComponent } from "./components.js";
+import { buildAlertParts, renderA2uiNode, renderInnerComponent } from "./components.js";
+import {
+  cloneJson,
+  detectTableSurface,
+  extractDrawnEnvelope,
+  extractLegacyComponentsResponse,
+  foldA2uiMessages,
+  resolveDynamicString,
+} from "./a2ui.js";
 
 export const compType = (c) => String(c?.type || "").toLowerCase();
 
@@ -43,6 +51,9 @@ export const isConfirmCard = (comp, toolName) => {
 export const classifyUiResponse = (part, uiResp) => {
   const toolName =
     part?.functionResponse?.name || part?.function_response?.name || part?.name || "";
+  if (uiResp?.drawn && typeof uiResp.drawn === "object" && Array.isArray(uiResp.drawn.messages)) {
+    return { kind: "a2ui", toolName, drawn: uiResp.drawn, uiResp, toasts: [] };
+  }
   const comps = Array.isArray(uiResp?.components) ? uiResp.components : [];
   const toasts = comps.filter((c) => String(c?.type || "").toLowerCase() === "toast");
   const rest = comps.filter((c) => String(c?.type || "").toLowerCase() !== "toast");
@@ -63,7 +74,127 @@ export const classifyUiResponse = (part, uiResp) => {
   return { kind: "surface", toolName, uiResp: cleanResp, toasts };
 };
 
+export const buildStandaloneA2uiCards = (entry) => {
+  if (!entry || entry.deleted || !entry.folded) {
+    return { title: entry?.title || entry?.id || "Surface", cards: [] };
+  }
+
+  const folded = entry.folded;
+  const tableSpec = detectTableSurface(folded, {
+    drawnKind: entry.drawnKind,
+    title: entry.title,
+  });
+  if (tableSpec) {
+    const { element, toolbar } = renderTableParts(tableSpec);
+    const { card, body } = createStandaloneCard({
+      title: tableSpec.title,
+      headerRight: toolbar,
+      flushBody: true,
+    });
+    body.appendChild(element);
+    return { title: tableSpec.title, cards: [card] };
+  }
+
+  const runtime = {
+    surfaceId: entry.id || folded.surfaceId || "surface",
+    componentsById: folded.componentsById,
+    dataModel: cloneJson(folded.dataModel ?? {}),
+    actions: Array.isArray(entry.actions) ? entry.actions : [],
+    inputs: [],
+    scopeData: folded.dataModel ?? {},
+    visited: new Set(),
+  };
+
+  const root =
+    runtime.componentsById.get("root") ||
+    (folded.componentOrder?.[0] ? runtime.componentsById.get(folded.componentOrder[0]) : null);
+  if (!root) {
+    return { title: entry.title || entry.id || "Surface", cards: [] };
+  }
+
+  if (root.component === "Chart") {
+    const title =
+      entry.title || resolveDynamicString(root.title, runtime.dataModel) || "Chart";
+    const { card, body } = createStandaloneCard({ title });
+    body.appendChild(renderA2uiNode(root, runtime, { skipTitle: true }));
+    return { title, cards: [card] };
+  }
+
+  if (root.component === "App") {
+    const appTitle = root.title ? resolveDynamicString(root.title, runtime.dataModel) : "";
+    const title = entry.title || appTitle || "App";
+    const { card, body } = createStandaloneCard({ title });
+    body.appendChild(renderA2uiNode(root, runtime, { skipTitle: Boolean(title && appTitle === title) }));
+    return { title, cards: [card] };
+  }
+
+  if (root.component === "Card") {
+    const inner = root.child ? runtime.componentsById.get(root.child) : null;
+    if (inner?.component === "Chart") {
+      const title =
+        entry.title || resolveDynamicString(inner.title, runtime.dataModel) || "Chart";
+      const { card, body } = createStandaloneCard({ title });
+      body.appendChild(renderA2uiNode(inner, runtime, { skipTitle: true }));
+      return { title, cards: [card] };
+    }
+    if (inner?.component === "Column" && Array.isArray(inner.children)) {
+      const remaining = [...inner.children];
+      let liftedTitle = null;
+      let liftedDesc = null;
+      const first = remaining[0] ? runtime.componentsById.get(remaining[0]) : null;
+      if (
+        first?.component === "Text" &&
+        (first.id === "title" || /^h[123]$/i.test(first.variant || ""))
+      ) {
+        liftedTitle = resolveDynamicString(first.text, runtime.dataModel);
+        remaining.shift();
+        const second = remaining[0] ? runtime.componentsById.get(remaining[0]) : null;
+        if (
+          second?.component === "Text" &&
+          (second.id === "description" || second.variant === "caption") &&
+          remaining.length > 1
+        ) {
+          liftedDesc = resolveDynamicString(second.text, runtime.dataModel);
+          remaining.shift();
+        }
+      }
+      const title = entry.title || liftedTitle || "Details";
+      const { card, body } = createStandaloneCard({ title, description: liftedDesc });
+      for (const cid of remaining) {
+        body.appendChild(renderA2uiNode(cid, runtime, {}));
+      }
+      return { title, cards: [card] };
+    }
+    const title = entry.title || "Details";
+    const { card, body } = createStandaloneCard({ title });
+    if (root.child) body.appendChild(renderA2uiNode(root.child, runtime, {}));
+    return { title, cards: [card] };
+  }
+
+  const rootTitle = root.title ? resolveDynamicString(root.title, runtime.dataModel) : "";
+  const title = entry.title || rootTitle || "Dashboard";
+  const { card, body } = createStandaloneCard({ title });
+  body.appendChild(
+    renderA2uiNode(root, runtime, { skipTitle: Boolean(title && rootTitle === title) })
+  );
+  return { title, cards: [card] };
+};
+
 export const buildStandaloneCards = (uiResp, toolName = "") => {
+  if (uiResp?.drawn && typeof uiResp.drawn === "object" && Array.isArray(uiResp.drawn.messages)) {
+    const folded = foldA2uiMessages(uiResp.drawn.messages);
+    return buildStandaloneA2uiCards({
+      id: uiResp.drawn.surfaceId || "surface",
+      kind: "a2ui",
+      toolName,
+      version: uiResp.drawn.version || 1,
+      title: uiResp.drawn.title || null,
+      drawnKind: uiResp.drawn.kind || "screen",
+      actions: uiResp.drawn.actions || [],
+      folded,
+      deleted: Boolean(uiResp.drawn.deleted || folded.deleted),
+    });
+  }
   const comps = Array.isArray(uiResp.components) ? uiResp.components : [];
   const cards = [];
 
@@ -242,32 +373,9 @@ export const buildStandaloneCards = (uiResp, toolName = "") => {
 };
 
 export const extractUiResponse = (obj) => {
-  if (!obj || typeof obj !== "object") return null;
-  if (
-    Array.isArray(obj.components) &&
-    obj.components.length > 0 &&
-    typeof obj.components[0]?.type === "string"
-  ) {
-    return obj;
-  }
-  const candidates = [
-    obj.functionResponse?.response,
-    obj.function_response?.response,
-    obj.response,
-    obj.result,
-  ];
-  for (const c of candidates) {
-    if (
-      c &&
-      typeof c === "object" &&
-      Array.isArray(c.components) &&
-      c.components.length > 0 &&
-      typeof c.components[0]?.type === "string"
-    ) {
-      return c;
-    }
-  }
-  return null;
+  const drawn = extractDrawnEnvelope(obj);
+  if (drawn) return drawn.response;
+  return extractLegacyComponentsResponse(obj);
 };
 
 export const createAlertCard = (alertComp) => {

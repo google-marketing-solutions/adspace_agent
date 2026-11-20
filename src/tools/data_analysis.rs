@@ -148,6 +148,7 @@ pub fn build_python_tool(kind: PythonExecutorKind) -> anyhow::Result<Arc<dyn Too
                 .unwrap_or_else(|_| "python:3.15-slim".to_string()),
             extra_flags: docker_hardening_flags(|name| std::env::var(name).ok()),
             auto_remove: true,
+            ..ContainerConfig::default()
         })),
         PythonExecutorKind::Vertex => {
             let config = VertexSandboxConfig::from_env().map_err(|e| anyhow::anyhow!("{e}"))?;

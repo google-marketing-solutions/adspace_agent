@@ -373,8 +373,10 @@ async fn local_toolsets_expose_expected_tools_and_flags() {
         .expect("bigquery_execute_sql present");
     assert!(!execute.is_read_only(), "DML allowed ⇒ not read-only");
 
-    // CM360 trafficking: exactly the two workflow tools, both mutating
-    // (they stage artifacts and write to CM360), so neither is read-only.
+    // CM360 trafficking: `parse_sheet_tool` only reads CSV artifacts and GETs
+    // CM360 lookup metadata (staging locally in session state without external
+    // writes, so it is read-only but not concurrency-safe), whereas
+    // `traffic_campaigns_in_cm360_tool` mutates CM360 and is not read-only.
     let cm360 = Cm360TraffickingToolset::new(Cm360Services {
         credentials,
         api_override: None,
@@ -384,13 +386,27 @@ async fn local_toolsets_expose_expected_tools_and_flags() {
         agent::list_tool_names(&cm360).await.unwrap(),
         vec!["parse_sheet_tool", "traffic_campaigns_in_cm360_tool"]
     );
-    for tool in tools_of(&cm360).await {
-        assert!(
-            !tool.is_read_only(),
-            "{} mutates session/CM360 state and must not be read-only",
-            tool.name()
-        );
-    }
+    let cm360_tools = tools_of(&cm360).await;
+    let parse_sheet = cm360_tools
+        .iter()
+        .find(|t| t.name() == "parse_sheet_tool")
+        .expect("parse_sheet_tool present");
+    assert!(
+        parse_sheet.is_read_only(),
+        "parse_sheet_tool does not perform external writes"
+    );
+    assert!(
+        !parse_sheet.is_concurrency_safe(),
+        "parse_sheet_tool mutates session state and must stay sequential"
+    );
+    let traffic_campaigns = cm360_tools
+        .iter()
+        .find(|t| t.name() == "traffic_campaigns_in_cm360_tool")
+        .expect("traffic_campaigns_in_cm360_tool present");
+    assert!(
+        !traffic_campaigns.is_read_only(),
+        "traffic_campaigns_in_cm360_tool writes to CM360 and must not be read-only"
+    );
     let (count, bytes) = agent::declaration_size(&cm360).await.unwrap();
     assert_eq!(count, 2);
     assert!(bytes > 0, "CM360 declarations serialise");
@@ -412,17 +428,22 @@ async fn local_toolsets_expose_expected_tools_and_flags() {
     assert!(!save_artifact.is_read_only());
     assert!(save_artifact.is_concurrency_safe());
 
-    // UI rendering: every `render_*` tool only emits UI and is read-only.
+    // UI rendering: every DrawToolset tool only emits UI and is read-only.
     let ui = ui_toolset();
     let ui_tools = tools_of(&ui).await;
-    assert!(!ui_tools.is_empty(), "UI toolset exposes render tools");
+    assert_eq!(ui_tools.len(), adk_rust::DRAW_TOOL_NAMES.len());
     for tool in &ui_tools {
         assert!(
-            tool.name().starts_with("render_"),
+            adk_rust::DRAW_TOOL_NAMES.contains(&tool.name()),
             "unexpected UI tool {}",
             tool.name()
         );
         assert!(tool.is_read_only(), "{} should be read-only", tool.name());
+        assert!(
+            !tool.is_concurrency_safe(),
+            "{} should not be concurrency-safe",
+            tool.name()
+        );
     }
     let (ui_count, _) = agent::declaration_size(&ui).await.unwrap();
     assert_eq!(ui_count, ui_tools.len());

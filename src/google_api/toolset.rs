@@ -841,6 +841,15 @@ impl GoogleApiToolset {
         self.tools.iter().map(|t| t.name().to_string()).collect()
     }
 
+    /// Names of the exposed tools whose HTTP method mutates state.
+    pub fn mutating_tool_names(&self) -> Vec<String> {
+        self.tools
+            .iter()
+            .filter(|t| t.spec.is_mutating())
+            .map(|t| t.name().to_string())
+            .collect()
+    }
+
     /// The exposed tools with their concrete type (specs, scopes), in
     /// declaration order.
     pub fn api_tools(&self) -> &[Arc<GoogleApiTool>] {

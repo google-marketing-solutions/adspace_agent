@@ -874,17 +874,17 @@ impl MethodSpec {
     /// that queries, searches, report runs and tag/forecast generation
     /// (`dimensionValues.query`, `targetingOptions.search`, `reports.run`,
     /// `placements.generatetags`, ...) count as reads while `insert`,
-    /// `create`, `bulkEdit`, `publish`, `upload`, ... count as writes.
+    /// `create`, `bulkEdit`, `publish`, `upload`, `batchJobs.run`, ... count
+    /// as writes.
     pub fn is_mutating(&self) -> bool {
         match self.http_method.as_str() {
             "GET" | "HEAD" | "OPTIONS" => false,
             "POST" => {
-                let leaf = self
-                    .method_id
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
+                let lower = self.method_id.to_ascii_lowercase();
+                let leaf = lower.rsplit('.').next().unwrap_or("");
+                if leaf.starts_with("run") && lower.contains("batchjob") {
+                    return true;
+                }
                 !READ_LIKE_POST_PREFIXES
                     .iter()
                     .any(|prefix| leaf.starts_with(prefix))
@@ -1620,6 +1620,62 @@ mod tests {
         );
         // The googleAds.search POST of the main fixture is a read too.
         assert!(!build_method_specs(&doc(), &SpecOptions::default())[0].is_mutating());
+
+        let extra_doc = DiscoveryDocument::parse(
+            r#"{
+              "name": "googleads", "version": "v26",
+              "rootUrl": "https://googleads.googleapis.com/", "servicePath": "",
+              "schemas": { "Payload": { "id": "Payload", "type": "object", "properties": {} } },
+              "resources": {
+                "customers": {
+                  "resources": {
+                    "campaigns": {
+                      "methods": {
+                        "mutate": { "id": "googleads.customers.campaigns.mutate", "path": "customers/{customerId}/campaigns:mutate", "httpMethod": "POST", "request": { "$ref": "Payload" } }
+                      }
+                    },
+                    "batchJobs": {
+                      "methods": {
+                        "run": { "id": "googleads.customers.batchJobs.run", "path": "customers/{customerId}/batchJobs/{id}:run", "httpMethod": "POST" }
+                      }
+                    },
+                    "googleAds": {
+                      "methods": {
+                        "search": { "id": "googleads.customers.googleAds.search", "path": "customers/{customerId}/googleAds:search", "httpMethod": "POST" }
+                      }
+                    }
+                  }
+                },
+                "files": {
+                  "methods": {
+                    "create": { "id": "drive.files.create", "path": "files", "httpMethod": "POST", "request": { "$ref": "Payload" } },
+                    "update": { "id": "drive.files.update", "path": "files/{fileId}", "httpMethod": "PUT", "request": { "$ref": "Payload" } },
+                    "delete": { "id": "drive.files.delete", "path": "files/{fileId}", "httpMethod": "DELETE" }
+                  }
+                },
+                "placements": {
+                  "methods": {
+                    "generatetags": { "id": "dfareporting.placements.generatetags", "path": "placements/generatetags", "httpMethod": "POST" }
+                  }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let extra = build_method_specs(&extra_doc, &SpecOptions::default());
+        let find = |needle: &str| {
+            extra
+                .iter()
+                .find(|s| s.method_id.ends_with(needle))
+                .unwrap_or_else(|| panic!("missing {needle}"))
+        };
+        assert!(find("campaigns.mutate").is_mutating());
+        assert!(find("batchJobs.run").is_mutating());
+        assert!(find("files.create").is_mutating());
+        assert!(find("files.update").is_mutating());
+        assert!(find("files.delete").is_mutating());
+        assert!(!find("googleAds.search").is_mutating());
+        assert!(!find("placements.generatetags").is_mutating());
     }
 
     #[test]

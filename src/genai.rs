@@ -756,6 +756,7 @@ mod tests {
     #[test]
     fn builds_gemini_clients_for_studio_backend() {
         let client = GenAiClient::studio("key");
+        assert!(client.gemini("gemini-4-neon").is_ok());
         assert!(client.gemini("gemini-4-hydrogen").is_ok());
     }
 }

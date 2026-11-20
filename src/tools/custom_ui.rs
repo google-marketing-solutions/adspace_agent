@@ -175,7 +175,7 @@ impl Tool for RenderBandChartTool {
         }
         if bounded == 0 {
             return Err(invalid(format!(
-                "no row has both a numeric `{lower_key}` and `{upper_key}`; use render_chart for a plain line"
+                "no row has both a numeric `{lower_key}` and `{upper_key}`; use render_screen with a Chart component for a plain line"
             )));
         }
 

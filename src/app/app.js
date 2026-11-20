@@ -31,7 +31,8 @@ import { bindSendMessage, renderInnerComponent } from "./adk-ui/components.js";
 import { updateSessionUsageUi } from "./usage/session-usage.js";
 import { renderCanvas, renderTranscript } from "./transcript.js";
 import { checkAuthStatus } from "./auth.js";
-import { sendMessage } from "./sse.js";
+import { bindApprovalHandlers } from "./approvals.js";
+import { resumeSession, sendMessage } from "./sse.js";
 import { $ } from "./dom.js";
 import { els, state } from "./state.js";
 // Side-effect-only modules (they register their own listeners at load time).
@@ -43,11 +44,11 @@ import "./settings-ui.js";
 onStatusChange(syncStageStreaming);
 bindPreferenceRenderers({ renderTranscript, renderCanvas, updateSessionUsageUi });
 bindModalComponentRenderer(renderInnerComponent);
-// Host adapter for the shared `adk-ui` renderer (the `/ui/` helper supplies
-// its own in ui-helper.js): where the modal mounts / what it makes inert, how
-// a UI button sends, and when sending must be refused.
+// Host adapter for the shared `adk-ui` renderer: where the modal mounts /
+// what it makes inert, how a UI button sends, and when sending must be refused.
 bindModalHost({ root: $("ui-modal-root"), inertTarget: els.workspace });
 bindSendMessage(sendMessage, { isBusy: () => state.isRunning });
+bindApprovalHandlers({ renderTranscript, resumeSession });
 
 // Initialize
 applyPreferences();

@@ -26,7 +26,7 @@ use thiserror::Error;
 pub const APP_NAME: &str = "adspace_agent";
 
 /// Default Gemini model.
-pub const DEFAULT_MODEL: &str = "gemini-4-hydrogen";
+pub const DEFAULT_MODEL: &str = "gemini-4-neon";
 /// Default video generation model.
 pub const DEFAULT_VIDEO_MODEL: &str = "gemini-omni-1.2-flash";
 /// Default image generation model.
@@ -34,6 +34,7 @@ pub const DEFAULT_IMAGE_MODEL: &str = "gemini-nano-banana-2.1";
 
 /// Preset agent LLM models exposed in the Studio settings selector.
 pub const PRESET_MODELS: &[&str] = &[
+    "gemini-4-neon",
     "gemini-4-hydrogen",
     "gemini-4-carbon",
     "gemini-4-argon",
@@ -685,8 +686,10 @@ impl ThinkingSettings {
         {
             return None;
         }
-        let is_gemini_3_or_newer =
-            m.contains("gemini-3") || m.contains("gemini-4") || m.contains("argon");
+        let is_gemini_3_or_newer = m.contains("gemini-3")
+            || m.contains("gemini-4")
+            || m.contains("neon")
+            || m.contains("argon");
         let is_gemini_25 = m.contains("gemini-2.5");
 
         let mut cfg = match self.mode {
@@ -966,7 +969,18 @@ pub struct ModelPricing {
 /// (from <https://aistudio.google.com/docs/pricing>).
 pub fn model_pricing(model: &str) -> ModelPricing {
     let m = model.trim().to_ascii_lowercase();
-    if m.contains("hydrogen") {
+    if m.contains("neon") {
+        // Gemini 4 Neon (Paid Tier Standard): $3.00 in, $0.15 cached, $15.00 out
+        ModelPricing {
+            input_per_million: 3.00,
+            input_long_per_million: 3.00,
+            cached_input_per_million: 0.15,
+            cached_input_long_per_million: 0.15,
+            output_per_million: 15.00,
+            output_long_per_million: 15.00,
+            audio_input_per_million: 3.00,
+        }
+    } else if m.contains("hydrogen") {
         // Gemini 4 Hydrogen (Paid Tier Standard): $1.50 in, $0.075 cached, $7.50 out
         ModelPricing {
             input_per_million: 1.50,
@@ -1275,8 +1289,13 @@ mod tests {
         );
 
         // The Gemini 4 presets, including the default, get low thinking by
-        // default; all three list `low` as a supported level.
-        for model in ["gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon"] {
+        // default; all list `low` as a supported level.
+        for model in [
+            "gemini-4-neon",
+            "gemini-4-hydrogen",
+            "gemini-4-carbon",
+            "gemini-4-argon",
+        ] {
             let cfg = default_cfg
                 .thinking_config_for_model(model)
                 .unwrap_or_else(|| panic!("{model} gets a thinking config"));
@@ -1287,6 +1306,13 @@ mod tests {
         // An explicit `minimal` is downgraded to Low where Minimal is not
         // supported (non-Flash Gemini 3/4), and kept on Flash.
         let minimal_cfg = ThinkingSettings::parse(Some("minimal"), None, None);
+        assert_eq!(
+            minimal_cfg
+                .thinking_config_for_model("gemini-4-neon")
+                .unwrap()
+                .thinking_level,
+            Some(adk_gemini::ThinkingLevel::Low)
+        );
         assert_eq!(
             minimal_cfg
                 .thinking_config_for_model("gemini-4-argon")
@@ -1411,6 +1437,10 @@ mod tests {
         // gemini-3.8-flash: 60k * $0.75/1M ($0.045) + 40k * $0.075/1M ($0.003) + 10k * $3.75/1M ($0.0375) = $0.0855
         let flash38_cost = estimate_usage_cost_usd("gemini-3.8-flash", &usage);
         assert!((flash38_cost - 0.0855).abs() < 1e-9, "got {flash38_cost}");
+
+        // gemini-4-neon: 60k * $3.00/1M ($0.18) + 40k * $0.15/1M ($0.006) + 10k * $15.00/1M ($0.15) = $0.336
+        let neon_cost = estimate_usage_cost_usd("gemini-4-neon", &usage);
+        assert!((neon_cost - 0.336).abs() < 1e-9, "got {neon_cost}");
 
         // gemini-4-argon: 60k * $2.00/1M ($0.12) + 40k * $0.10/1M ($0.004) + 10k * $10.00/1M ($0.10) = $0.224
         let argon_cost = estimate_usage_cost_usd("gemini-4-argon", &usage);

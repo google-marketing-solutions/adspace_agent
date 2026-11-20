@@ -14,7 +14,7 @@
 
 //! The AdSpace Agent main application: builds the root agent and runtime.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, Mutex};
 
 use adk_rust::agent::{LlmAgentBuilder, LlmEventSummarizer};
@@ -25,9 +25,14 @@ use adk_rust::session::SessionService;
 use adk_rust::tool::BasicToolset;
 use adk_rust::tool::memory::PreloadMemoryTool;
 use adk_rust::{
-    Agent, BeforeAgentCallback, CacheCapable, CallbackContext, Content, ContextCacheConfig,
-    EventStream, EventsCompactionConfig, InvocationContext, Part, Result as AdkResult, SessionId,
-    Tool, ToolExecutionStrategy, Toolset, UserId,
+    ActingContext, Agent, AgentCapabilities, AgentInteractionMode, AgentProfile, AgentTopology,
+    AgentTransferDecision, AgentTransferRequest, ApprovalCall, ApprovalPolicy, ApprovalRoute,
+    ApprovalService, ApproverSelector, BeforeAgentCallback, CONFIRMATION_PENDING_STATUS,
+    CacheCapable, CallbackContext, Content, ContextCacheConfig, DRAW_TOOL_NAMES, DataLocality,
+    DurableRunStore, EventStream, EventsCompactionConfig, InMemoryApprovalStore, InMemoryRunStore,
+    InvocationContext, NativeCompaction, NativeWebSearch, Part, Result as AdkResult, RunConfig,
+    SessionId, StoreApprovalService, Tool, ToolConfirmationPolicy, ToolDeclarations,
+    ToolExecutionStrategy, Toolset, UserId,
 };
 use anyhow::Context;
 use async_trait::async_trait;
@@ -73,15 +78,24 @@ to ensure that any audience insights follow Google's policies for audience compo
 work-arounds for these policies, simply reply with the error message. \
 AUTHORIZATION: Google API tools act on behalf of the signed-in user. When a tool returns status `AUTH_REQUIRED`, show the user \
 the `auth_url` as a clickable link, ask them to complete the authorization, and retry the same tool call after they confirm. \
+WRITE CONFIRMATION: Mutating API and campaign trafficking tool calls are automatically held by the runtime for user confirmation \
+before execution. State the intended change concisely and invoke the write tool directly so the user can inspect and approve \
+or deny the exact call—do not ask for a separate text confirmation before invoking the tool. \
 FILES: files the user uploads are saved as session artifacts; use `list_user_files` to see them, `load_artifacts` to read them, \
 and `save_artifact` to save generated files (CSV, TSV, JSON, Markdown, TXT, SQL, YAML, XML, or HTML) as downloadable session artifacts. \
 RESEARCH: use `google_search` for current information from the web, `url_context` to read pages the user links to, and \
 `google_maps` for places, routes and local context. \
-UI RENDERING (`render_*` tools): when presenting campaign metrics, rankings, time-series trends, or multi-metric comparisons, \
-use `render_chart` (bar/line/area/pie), `render_table` (with `sortable: true` and `striped: true`), or `render_layout` \
-(combining `stats`, `chart`, and `table` sections into an executive dashboard) so the user gets an interactive visual in the UI, \
-followed by a concise written takeaway (never dump raw component JSON in text). Use `render_form` when collecting structured \
-campaign parameters or missing IDs, and `render_confirm` / `render_card` before executing write/trafficking actions.";
+UI RENDERING (`render_*`, `patch_surface`, `delete_surface`, `render_band_chart`): when presenting campaign metrics, rankings, \
+time-series trends, or multi-metric comparisons, use `render_table`, `render_card`, or `render_screen` in the `studio` catalog \
+(`https://zavora.ai/a2ui/catalogs/adk-ui-studio/1.0/catalog.json`: `forms` components plus `Chart`, `Sparkline`, `Metric`, \
+`KeyValue`, `Progress`, `Badge`, `App`, `Page`, `Region`, `Scene3D`), followed by a concise written takeaway (never dump raw \
+component JSON in text). Use `render_band_chart` for a metric plotted against expected lower/upper bounds (such as `expected_range` \
+output). Put data rows and numbers in `dataModel` and bind them with `{\"path\": \"/...\"}` instead of pasting raw data into labels, \
+use `patch_surface` when numbers update, and use `delete_surface` to remove an obsolete surface. Use `render_form` when collecting \
+structured campaign parameters or missing IDs, or via governed form actions (`Button`). Rule 5 constraints: use palette tokens (`chart1`..`chart8`, `ink`, `neutral`, `muted`) or status tones rather \
+than hex colors, never include links/URIs or password/secret fields in drawings, and never use reserved approval words \
+(`Approve`, `Approved`, `Deny`, `Done`, `Edit`, `Allow once`, `Always allow`, `Take over`, `Stop all`, `Resume all`) as button or \
+heading labels.";
 
 /// Builds the routing part of the instruction from the tool collections this
 /// process actually loaded, so the text names nothing that is not configured.
@@ -314,6 +328,47 @@ impl adk_rust::Llm for RuntimeModelConfig {
             .uses_interactions_api()
     }
 
+    fn max_cost_micro_usd(&self, request: &adk_rust::LlmRequest) -> Option<u64> {
+        self.llm
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .max_cost_micro_usd(request)
+    }
+
+    fn context_window(&self) -> Option<u64> {
+        let active = self.llm.read().unwrap_or_else(|e| e.into_inner());
+        active.context_window().or_else(|| {
+            let name = active.name().to_ascii_lowercase();
+            (name.contains("gemini-4") || name.contains("neon")).then_some(1_048_576)
+        })
+    }
+
+    fn native_web_search(&self) -> Option<NativeWebSearch> {
+        self.llm
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .native_web_search()
+    }
+
+    fn native_compaction(&self) -> Option<NativeCompaction> {
+        self.llm
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .native_compaction()
+    }
+
+    async fn prewarm(&self) -> AdkResult<()> {
+        let active = self.llm.read().unwrap_or_else(|e| e.into_inner()).clone();
+        active.prewarm().await
+    }
+
+    fn data_locality(&self) -> DataLocality {
+        self.llm
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .data_locality()
+    }
+
     async fn generate_content(
         &self,
         mut req: adk_rust::LlmRequest,
@@ -497,28 +552,53 @@ fn normalize_gemini_request_contents(contents: Vec<adk_rust::Content>) -> Vec<ad
     normalized
 }
 
-/// Compacts successful `render_*` UI tool responses in outgoing LLM requests.
+/// Compacts successful UI tool responses in outgoing LLM requests.
 ///
-/// Session storage and the SSE stream retain the full `adk-ui` component tree
-/// for the Studio frontend, while the LLM only needs confirmation that the
-/// surface rendered (the arguments it passed are already in the paired
-/// `FunctionCall` part; validation errors have no `"components"` array and pass
-/// through verbatim so the model can self-correct).
+/// Session storage and the SSE stream retain the full UI payload (`drawn`
+/// envelope or `render_band_chart` components) for Studio and `/ui/`, while
+/// the LLM only needs a compact summary (error/refusal responses have neither
+/// `"drawn"` nor `"components"` and pass through verbatim so the model can
+/// self-correct).
 fn compact_ui_function_response(fr: &mut adk_rust::FunctionResponseData) {
-    if !fr.name.starts_with("render_") {
+    if DRAW_TOOL_NAMES.contains(&fr.name.as_str()) {
+        let Some(drawn) = fr.response.get("drawn").and_then(|v| v.as_object()) else {
+            return;
+        };
+        let status = fr
+            .response
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("shown");
+        let mut compact = serde_json::json!({ "status": status });
+        if let Some(msg) = fr.response.get("message").and_then(|v| v.as_str()) {
+            compact["message"] = serde_json::Value::String(msg.to_string());
+        }
+        if let Some(surface_id) = drawn.get("surfaceId").and_then(|v| v.as_str()) {
+            compact["surface_id"] = serde_json::Value::String(surface_id.to_string());
+        }
+        if let Some(version) = drawn.get("version").and_then(|v| v.as_u64()) {
+            compact["version"] = serde_json::json!(version);
+        }
+        if let Some(kind) = drawn.get("kind").and_then(|v| v.as_str()) {
+            compact["kind"] = serde_json::Value::String(kind.to_string());
+        }
+        fr.response = compact;
         return;
     }
-    let Some(components) = fr.response.get("components").and_then(|v| v.as_array()) else {
-        return;
-    };
-    let mut compact = serde_json::json!({
-        "status": "rendered",
-        "components": components.len(),
-    });
-    if let Some(surface_id) = fr.response.get("surface_id").and_then(|v| v.as_str()) {
-        compact["surface_id"] = serde_json::Value::String(surface_id.to_string());
+
+    if fr.name == "render_band_chart" {
+        let Some(components) = fr.response.get("components").and_then(|v| v.as_array()) else {
+            return;
+        };
+        let mut compact = serde_json::json!({
+            "status": "rendered",
+            "components": components.len(),
+        });
+        if let Some(surface_id) = fr.response.get("surface_id").and_then(|v| v.as_str()) {
+            compact["surface_id"] = serde_json::Value::String(surface_id.to_string());
+        }
+        fr.response = compact;
     }
-    fr.response = compact;
 }
 
 /// Counts character lengths of text/tool parts and thinking parts in `content`.
@@ -743,6 +823,30 @@ impl adk_rust::Llm for UsageAnnotatedLlm {
         self.inner.uses_interactions_api()
     }
 
+    fn max_cost_micro_usd(&self, request: &adk_rust::LlmRequest) -> Option<u64> {
+        self.inner.max_cost_micro_usd(request)
+    }
+
+    fn context_window(&self) -> Option<u64> {
+        self.inner.context_window()
+    }
+
+    fn native_web_search(&self) -> Option<NativeWebSearch> {
+        self.inner.native_web_search()
+    }
+
+    fn native_compaction(&self) -> Option<NativeCompaction> {
+        self.inner.native_compaction()
+    }
+
+    async fn prewarm(&self) -> AdkResult<()> {
+        self.inner.prewarm().await
+    }
+
+    fn data_locality(&self) -> DataLocality {
+        self.inner.data_locality()
+    }
+
     async fn generate_content(
         &self,
         req: adk_rust::LlmRequest,
@@ -777,6 +881,30 @@ impl adk_rust::Llm for UsageCapture {
 
     fn uses_interactions_api(&self) -> bool {
         self.inner.uses_interactions_api()
+    }
+
+    fn max_cost_micro_usd(&self, request: &adk_rust::LlmRequest) -> Option<u64> {
+        self.inner.max_cost_micro_usd(request)
+    }
+
+    fn context_window(&self) -> Option<u64> {
+        self.inner.context_window()
+    }
+
+    fn native_web_search(&self) -> Option<NativeWebSearch> {
+        self.inner.native_web_search()
+    }
+
+    fn native_compaction(&self) -> Option<NativeCompaction> {
+        self.inner.native_compaction()
+    }
+
+    async fn prewarm(&self) -> AdkResult<()> {
+        self.inner.prewarm().await
+    }
+
+    fn data_locality(&self) -> DataLocality {
+        self.inner.data_locality()
     }
 
     async fn generate_content(
@@ -844,7 +972,7 @@ impl CacheCapable for RuntimeModelConfig {
     async fn create_cache(
         &self,
         system_instruction: &str,
-        tools: &std::collections::HashMap<String, serde_json::Value>,
+        tools: &ToolDeclarations,
         ttl_seconds: u32,
     ) -> AdkResult<String> {
         let active = self
@@ -895,6 +1023,28 @@ pub struct AgentRuntime {
     pub artifact_service: Arc<dyn ArtifactService>,
     /// Memory service.
     pub memory_service: Arc<dyn MemoryService>,
+    /// Shared per-user approval inbox and decision store.
+    pub approval_service: Arc<dyn ApprovalService>,
+}
+
+/// Builds the shared per-user approval service used by the agent runtime,
+/// `/api/approvals` HTTP endpoints, and `/ui/` surface engine.
+///
+/// Each held tool call is routed only to the session's own authenticated owner
+/// (`call.scope.user_id`) with self-approval enabled, so no other user can see
+/// or decide someone else's held write calls.
+pub fn build_approval_service() -> Arc<dyn ApprovalService> {
+    let runs: Arc<dyn DurableRunStore> = Arc::new(InMemoryRunStore::new());
+    Arc::new(
+        StoreApprovalService::new(Arc::new(InMemoryApprovalStore::new()))
+            .with_run_store(runs)
+            .with_router(|call: &ApprovalCall| {
+                Some(ApprovalRoute::new(
+                    ApprovalPolicy::new([ApproverSelector::human(call.scope.user_id.clone())])
+                        .allow_self_approval(),
+                ))
+            }),
+    )
 }
 
 impl AgentRuntime {
@@ -945,9 +1095,10 @@ impl AgentRuntime {
     ) {
         let c = self.settings.compaction;
         let config = adk_rust::IntraCompactionConfig {
-            token_threshold: c.token_threshold,
+            token_threshold: Some(c.token_threshold),
             overlap_event_count: c.event_retention_size.min(usize::MAX as u64) as usize,
             chars_per_token: 4,
+            ..adk_rust::IntraCompactionConfig::default()
         };
         let summarizer: Arc<dyn adk_rust::BaseEventsSummarizer> =
             Arc::new(MeteredSummarizer::new(self.summarizer_llm()));
@@ -1357,9 +1508,15 @@ const LOGGED_ERROR_CHARS: usize = 400;
 /// A failed call comes back as a response with an `error` member, a string
 /// or an object with a `message`: that is how the tools here report an API
 /// failure, and how adk-rust reports a tool that returned `Err` or that the
-/// model named but does not exist. A consent prompt (`status:
-/// "AUTH_REQUIRED"`) is not a failure and has no `error`.
+/// model named but does not exist. Consent prompts (`status: "AUTH_REQUIRED"`)
+/// and held write confirmations (`status: "confirmation_pending"`) are not
+/// failures.
 fn tool_error(response: &serde_json::Value) -> Option<String> {
+    if response.get("status").and_then(serde_json::Value::as_str)
+        == Some(CONFIRMATION_PENDING_STATUS)
+    {
+        return None;
+    }
     let error = response.get("error").filter(|e| !e.is_null())?;
     let text = match error {
         serde_json::Value::String(text) => text.clone(),
@@ -1411,6 +1568,7 @@ pub struct MemorySavingAgent {
     inner: Arc<dyn Agent>,
     memory: Arc<dyn MemoryService>,
     sub_agents: Vec<Arc<dyn Agent>>,
+    approval_service: Option<Arc<dyn ApprovalService>>,
 }
 
 impl MemorySavingAgent {
@@ -1420,7 +1578,21 @@ impl MemorySavingAgent {
             inner,
             memory,
             sub_agents: Vec::new(),
+            approval_service: None,
         }
+    }
+
+    /// Attaches a shared [`ApprovalService`] injected into [`RunConfig`] when
+    /// running via HTTP (`Runner::run`) without an interactive handler.
+    #[must_use]
+    pub fn with_approval_service(mut self, service: Arc<dyn ApprovalService>) -> Self {
+        self.approval_service = Some(service);
+        self
+    }
+
+    /// Returns the attached approval service, if any.
+    pub fn approval_service(&self) -> Option<Arc<dyn ApprovalService>> {
+        self.approval_service.clone()
     }
 }
 
@@ -1436,6 +1608,78 @@ impl Agent for MemorySavingAgent {
 
     fn sub_agents(&self) -> &[Arc<dyn Agent>] {
         &self.sub_agents
+    }
+
+    fn interaction_mode(&self) -> AgentInteractionMode {
+        self.inner.interaction_mode()
+    }
+
+    fn supports_agent_transfer(&self) -> bool {
+        self.inner.supports_agent_transfer()
+    }
+
+    fn capabilities(&self) -> AgentCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn cancel_remote_task(&self, task_id: &str, acting: &ActingContext) -> AdkResult<()> {
+        self.inner.cancel_remote_task(task_id, acting).await
+    }
+
+    fn profile(&self) -> AgentProfile {
+        self.inner.profile()
+    }
+
+    fn topology(&self) -> Option<AgentTopology> {
+        self.inner.topology()
+    }
+
+    fn configure_run(&self, agent_name: &str, config: &mut RunConfig) {
+        self.inner.configure_run(agent_name, config);
+        if config.approval_service.is_none()
+            && config.tool_confirmation_handler.is_none()
+            && let Some(service) = &self.approval_service
+        {
+            if config.approval_store.is_none() {
+                config.approval_store = service.approval_store();
+            }
+            config.approval_service = Some(service.clone());
+        }
+    }
+
+    fn transfer_targets_for(&self, agent_name: &str) -> Option<Vec<String>> {
+        self.inner.transfer_targets_for(agent_name)
+    }
+
+    fn strict_transfer_policy(&self) -> bool {
+        self.inner.strict_transfer_policy()
+    }
+
+    async fn govern_transfer(
+        &self,
+        request: &AgentTransferRequest,
+    ) -> AdkResult<AgentTransferDecision> {
+        self.inner.govern_transfer(request).await
+    }
+
+    fn allows_transfer_to_parent(&self) -> bool {
+        self.inner.allows_transfer_to_parent()
+    }
+
+    fn allows_transfer_to_peers(&self) -> bool {
+        self.inner.allows_transfer_to_peers()
+    }
+
+    async fn close(&self) {
+        self.inner.close().await;
+    }
+
+    async fn prewarm(&self) -> AdkResult<()> {
+        self.inner.prewarm().await
+    }
+
+    async fn screen_user_input(&self, content: &Content) -> AdkResult<Option<Content>> {
+        self.inner.screen_user_input(content).await
     }
 
     async fn run(&self, ctx: Arc<dyn InvocationContext>) -> AdkResult<EventStream> {
@@ -1509,14 +1753,16 @@ impl Agent for MemorySavingAgent {
                     } else {
                         agent_name.clone()
                     };
-                    Some(adk_rust::memory::MemoryEntry {
-                        content: Content {
-                            role: c.role,
-                            parts: text_parts,
-                        },
-                        author,
-                        timestamp: now,
-                    })
+                    Some(
+                        adk_rust::memory::MemoryEntry::new(
+                            Content {
+                                role: c.role,
+                                parts: text_parts,
+                            },
+                            author,
+                        )
+                        .with_timestamp(now),
+                    )
                 })
                 .collect();
             if let Err(e) = memory
@@ -1542,10 +1788,58 @@ pub async fn create_agent(
     credentials: Arc<SessionCredentialManager>,
     memory_service: Arc<dyn MemoryService>,
 ) -> anyhow::Result<Arc<dyn Agent>> {
+    create_agent_with_approvals(settings, model, credentials, memory_service, None).await
+}
+
+/// Creates and configures the AdSpace Agent with an optional shared
+/// [`ApprovalService`] wired into every non-console run via
+/// [`MemorySavingAgent::configure_run`].
+///
+/// # Errors
+///
+/// Returns an error when the model or a required service cannot be built.
+pub async fn create_agent_with_approvals(
+    settings: &Settings,
+    model: Arc<dyn adk_rust::Llm>,
+    credentials: Arc<SessionCredentialManager>,
+    memory_service: Arc<dyn MemoryService>,
+    approval_service: Option<Arc<dyn ApprovalService>>,
+) -> anyhow::Result<Arc<dyn Agent>> {
+    let google_toolsets = load_google_api_toolsets(settings, &credentials).await;
+    let bigquery_read_only = config::env_bool_or("BIGQUERY_READ_ONLY", true);
+    let (agent, write_tools) = build_agent_with_toolsets(
+        settings,
+        model,
+        credentials,
+        memory_service,
+        google_toolsets,
+        bigquery_read_only,
+        approval_service,
+    )
+    .await?;
+    if !write_tools.is_empty() {
+        tracing::info!(
+            "Write API confirmation enabled for {} mutating tools",
+            write_tools.len()
+        );
+    }
+    Ok(agent)
+}
+
+async fn build_agent_with_toolsets(
+    settings: &Settings,
+    model: Arc<dyn adk_rust::Llm>,
+    credentials: Arc<SessionCredentialManager>,
+    memory_service: Arc<dyn MemoryService>,
+    google_toolsets: Vec<GoogleApiToolset>,
+    bigquery_read_only: bool,
+    approval_service: Option<Arc<dyn ApprovalService>>,
+) -> anyhow::Result<(Arc<dyn Agent>, BTreeSet<String>)> {
     let adc = Arc::new(AdcTokenProvider::new(&[]).ok());
     let gcs_client = adc.as_ref().clone().map(|p| GcsClient::new(Arc::new(p)));
 
     let mut toolsets: Vec<Arc<dyn Toolset>> = Vec::new();
+    let mut write_tools: BTreeSet<String> = BTreeSet::new();
 
     // Always-on toolsets (DataAnalysis, Utilities, Skills; PreloadMemory and
     // LoadArtifacts are part of Utilities / model callbacks).
@@ -1574,6 +1868,7 @@ pub async fn create_agent(
     ));
 
     if settings.is_toolset_enabled("campaign_manager_360") {
+        write_tools.insert("traffic_campaigns_in_cm360_tool".to_string());
         let cm360_trafficking: Arc<dyn Toolset> =
             Arc::new(Cm360TraffickingToolset::new(Cm360Services {
                 credentials: credentials.clone(),
@@ -1607,7 +1902,11 @@ pub async fn create_agent(
         });
         lazy.push(Arc::new(toolset));
     };
-    for toolset in load_google_api_toolsets(settings, &credentials).await {
+    for toolset in google_toolsets {
+        // Collect mutating write API tool names upfront across BOTH eager and
+        // lazy/split `_write` toolsets so `ToolConfirmationPolicy::PerTool`
+        // covers deferred tools the moment `enable_toolsets` exposes them.
+        write_tools.extend(toolset.mutating_tool_names());
         if !settings.lazy_toolsets.iter().any(|n| n == toolset.name()) {
             loaded.push(toolset.name().to_string());
             toolsets.push(Arc::new(toolset));
@@ -1633,12 +1932,15 @@ pub async fn create_agent(
     }
 
     if settings.is_toolset_enabled("bigquery") {
+        if !bigquery_read_only {
+            write_tools.insert("bigquery_execute_sql".to_string());
+        }
         // Runs with the signed-in user's OAuth token (never the service
         // account's ADC), like every other data toolset.
         let bq: Arc<dyn Toolset> = Arc::new(
             BigQueryToolset::new(credentials.clone())
                 .with_project(settings.google_cloud_project.clone())
-                .with_read_only(config::env_bool_or("BIGQUERY_READ_ONLY", true))
+                .with_read_only(bigquery_read_only)
                 .with_dry_run(config::env_bool_or("BIGQUERY_DRY_RUN", true))
                 .with_max_bytes_billed(Some(config::env_u64_or(
                     "BIGQUERY_MAX_BYTES_BILLED",
@@ -1725,17 +2027,23 @@ pub async fn create_agent(
         .description(AGENT_DESCRIPTION)
         .instruction(instruction)
         .model(model)
+        .expose_tool_error_messages(true)
         .tool_execution_strategy(ToolExecutionStrategy::Auto)
         .before_callback(save_uploaded_files_callback())
         .before_model_callback(preload_callback);
+    if !write_tools.is_empty() {
+        builder =
+            builder.tool_confirmation_policy(ToolConfirmationPolicy::PerTool(write_tools.clone()));
+    }
     for toolset in toolsets {
         builder = builder.toolset(toolset);
     }
     let llm_agent = builder.build().context("building the AdSpace LLM agent")?;
-    Ok(Arc::new(MemorySavingAgent::new(
-        Arc::new(llm_agent),
-        memory_service,
-    )))
+    let mut wrapped = MemorySavingAgent::new(Arc::new(llm_agent), memory_service);
+    if let Some(service) = approval_service {
+        wrapped = wrapped.with_approval_service(service);
+    }
+    Ok((Arc::new(wrapped), write_tools))
 }
 
 type PreloadCache = Mutex<std::collections::VecDeque<(String, Option<String>)>>;
@@ -1855,11 +2163,13 @@ pub async fn build_runtime() -> anyhow::Result<AgentRuntime> {
     let session_service = services::build_session_service().await?;
     let artifact_service = services::build_artifact_service()?;
     let memory_service = services::build_memory_service()?;
-    let agent = create_agent(
+    let approval_service = build_approval_service();
+    let agent = create_agent_with_approvals(
         &settings,
         models.clone() as Arc<dyn adk_rust::Llm>,
         credentials.clone(),
         memory_service.clone(),
+        Some(approval_service.clone()),
     )
     .await?;
     Ok(AgentRuntime {
@@ -1871,6 +2181,7 @@ pub async fn build_runtime() -> anyhow::Result<AgentRuntime> {
         session_service,
         artifact_service,
         memory_service,
+        approval_service,
     })
 }
 
@@ -2102,10 +2413,17 @@ mod tests {
                 .count(),
             LOGGED_ERROR_CHARS
         );
-        // Not failures: a result, a null error, a consent prompt.
+        // Not failures: a result, a null error, a consent prompt, a held confirmation.
         assert_eq!(tool_error(&json!({ "results": [] })), None);
         assert_eq!(tool_error(&json!({ "error": null, "rows": 3 })), None);
         assert_eq!(tool_error(&json!({ "status": "AUTH_REQUIRED" })), None);
+        assert_eq!(
+            tool_error(&json!({
+                "status": CONFIRMATION_PENDING_STATUS,
+                "error": "Tool 'googleads_customers_campaigns_mutate' requires confirmation"
+            })),
+            None
+        );
         assert_eq!(tool_error(&json!("plain text result")), None);
     }
 
@@ -2265,8 +2583,8 @@ mod tests {
         });
         let raw_stream: adk_rust::LlmResponseStream =
             Box::pin(futures::stream::once(async move { Ok(resp) }));
-        let span = adk_rust::telemetry::llm_generate_span("gemini", "gemini-4-hydrogen", true);
-        let mut tracked = track_stream_token_usage(raw_stream, span, "gemini-4-hydrogen".into());
+        let span = adk_rust::telemetry::llm_generate_span("gemini", "gemini-4-neon", true);
+        let mut tracked = track_stream_token_usage(raw_stream, span, "gemini-4-neon".into());
         let item = tracked
             .next()
             .await
@@ -2275,7 +2593,7 @@ mod tests {
         let usage = item.usage_metadata.expect("usage metadata present");
         assert!(usage.cost.unwrap_or(0.0) > 0.0);
         let provider_usage = usage.provider_usage.expect("provider_usage present");
-        assert_eq!(provider_usage["gen_ai.request.model"], "gemini-4-hydrogen");
+        assert_eq!(provider_usage["gen_ai.request.model"], "gemini-4-neon");
         assert_eq!(provider_usage["gen_ai.usage.input_tokens"], 1_000);
         assert_eq!(provider_usage["gen_ai.usage.output_tokens"], 250);
         assert_eq!(provider_usage["gen_ai.usage.total_tokens"], 1_250);
@@ -2302,8 +2620,8 @@ mod tests {
 
         let raw_stream: adk_rust::LlmResponseStream =
             Box::pin(futures::stream::iter(vec![Ok(chunk1), Ok(chunk2)]));
-        let span = adk_rust::telemetry::llm_generate_span("gemini", "gemini-4-hydrogen", true);
-        let mut tracked = track_stream_token_usage(raw_stream, span, "gemini-4-hydrogen".into());
+        let span = adk_rust::telemetry::llm_generate_span("gemini", "gemini-4-neon", true);
+        let mut tracked = track_stream_token_usage(raw_stream, span, "gemini-4-neon".into());
 
         let first = tracked.next().await.unwrap().unwrap();
         let u1 = first.usage_metadata.expect("chunk1 usage");
@@ -2435,8 +2753,12 @@ mod tests {
                 role: "model".to_string(),
                 parts: vec![
                     Part::FunctionCall {
-                        name: "render_chart".to_string(),
-                        args: serde_json::json!({"title": "Spend", "data": [{"x": 1, "y": 100}]}),
+                        name: "render_screen".to_string(),
+                        args: serde_json::json!({
+                            "surfaceId": "surf-42",
+                            "title": "Spend",
+                            "components": [{"id": "root", "component": "Text", "text": "ok"}]
+                        }),
                         id: Some("ui_1".to_string()),
                         thought_signature: None,
                     },
@@ -2446,6 +2768,12 @@ mod tests {
                         id: Some("ui_2".to_string()),
                         thought_signature: None,
                     },
+                    Part::FunctionCall {
+                        name: "patch_surface".to_string(),
+                        args: serde_json::json!({"surfaceId": "surf-42", "data": [{"path": "/x", "value": 2}]}),
+                        id: Some("ui_3".to_string()),
+                        thought_signature: None,
+                    },
                 ],
             },
             Content {
@@ -2453,12 +2781,19 @@ mod tests {
                 parts: vec![
                     Part::FunctionResponse {
                         function_response: adk_rust::FunctionResponseData::new(
-                            "render_chart",
+                            "render_screen",
                             serde_json::json!({
-                                "surface_id": "surf-42",
-                                "components": [
-                                    {"type": "chart", "title": "Spend", "data": [{"x": 1, "y": 100}]}
-                                ]
+                                "status": "shown",
+                                "message": "Shown to the person as version 1 of 'surf-42'.",
+                                "drawn": {
+                                    "surfaceId": "surf-42",
+                                    "version": 1,
+                                    "kind": "screen",
+                                    "catalogId": adk_ui::catalogs::STUDIO_ID,
+                                    "messages": [
+                                        {"version": "v0.9.1", "createSurface": {"surfaceId": "surf-42", "catalogId": adk_ui::catalogs::STUDIO_ID}}
+                                    ]
+                                }
                             }),
                         ),
                         id: Some("ui_1".to_string()),
@@ -2470,6 +2805,24 @@ mod tests {
                             serde_json::json!({"error": "missing columns"}),
                         ),
                         id: Some("ui_2".to_string()),
+                        annotations: None,
+                    },
+                    Part::FunctionResponse {
+                        function_response: adk_rust::FunctionResponseData::new(
+                            "patch_surface",
+                            serde_json::json!({
+                                "status": "shown",
+                                "message": "Shown to the person as version 2 of 'surf-42'.",
+                                "drawn": {
+                                    "surfaceId": "surf-42",
+                                    "version": 2,
+                                    "kind": "screen",
+                                    "catalogId": adk_ui::catalogs::STUDIO_ID,
+                                    "messages": []
+                                }
+                            }),
+                        ),
+                        id: Some("ui_3".to_string()),
                         annotations: None,
                     },
                 ],
@@ -2487,7 +2840,13 @@ mod tests {
         };
         assert_eq!(
             ok_ui.response,
-            serde_json::json!({"status": "rendered", "components": 1, "surface_id": "surf-42"})
+            serde_json::json!({
+                "status": "shown",
+                "message": "Shown to the person as version 1 of 'surf-42'.",
+                "surface_id": "surf-42",
+                "version": 1,
+                "kind": "screen"
+            })
         );
         let Part::FunctionResponse {
             function_response: err_ui,
@@ -2500,5 +2859,197 @@ mod tests {
             err_ui.response,
             serde_json::json!({"error": "missing columns"})
         );
+        let Part::FunctionResponse {
+            function_response: patched_ui,
+            ..
+        } = &fn_parts[2]
+        else {
+            panic!("expected FunctionResponse");
+        };
+        assert_eq!(
+            patched_ui.response,
+            serde_json::json!({
+                "status": "shown",
+                "message": "Shown to the person as version 2 of 'surf-42'.",
+                "surface_id": "surf-42",
+                "version": 2,
+                "kind": "screen"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn create_agent_requires_confirmation_only_for_write_api_tools() {
+        use crate::google_api::DiscoveryDocument;
+        use adk_rust::memory::InMemoryMemoryService;
+
+        let credentials = build_credential_manager(&Settings {
+            model: "gemini-4-neon".into(),
+            video_model: "v".into(),
+            image_model: "i".into(),
+            google_cloud_project: Some("p".into()),
+            google_cloud_location: "global".into(),
+            use_vertex_ai: false,
+            google_api_key: None,
+            client_id: String::new(),
+            client_secret: String::new(),
+            google_ads_developer_token: String::new(),
+            google_ads_login_customer_id: None,
+            enabled_toolsets: vec![],
+            google_ads_tool_filter: None,
+            lazy_toolsets: vec![],
+            lazy_split_writes: true,
+            skills_bucket_name: None,
+            local_skills_dir: "./nonexistent-skills-dir".into(),
+            compaction: config::CompactionSettings::from_env(),
+        });
+
+        let dfa_doc = DiscoveryDocument::parse(
+            r#"{
+              "name": "dfareporting", "version": "v5",
+              "rootUrl": "https://dfareporting.googleapis.com/", "servicePath": "dfareporting/v5/",
+              "schemas": { "Campaign": { "id": "Campaign", "type": "object", "properties": { "name": { "type": "string" } } } },
+              "resources": {
+                "campaigns": {
+                  "methods": {
+                    "list": { "id": "dfareporting.campaigns.list", "path": "campaigns", "httpMethod": "GET" },
+                    "insert": { "id": "dfareporting.campaigns.insert", "path": "campaigns", "httpMethod": "POST", "request": { "$ref": "Campaign" } }
+                  }
+                },
+                "reports": {
+                  "methods": {
+                    "run": { "id": "dfareporting.reports.run", "path": "reports/run", "httpMethod": "POST" }
+                  }
+                },
+                "placements": {
+                  "methods": {
+                    "generatetags": { "id": "dfareporting.placements.generatetags", "path": "placements/generatetags", "httpMethod": "POST" }
+                  }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let ads_doc = DiscoveryDocument::parse(
+            r#"{
+              "name": "googleads", "version": "v26",
+              "rootUrl": "https://googleads.googleapis.com/", "servicePath": "",
+              "schemas": { "Mutate": { "id": "Mutate", "type": "object", "properties": {} } },
+              "resources": {
+                "customers": {
+                  "resources": {
+                    "campaigns": {
+                      "methods": {
+                        "mutate": { "id": "googleads.customers.campaigns.mutate", "path": "customers/{id}/campaigns:mutate", "httpMethod": "POST", "request": { "$ref": "Mutate" } }
+                      }
+                    },
+                    "batchJobs": {
+                      "methods": {
+                        "run": { "id": "googleads.customers.batchJobs.run", "path": "customers/{id}/batchJobs/{job}:run", "httpMethod": "POST" }
+                      }
+                    },
+                    "googleAds": {
+                      "methods": {
+                        "search": { "id": "googleads.customers.googleAds.search", "path": "customers/{id}/googleAds:search", "httpMethod": "POST" }
+                      }
+                    }
+                  }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let make_toolsets = || {
+            vec![
+                GoogleApiToolset::from_document(
+                    &dfa_doc,
+                    GoogleApiToolsetConfig::new("campaign_manager_360", "dfareporting", "v5"),
+                    credentials.clone(),
+                ),
+                GoogleApiToolset::from_document(
+                    &ads_doc,
+                    GoogleApiToolsetConfig::new("google_ads", "googleads", "v26"),
+                    credentials.clone(),
+                ),
+            ]
+        };
+
+        let mut settings = Settings {
+            model: "gemini-4-neon".into(),
+            video_model: "v".into(),
+            image_model: "i".into(),
+            google_cloud_project: Some("p".into()),
+            google_cloud_location: "global".into(),
+            use_vertex_ai: false,
+            google_api_key: None,
+            client_id: String::new(),
+            client_secret: String::new(),
+            google_ads_developer_token: String::new(),
+            google_ads_login_customer_id: None,
+            enabled_toolsets: vec![
+                "campaign_manager_360".into(),
+                "google_ads".into(),
+                "bigquery".into(),
+            ],
+            google_ads_tool_filter: None,
+            // Defer google_ads & CM360 (splitting writes into *_write lazy tiers).
+            lazy_toolsets: vec!["google_ads".into(), "campaign_manager_360".into()],
+            lazy_split_writes: true,
+            skills_bucket_name: None,
+            local_skills_dir: "./nonexistent-skills-dir".into(),
+            compaction: config::CompactionSettings::from_env(),
+        };
+
+        let memory: Arc<dyn MemoryService> = Arc::new(InMemoryMemoryService::new());
+        let model: Arc<dyn adk_rust::Llm> = Arc::new(FixedLlm);
+
+        // 1. Default BIGQUERY_READ_ONLY=true keeps bigquery_execute_sql unconfirmed,
+        //    while collecting BOTH eager + lazy write API tools and CM360 trafficking.
+        let (_, ro_writes) = build_agent_with_toolsets(
+            &settings,
+            model.clone(),
+            credentials.clone(),
+            memory.clone(),
+            make_toolsets(),
+            true,
+            Some(build_approval_service()),
+        )
+        .await
+        .unwrap();
+        assert!(ro_writes.contains("dfareporting_campaigns_insert"));
+        assert!(ro_writes.contains("googleads_customers_campaigns_mutate"));
+        assert!(ro_writes.contains("googleads_customers_batch_jobs_run"));
+        assert!(ro_writes.contains("traffic_campaigns_in_cm360_tool"));
+        assert!(!ro_writes.contains("bigquery_execute_sql"));
+        assert!(!ro_writes.contains("dfareporting_campaigns_list"));
+        assert!(!ro_writes.contains("dfareporting_reports_run"));
+        assert!(!ro_writes.contains("dfareporting_placements_generatetags"));
+        assert!(!ro_writes.contains("googleads_customers_google_ads_search"));
+        assert!(!ro_writes.contains("parse_sheet_tool"));
+        assert!(!ro_writes.contains("save_artifact"));
+        assert!(!ro_writes.contains("render_screen"));
+        assert!(!ro_writes.contains("render_card"));
+        assert!(!ro_writes.contains("render_band_chart"));
+        assert!(!ro_writes.contains("enable_toolsets"));
+
+        // 2. BIGQUERY_READ_ONLY=false adds bigquery_execute_sql, and eager toolsets work identically.
+        settings.lazy_toolsets.clear();
+        let rw_toolsets = make_toolsets();
+        let (_, rw_writes) = build_agent_with_toolsets(
+            &settings,
+            model,
+            credentials,
+            memory,
+            rw_toolsets,
+            false,
+            Some(build_approval_service()),
+        )
+        .await
+        .unwrap();
+        assert!(rw_writes.contains("bigquery_execute_sql"));
+        assert!(rw_writes.contains("traffic_campaigns_in_cm360_tool"));
+        assert!(rw_writes.contains("googleads_customers_batch_jobs_run"));
+        assert!(!rw_writes.contains("parse_sheet_tool"));
     }
 }

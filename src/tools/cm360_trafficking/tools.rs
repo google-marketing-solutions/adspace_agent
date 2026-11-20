@@ -305,6 +305,10 @@ impl Tool for ParseSheetTool {
         Some(json!({ "type": "object", "properties": {} }))
     }
 
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
         tracing::info!("🚀 Starting parse_sheet_tool...");
         if let Err(required) = self.services.ensure_authorized(&ctx).await {

@@ -16,17 +16,9 @@
 
 import { style, svgEl } from "../dom.js";
 import { formatCellValue, formatCompact, toNumber } from "../format.js";
+import { CHART_PALETTE, formatInsightValue, resolveInsightTokenColor } from "./a2ui.js";
 
-export const PALETTE = [
-  "#4b90ff",
-  "#6b7cff",
-  "#9b72cb",
-  "#d96570",
-  "#38bdf8",
-  "#34d399",
-  "#fbbf24",
-  "#f472b6",
-];
+export const PALETTE = CHART_PALETTE;
 
 // Points outside their range on a `band` chart.
 const OUTSIDE_COLOR = "var(--accent-error, #d93025)";
@@ -102,6 +94,21 @@ const axisLabel = (text, max, attrs) => {
   return label;
 };
 
+const formatChartValue = (val, comp, { compact = false } = {}) => {
+  const fmt = comp.valueFormat || comp.value_format || null;
+  const currency = comp.currency || null;
+  if (compact) {
+    const c = formatCompact(val);
+    if (fmt === "percent") return `${c}%`;
+    if (fmt === "currency" && currency) return `${currency} ${c}`;
+    return c;
+  }
+  if (fmt === "percent" || fmt === "currency") {
+    return formatInsightValue(val, { format: fmt, currency });
+  }
+  return formatCellValue(val);
+};
+
 export const renderChartInner = (comp) => {
   const wrap = document.createElement("div");
   style(wrap, { display: "flex", flexDirection: "column", gap: "10px" });
@@ -110,15 +117,39 @@ export const renderChartInner = (comp) => {
   // `window`: draw only the last N rows.
   const windowSize = Number(comp.window);
   const data = Number.isInteger(windowSize) && windowSize > 0 ? rows.slice(-windowSize) : rows;
-  const xKey = comp.x_key || (data[0] ? Object.keys(data[0])[0] : "x");
-  const yKeys =
-    Array.isArray(comp.y_keys) && comp.y_keys.length
-      ? comp.y_keys
-      : data[0]
-        ? Object.keys(data[0]).filter((k) => k !== xKey)
-        : [];
-  const colors = Array.isArray(comp.colors) && comp.colors.length ? comp.colors : PALETTE;
+  const xObj = comp.x && typeof comp.x === "object" ? comp.x : null;
+  const xKey = comp.x_key || xObj?.key || (data[0] ? Object.keys(data[0])[0] : "x");
+  const baseColors =
+    Array.isArray(comp.colors) && comp.colors.length
+      ? comp.colors.map((c, idx) => resolveInsightTokenColor(c) || c || PALETTE[idx % PALETTE.length])
+      : PALETTE;
+  const seriesSpecs =
+    Array.isArray(comp.series) && comp.series.length
+      ? comp.series
+          .filter((s) => s && typeof s === "object" && s.key)
+          .map((s, idx) => ({
+            key: s.key,
+            label: String(s.label || s.key),
+            color:
+              (s.color && resolveInsightTokenColor(s.color)) ||
+              baseColors[idx % baseColors.length],
+          }))
+      : (Array.isArray(comp.y_keys) && comp.y_keys.length
+          ? comp.y_keys
+          : data[0]
+            ? Object.keys(data[0]).filter((k) => k !== xKey)
+            : []
+        ).map((yk, idx) => ({
+          key: yk,
+          label: yk,
+          color: baseColors[idx % baseColors.length],
+        }));
+  const yKeys = seriesSpecs.map((s) => s.key);
+  const colors = baseColors;
   const kind = String(comp.kind || "bar").toLowerCase();
+  const stacked = Boolean(comp.stacked) && seriesSpecs.length > 1;
+  const showLegend =
+    comp.show_legend !== undefined ? comp.show_legend !== false : comp.legend !== false;
   // Accessible name for the `<svg>` (the visible title lives in the card header).
   const chartLabel = comp.title ? String(comp.title) : `${kind} chart`;
 
@@ -132,6 +163,7 @@ export const renderChartInner = (comp) => {
 
   if (kind === "pie") {
     const yKey = yKeys[0];
+    const yLabelText = seriesSpecs[0]?.label || yKey;
     const slices = data
       .map((row, idx) => ({
         label: String(row[xKey] ?? `Item ${idx + 1}`),
@@ -178,7 +210,7 @@ export const renderChartInner = (comp) => {
           "stroke-width": rOuter - rInner,
         });
         const t = svgEl("title");
-        t.textContent = `${s.label}: ${formatCellValue(s.value)} (100%)`;
+        t.textContent = `${s.label}: ${formatChartValue(s.value, comp)} (100%)`;
         c.appendChild(t);
         svg.appendChild(c);
       } else {
@@ -206,7 +238,7 @@ export const renderChartInner = (comp) => {
           "stroke-width": "2",
         });
         const t = svgEl("title");
-        t.textContent = `${s.label}: ${formatCellValue(s.value)} (${(frac * 100).toFixed(1)}%)`;
+        t.textContent = `${s.label}: ${formatChartValue(s.value, comp)} (${(frac * 100).toFixed(1)}%)`;
         path.appendChild(t);
         svg.appendChild(path);
         angle = end;
@@ -220,7 +252,7 @@ export const renderChartInner = (comp) => {
       fill: "var(--dm-text-secondary)",
       "font-size": "10.5",
     });
-    centerTop.textContent = yKey;
+    centerTop.textContent = yLabelText;
     const centerVal = svgEl("text", {
       x: cx,
       y: cy + 14,
@@ -229,7 +261,7 @@ export const renderChartInner = (comp) => {
       "font-size": "16",
       "font-weight": "500",
     });
-    centerVal.textContent = formatCompact(total);
+    centerVal.textContent = formatChartValue(total, comp, { compact: true });
     svg.append(centerTop, centerVal);
 
     const legend = document.createElement("div");
@@ -270,7 +302,7 @@ export const renderChartInner = (comp) => {
       left.append(swatch, lbl);
 
       const right = document.createElement("span");
-      right.textContent = `${formatCompact(s.value)} (${((s.value / total) * 100).toFixed(1)}%)`;
+      right.textContent = `${formatChartValue(s.value, comp, { compact: true })} (${((s.value / total) * 100).toFixed(1)}%)`;
       style(right, {
         color: "var(--dm-text-secondary)",
         fontFamily: "var(--mono)",
@@ -287,8 +319,8 @@ export const renderChartInner = (comp) => {
   }
 
   const isSpark = kind === "sparkline";
-  const xAxisLabel = !isSpark && comp.x_label ? String(comp.x_label).trim() : "";
-  const yAxisLabel = !isSpark && comp.y_label ? String(comp.y_label).trim() : "";
+  const xAxisLabel = !isSpark ? String(comp.x_label ?? xObj?.label ?? "").trim() : "";
+  const yAxisLabel = !isSpark ? String(comp.y_label ?? comp.yLabel ?? "").trim() : "";
   const W = 680;
   const H = isSpark ? 84 : 250;
   // A y-axis label takes a strip to the left of the tick values.
@@ -305,7 +337,8 @@ export const renderChartInner = (comp) => {
   // what the range means; it can be an expected range, a forecast interval,
   // a pacing corridor or a benchmark.
   const isBand = kind === "band";
-  const seriesKeys = isBand ? yKeys.slice(0, 1) : yKeys;
+  const activeSeries = isBand ? seriesSpecs.slice(0, 1) : seriesSpecs;
+  const seriesKeys = activeSeries.map((s) => s.key);
   // The row's bounds in order, or null when either is missing.
   const boundsOf = (row) => {
     const a = toNumber(row?.[comp.lower_key]);
@@ -320,11 +353,25 @@ export const renderChartInner = (comp) => {
   let minVal = isBand ? Infinity : 0;
   let maxVal = isBand ? -Infinity : 0;
   for (const row of data) {
-    for (const yk of seriesKeys) {
-      const v = toNumber(row[yk]);
-      if (Number.isFinite(v)) {
-        if (v < minVal) minVal = v;
-        if (v > maxVal) maxVal = v;
+    if (stacked && (kind === "bar" || kind === "area")) {
+      let posSum = 0;
+      let negSum = 0;
+      for (const yk of seriesKeys) {
+        const v = toNumber(row[yk]);
+        if (Number.isFinite(v)) {
+          if (v >= 0) posSum += v;
+          else negSum += v;
+        }
+      }
+      if (negSum < minVal) minVal = negSum;
+      if (posSum > maxVal) maxVal = posSum;
+    } else {
+      for (const yk of seriesKeys) {
+        const v = toNumber(row[yk]);
+        if (Number.isFinite(v)) {
+          if (v < minVal) minVal = v;
+          if (v > maxVal) maxVal = v;
+        }
       }
     }
     const bounds = isBand ? boundsOf(row) : null;
@@ -384,7 +431,7 @@ export const renderChartInner = (comp) => {
         fill: "var(--dm-text-secondary)",
         "font-size": "10.5",
       });
-      label.textContent = formatCompact(val);
+      label.textContent = formatChartValue(val, comp, { compact: true });
       svg.append(line, label);
     }
   }
@@ -398,13 +445,13 @@ export const renderChartInner = (comp) => {
   }
 
   const n = data.length;
-  // `x_type`: `time` and `numeric` x values are read as such; the default is
+  // `x_type`: `time` and `numeric`/`number` x values are read as such; the default is
   // a category, shown as given.
-  const xType = String(comp.x_type || "category").toLowerCase();
+  const xType = String(comp.x_type || xObj?.type || "category").toLowerCase();
   const xValues =
     xType === "time"
       ? data.map((row) => toTime(row[xKey]))
-      : xType === "numeric"
+      : xType === "numeric" || xType === "number"
         ? data.map((row) => toNumber(row[xKey]))
         : null;
   const formatTime = xType === "time" ? timeFormatter(xValues, comp.time_format) : null;
@@ -416,36 +463,56 @@ export const renderChartInner = (comp) => {
   if (kind === "bar") {
     const groupStep = plotW / Math.max(1, n);
     const groupW = groupStep * 0.72;
-    const barW = Math.max(4, groupW / Math.max(1, yKeys.length) - 2);
+    const barW = stacked
+      ? Math.max(6, groupW)
+      : Math.max(4, groupW / Math.max(1, activeSeries.length) - 2);
     const zeroY = yToPx(Math.max(0, minVal));
     // Show at most ~10 x-axis labels regardless of row count.
     const stepEvery = Math.max(1, Math.ceil(n / 10));
 
     data.forEach((row, i) => {
       const gx = padL + i * groupStep + (groupStep - groupW) / 2;
-      yKeys.forEach((yk, sIdx) => {
+      let posAcc = 0;
+      let negAcc = 0;
+      activeSeries.forEach((seriesSpec, sIdx) => {
+        const yk = seriesSpec.key;
         const raw = row[yk];
         const v = toNumber(raw);
         if (!Number.isFinite(v)) return;
-        const yVal = yToPx(v);
-        const top = Math.min(yVal, zeroY);
-        const h = Math.max(2, Math.abs(zeroY - yVal));
-        const bx = gx + sIdx * (barW + 2);
+        let top;
+        let h;
+        let bx;
+        if (stacked) {
+          const base = v >= 0 ? posAcc : negAcc;
+          const next = base + v;
+          if (v >= 0) posAcc = next;
+          else negAcc = next;
+          const yBase = yToPx(base);
+          const yNext = yToPx(next);
+          top = Math.min(yBase, yNext);
+          h = Math.max(1, Math.abs(yBase - yNext));
+          bx = gx;
+        } else {
+          const yVal = yToPx(v);
+          top = Math.min(yVal, zeroY);
+          h = Math.max(2, Math.abs(zeroY - yVal));
+          bx = gx + sIdx * (barW + 2);
+        }
         const rect = svgEl("rect", {
           x: bx,
           y: top,
           width: barW,
           height: h,
-          rx: "6",
-          fill: colors[sIdx % colors.length],
+          rx: stacked ? "3" : "6",
+          fill: seriesSpec.color,
           stroke: "none",
         });
         const title = svgEl("title");
-        title.textContent = `${row[xKey] ?? i} · ${yk}: ${formatCellValue(raw)}`;
+        title.textContent = `${row[xKey] ?? i} · ${seriesSpec.label}: ${formatChartValue(raw, comp)}`;
         rect.appendChild(title);
         svg.appendChild(rect);
 
-        if (n <= 12 && yKeys.length === 1) {
+        if (!stacked && n <= 12 && activeSeries.length === 1) {
           const valTxt = svgEl("text", {
             x: bx + barW / 2,
             y: Math.max(10, top - 5),
@@ -453,7 +520,7 @@ export const renderChartInner = (comp) => {
             fill: "var(--dm-text-secondary)",
             "font-size": "10",
           });
-          valTxt.textContent = formatCompact(v);
+          valTxt.textContent = formatChartValue(v, comp, { compact: true });
           svg.appendChild(valTxt);
         }
       });
@@ -533,28 +600,40 @@ export const renderChartInner = (comp) => {
       flush();
     }
 
-    seriesKeys.forEach((yk, sIdx) => {
-      const color = colors[sIdx % colors.length];
+    let stackedPrevVals = stacked && kind === "area" ? data.map(() => 0) : null;
+    activeSeries.forEach((seriesSpec) => {
+      const yk = seriesSpec.key;
+      const color = seriesSpec.color;
       const pts = [];
       data.forEach((row, i) => {
         const v = toNumber(row[yk]);
         if (Number.isFinite(v)) {
-          pts.push({ x: xForIdx(i), y: yToPx(v), raw: row[yk], label: row[xKey] ?? i, value: v, row });
+          const prevBase = stackedPrevVals ? stackedPrevVals[i] : 0;
+          const plotVal = stackedPrevVals ? prevBase + v : v;
+          if (stackedPrevVals) stackedPrevVals[i] = plotVal;
+          pts.push({
+            x: xForIdx(i),
+            y: yToPx(plotVal),
+            yBottom: stackedPrevVals ? yToPx(prevBase) : baseY,
+            raw: row[yk],
+            label: row[xKey] ?? i,
+            value: v,
+            row,
+          });
         }
       });
       if (!pts.length) return;
 
       if (kind === "area" && pts.length > 1) {
         const areaPts = [
-          `${pts[0].x},${baseY}`,
           ...pts.map((p) => `${p.x},${p.y}`),
-          `${pts[pts.length - 1].x},${baseY}`,
+          ...pts.slice().reverse().map((p) => `${p.x},${p.yBottom}`),
         ].join(" ");
         svg.appendChild(
           svgEl("polygon", {
             points: areaPts,
             fill: color,
-            "fill-opacity": "0.14",
+            "fill-opacity": stacked ? "0.24" : "0.14",
             stroke: "none",
           })
         );
@@ -596,7 +675,7 @@ export const renderChartInner = (comp) => {
             "stroke-width": "1.5",
           });
           const t = svgEl("title");
-          t.textContent = `${p.label} · ${yk}: ${formatCellValue(p.raw)}`;
+          t.textContent = `${p.label} · ${seriesSpec.label}: ${formatChartValue(p.raw, comp)}`;
           if (bounds) {
             t.textContent += ` · range ${formatCellValue(bounds.lo)} – ${formatCellValue(bounds.hi)}`;
             if (side) t.textContent += ` · ${side} range`;
@@ -648,7 +727,7 @@ export const renderChartInner = (comp) => {
 
   wrap.appendChild(svg);
 
-  if (comp.show_legend !== false && !isSpark && yKeys.length > 0) {
+  if (showLegend && !isSpark && activeSeries.length > 0) {
     const legend = document.createElement("div");
     style(legend, {
       display: "flex",
@@ -668,15 +747,16 @@ export const renderChartInner = (comp) => {
       item.append(dot, txt);
       legend.appendChild(item);
     };
-    seriesKeys.forEach((yk, sIdx) => {
-      legendItem(yk, { background: colors[sIdx % colors.length] });
+    activeSeries.forEach((seriesSpec) => {
+      legendItem(seriesSpec.label, { background: seriesSpec.color });
     });
     if (isBand) {
+      const bandColor = activeSeries[0]?.color || colors[0];
       legendItem(String(comp.band_label || "Expected range"), {
         width: "14px",
         borderRadius: "3px",
-        background: `color-mix(in srgb, ${colors[0]} 24%, transparent)`,
-        border: `1px dashed color-mix(in srgb, ${colors[0]} 55%, transparent)`,
+        background: `color-mix(in srgb, ${bandColor} 24%, transparent)`,
+        border: `1px dashed color-mix(in srgb, ${bandColor} 55%, transparent)`,
       });
       if (outside.length) legendItem("Outside range", { background: OUTSIDE_COLOR });
     }

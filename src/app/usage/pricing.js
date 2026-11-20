@@ -51,6 +51,18 @@ export const ingestServerPricing = (models) => {
 // `config::model_pricing` in src/config.rs rule-for-rule (keep both in sync).
 // Official Paid Tier pricing per 1M tokens (USD) from https://aistudio.google.com/docs/pricing
 export const getFallbackModelPricing = (m) => {
+  if (m.includes("neon")) {
+    // Gemini 4 Neon: $3.00 in, $0.15 cached, $15.00 out
+    return {
+      input: 3.0,
+      inputLong: 3.0,
+      cached: 0.15,
+      cachedLong: 0.15,
+      output: 15.0,
+      outputLong: 15.0,
+      audioIn: 3.0,
+    };
+  }
   if (m.includes("hydrogen")) {
     // Gemini 4 Hydrogen: $1.50 in, $0.075 cached, $7.50 out
     return {
@@ -178,7 +190,8 @@ export const getDefaultModelPricing = (model, tier = prefs.pricingTier) => {
     .toLowerCase();
   const base = state.serverModelPricing[m] || getFallbackModelPricing(m);
 
-  const mult = tier === "priority" ? 1.8 : tier === "batch" ? 0.5 : 1.0;
+  const mult =
+    tier === "free" ? 0 : tier === "priority" ? 1.8 : tier === "batch" ? 0.5 : 1.0;
   const scale = (v) => Number((v * mult).toFixed(6));
   return {
     input: scale(base.input),

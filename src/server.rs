@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! HTTP server (ADK web UI + REST API + OAuth callback) and console REPL.
+//! HTTP server (AdSpace Studio `/app/`, `adk-surface` web home `/ui/`,
+//! REST API, and OAuth callback) and console REPL.
 //!
-//! Both modes are built on adk-rust's [`Launcher`] (from `adk-cli`): the
-//! console mode is its readline REPL, and the server is its Axum application
-//! with our OAuth redirect route merged in. The redirect handler writes the
+//! HTTP serve mode builds on `adk-server`'s [`ServerBuilder`] and
+//! `adk-surface`'s [`SurfaceEngine`] / web home, while console mode uses
+//! `adk-cli`'s [`Launcher`] readline REPL. The redirect handler writes the
 //! exchanged Google tokens into the chat session named by the signed `state`
 //! parameter, so credentials are attached to sessions, never to the server —
 //! and then resumes that chat with a turn of its own, so the user does not
@@ -28,11 +29,17 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use adk_cli::Launcher;
 use adk_rust::artifact::{ArtifactService, LoadRequest, SaveRequest};
-use adk_rust::server::shutdown_signal;
-use adk_rust::server::{RequestContext, RequestContextError, RequestContextExtractor};
+use adk_rust::runner::Runner;
+use adk_rust::server::{
+    RequestContext, RequestContextError, RequestContextExtractor, SecurityConfig, ServerBuilder,
+    ServerConfig, shutdown_signal,
+};
 use adk_rust::session::SessionService;
-use adk_rust::{CacheCapable, Launcher};
+use adk_rust::{ApprovalService, CacheCapable, GovernanceControl, RunConfig, SingleAgentLoader};
+use adk_surface::genui::GenuiWiring;
+use adk_surface::{GrantedUse, LocalSource, Place, SurfaceEngine};
 use async_trait::async_trait;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Path, Query, Request, State};
@@ -41,7 +48,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{AppendHeaders, Html, IntoResponse, Redirect, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, get_service, post};
 use axum::{Json, Router};
 use base64::Engine as _;
 use futures::stream::StreamExt as _;
@@ -156,11 +163,9 @@ fn spawn_resume(runner: Arc<TurnRunner>, session: SessionRef, token: &OAuthToken
     });
 }
 
-/// Path of the browser helper that turns auth links into a popup flow.
-pub const AUTH_HELPER_PATH: &str = "/oauth2/helper.js";
-/// Path of the SSE stream delivering real-time `auth_required` events to `/ui/`.
+/// Path of the SSE stream delivering real-time `auth_required` events.
 pub const AUTH_EVENTS_PATH: &str = "/oauth2/events";
-/// Path where `/ui/` reports whether `window.open` succeeded.
+/// Path where consent status acknowledgments are reported.
 pub const AUTH_ACK_PATH: &str = "/oauth2/ack";
 /// Cookie name storing the signed Google user profile for `/app/`.
 pub const USER_COOKIE_NAME: &str = "adspace_user";
@@ -179,17 +184,11 @@ const MAX_SCRUBBED_SSE_EVENT_BYTES: usize = 32 * 1024 * 1024;
 /// Default time in-flight requests get to finish after SIGTERM
 /// (`SHUTDOWN_GRACE_SECS`; Cloud Run allows 10 s).
 const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(8);
-/// Module path (relative to `/app/`) of the `/ui/` helper script, which
-/// imports the shared `adk-ui` renderer; see the file for what it does.
-const AUTH_HELPER_MODULE: &str = "ui-helper.js";
-/// Tag injected into the web UI page. A module script so the helper can
-/// `import` the renderer from `/app/`; modules are deferred by default.
-const AUTH_HELPER_TAG: &str = "<script type=\"module\" src=\"/oauth2/helper.js\"></script>";
 /// Custom AdSpace Agent studio interface HTML (`/app/`).
 const STUDIO_HTML: &str = include_str!("studio.html");
 /// Custom AdSpace Agent studio interface CSS (`/app/app.css`).
 const STUDIO_CSS: &str = include_str!("studio.css");
-/// Stylesheet of the `adk-ui` renderer shared by `/app/` and `/ui/` (`/app/adk-ui.css`).
+/// Stylesheet of the `adk-ui` renderer (`/app/adk-ui.css`).
 const ADK_UI_CSS: &str = include_str!("adk-ui.css");
 
 /// Expands a list of module paths into the `match` arms of [`app_module`] so
@@ -208,10 +207,11 @@ macro_rules! app_modules {
 }
 
 // Custom AdSpace Agent studio client, served as native ES modules under
-// `/app/<path>` (`/app/app.js` is the entry point loaded by `studio.html`;
-// `ui-helper.js` is the `/ui/` entry point, also served as `/oauth2/helper.js`).
+// `/app/<path>` (`/app/app.js` is the entry point loaded by `studio.html`).
 app_modules! {
     "app.js",
+    "approvals.js",
+    "adk-ui/a2ui.js",
     "adk-ui/charts.js",
     "adk-ui/components.js",
     "adk-ui/index.js",
@@ -231,7 +231,6 @@ app_modules! {
     "state.js",
     "status.js",
     "transcript.js",
-    "ui-helper.js",
     "usage/counter.js",
     "usage/pricing.js",
     "usage/session-usage.js",
@@ -296,16 +295,6 @@ fn html_page(title: &str, body: &str, status: &str) -> Html<String> {
          <body><div class=\"card\"><h1>{safe_title}</h1>{body}</div><script>{}</script></body></html>",
         callback_script(status)
     ))
-}
-
-/// Serves the browser helper (`/oauth2/helper.js`, the same bytes as
-/// `/app/ui-helper.js`).
-async fn auth_helper(headers: HeaderMap) -> Response {
-    static_asset_response(
-        &headers,
-        "application/javascript; charset=utf-8",
-        app_module(AUTH_HELPER_MODULE).expect("ui-helper.js is an embedded module"),
-    )
 }
 
 fn static_asset_response(
@@ -421,45 +410,13 @@ async fn oauth_ack(
     Json(serde_json::json!({ "fallback_opened": fallback_opened })).into_response()
 }
 
-/// Inserts the helper `<script>` tag before `</body>` (or at the end).
-pub fn inject_auth_helper_tag(html: &str) -> String {
-    match html.rfind("</body>").or_else(|| html.rfind("</BODY>")) {
-        Some(at) => format!("{}{AUTH_HELPER_TAG}{}", &html[..at], &html[at..]),
-        None => format!("{html}{AUTH_HELPER_TAG}"),
-    }
-}
-
-/// Middleware that redirects `/` to `/app/` and injects the helper into `/ui/`.
-pub async fn inject_auth_helper(req: Request, next: Next) -> Response {
+/// Middleware that redirects `GET /` to `/app/` (AdSpace Studio) so the
+/// `adk-surface` web home stays mounted solely under `/ui/` with its own CSP.
+pub async fn redirect_root_to_studio(req: Request, next: Next) -> Response {
     if req.method() == Method::GET && req.uri().path() == "/" {
         return Redirect::to("/app/").into_response();
     }
-    let is_ui_page = req.method() == Method::GET
-        && (req.uri().path() == "/ui" || req.uri().path().starts_with("/ui/"));
-    let response = next.run(req).await;
-    let is_html = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.starts_with("text/html"));
-    if !is_ui_page || !is_html || !response.status().is_success() {
-        return response;
-    }
-    let (mut parts, body) = response.into_parts();
-    let bytes = match to_bytes(body, 8 * 1024 * 1024).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::warn!("Could not read the web UI page to inject the auth helper: {e}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-    let html = inject_auth_helper_tag(&String::from_utf8_lossy(&bytes));
-    parts.headers.remove(header::ETAG);
-    parts.headers.insert(
-        header::CONTENT_LENGTH,
-        HeaderValue::from_str(&html.len().to_string()).expect("ascii length"),
-    );
-    Response::from_parts(parts, Body::from(html))
+    next.run(req).await
 }
 
 /// Serves the custom AdSpace Agent studio HTML (`/app` and `/app/`).
@@ -624,7 +581,7 @@ fn extract_api_path_user_id(path: &str) -> Option<String> {
 /// the OAuth token stored under [`USER_CREDENTIALS_STATE_KEY`] /
 /// [`CREDENTIALS_STATE_KEY`]).
 fn carries_session_state(path: &str) -> bool {
-    if path.contains("/artifacts") {
+    if path.contains("/artifacts") || path.contains("/evidence/") {
         return false;
     }
     (path.starts_with("/api/apps/") && path.contains("/sessions"))
@@ -633,6 +590,10 @@ fn carries_session_state(path: &str) -> bool {
         || path == "/api/run_sse"
         || path.starts_with("/api/run/")
         || path.starts_with("/api/debug/")
+        || path == "/api/surface"
+        || path.starts_with("/api/surface/")
+        || path == "/api/approvals"
+        || path.starts_with("/api/approvals/")
         || path == "/api/reasoning_engine"
         || path == "/api/stream_reasoning_engine"
 }
@@ -923,10 +884,11 @@ async fn scrub_json_response(response: Response) -> Response {
     Response::from_parts(parts, Body::from(bytes))
 }
 
-/// Middleware in front of the adk-server routes:
+/// Middleware in front of the adk-server and `adk-surface` routes:
 ///
-/// 1. hides the stock `/ui/` dev UI once Google Sign-In is configured (it has
-///    no sign-in; `/app/` is the user interface then);
+/// 1. restricts `/ui/` (the `adk-surface` web home) and `/api/surface/*` to
+///    administrators (`ADMIN_EMAILS`) once Google Sign-In is configured (`/app/`
+///    is the primary interface for non-admin users);
 /// 2. requires the identity named in a user-scoped `/api/…` path to match the
 ///    caller (defence in depth — [`CookieIdentityExtractor`] makes adk-server
 ///    enforce the same thing on every route, including body-addressed ones);
@@ -940,8 +902,7 @@ pub async fn guard_adk_routes(
     let path = req.uri().path().to_string();
     let oauth_configured = credentials.flow().config().is_configured();
     if oauth_configured && (path == "/ui" || path.starts_with("/ui/")) {
-        // The stock ADK dev UI knows nothing about the signed-in Google user,
-        // so once Sign-In is configured it is reserved for administrators
+        // Once Sign-In is configured, `/ui/` is reserved for administrators
         // (`ADMIN_EMAILS`, the same list that may switch the server models);
         // everyone else is sent to `/app/`.
         let is_admin = extract_cookie_user(req.headers(), &credentials)
@@ -952,6 +913,14 @@ pub async fn guard_adk_routes(
             } else {
                 StatusCode::NOT_FOUND.into_response()
             };
+        }
+    }
+    if oauth_configured && (path == "/api/surface" || path.starts_with("/api/surface/")) {
+        let Some(user) = extract_cookie_user(req.headers(), &credentials) else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
+        if !admins.allows(&user.email) {
+            return StatusCode::FORBIDDEN.into_response();
         }
     }
     if let Some(target_user_id) = extract_api_path_user_id(&path) {
@@ -1030,12 +999,23 @@ fn request_user_id(headers: &HeaderMap, credentials: &SessionCredentialManager) 
 /// configured, and answers `403` when a path names another user.
 pub struct CookieIdentityExtractor {
     credentials: Arc<SessionCredentialManager>,
+    admins: AdminAllowList,
 }
 
 impl CookieIdentityExtractor {
     /// Creates the extractor for `credentials`.
     pub fn new(credentials: Arc<SessionCredentialManager>) -> Self {
-        Self { credentials }
+        Self {
+            credentials,
+            admins: AdminAllowList::default(),
+        }
+    }
+
+    /// Configures the administrator allow-list used to grant the `"operator"`
+    /// scope (required for `adk-surface` Stop/Resume All).
+    pub fn with_admins(mut self, admins: AdminAllowList) -> Self {
+        self.admins = admins;
+        self
     }
 }
 
@@ -1043,20 +1023,27 @@ impl CookieIdentityExtractor {
 impl RequestContextExtractor for CookieIdentityExtractor {
     async fn extract(&self, parts: &Parts) -> Result<RequestContext, RequestContextError> {
         match extract_cookie_user(&parts.headers, &self.credentials) {
-            Some(user) => Ok(RequestContext {
-                user_id: user.id,
-                scopes: Vec::new(),
-                metadata: HashMap::from([
-                    ("email".to_string(), user.email),
-                    ("name".to_string(), user.name),
-                ]),
-            }),
+            Some(user) => {
+                let scopes = if self.admins.allows(&user.email) {
+                    vec!["operator".to_string()]
+                } else {
+                    Vec::new()
+                };
+                Ok(RequestContext {
+                    user_id: user.id,
+                    scopes,
+                    metadata: HashMap::from([
+                        ("email".to_string(), user.email),
+                        ("name".to_string(), user.name),
+                    ]),
+                })
+            }
             None if self.credentials.flow().config().is_configured() => {
                 Err(RequestContextError::MissingAuth)
             }
             None => Ok(RequestContext {
                 user_id: DEFAULT_USER_ID.to_string(),
-                scopes: Vec::new(),
+                scopes: vec!["operator".to_string()],
                 metadata: HashMap::new(),
             }),
         }
@@ -1335,7 +1322,6 @@ pub async fn oauth_callback(
 pub fn oauth_router(routes: OAuthRoutes) -> Router {
     Router::new()
         .route(OAUTH_CALLBACK_PATH, get(oauth_callback))
-        .route(AUTH_HELPER_PATH, get(auth_helper))
         .route(AUTH_EVENTS_PATH, get(oauth_events))
         .route(AUTH_ACK_PATH, post(oauth_ack))
         .route("/auth/login", get(auth_login))
@@ -1385,7 +1371,7 @@ impl AgentRuntime {
 /// cookie (see [`CookieIdentityExtractor`]).
 const DEFAULT_USER_ID: &str = "user";
 
-/// adk-cli launcher configured with the runtime's services.
+/// adk-cli launcher configured with the runtime's services (used for console REPL).
 fn launcher(runtime: &AgentRuntime) -> Launcher {
     let mut l = Launcher::new(runtime.agent.clone())
         .app_name(APP_NAME)
@@ -1403,6 +1389,90 @@ fn launcher(runtime: &AgentRuntime) -> Launcher {
         l = l.with_telemetry(adk_cli::launcher::TelemetryConfig::None);
     }
     l
+}
+
+fn split_csv(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+pub(crate) fn security_config_from(
+    allowed_hosts_env: Option<&str>,
+    allowed_origins_env: Option<&str>,
+    public_base_url: Option<&str>,
+    on_cloud_run: bool,
+) -> SecurityConfig {
+    let mut allowed_hosts = split_csv(allowed_hosts_env);
+    if let Some(base_url) = public_base_url
+        && let Ok(parsed) = url::Url::parse(base_url.trim())
+        && let Some(host) = parsed.host_str().filter(|h| !h.is_empty())
+        && !allowed_hosts.iter().any(|h| h.eq_ignore_ascii_case(host))
+    {
+        allowed_hosts.push(host.to_string());
+    }
+    if on_cloud_run
+        && !allowed_hosts.iter().any(|h| {
+            h == "*" || h.eq_ignore_ascii_case(".run.app") || h.eq_ignore_ascii_case("*.run.app")
+        })
+    {
+        allowed_hosts.push(".run.app".to_string());
+    }
+    let allowed_origins = split_csv(allowed_origins_env);
+    SecurityConfig {
+        allowed_origins,
+        allowed_hosts,
+        ..SecurityConfig::default()
+    }
+}
+
+/// Builds `adk-server` [`SecurityConfig`] from the deployment environment
+/// (`ALLOWED_HOSTS`, `ALLOWED_ORIGINS`, `PUBLIC_BASE_URL`, and `K_SERVICE`).
+///
+/// `adk-server` 3.0's `host_guard` denies non-loopback `Host` headers unless
+/// listed in `allowed_hosts`, so Cloud Run (`K_SERVICE` → `.run.app`),
+/// `PUBLIC_BASE_URL`'s host, and explicit `ALLOWED_HOSTS` entries are added
+/// automatically.
+pub fn security_config_from_env() -> SecurityConfig {
+    security_config_from(
+        std::env::var("ALLOWED_HOSTS").ok().as_deref(),
+        std::env::var("ALLOWED_ORIGINS").ok().as_deref(),
+        std::env::var("PUBLIC_BASE_URL").ok().as_deref(),
+        std::env::var_os("K_SERVICE").is_some(),
+    )
+}
+
+/// Builds a [`ServerConfig`] from the runtime's services and security policy.
+fn server_config(runtime: &AgentRuntime) -> ServerConfig {
+    let mut config = ServerConfig::new(
+        Arc::new(SingleAgentLoader::new(runtime.agent.clone())),
+        runtime.session_service.clone(),
+    )
+    .with_artifact_service(runtime.artifact_service.clone())
+    .with_memory_service(runtime.memory_for(DEFAULT_USER_ID))
+    .with_compaction(runtime.compaction_config())
+    .with_security(security_config_from_env());
+    if let Some(cache_cfg) = runtime.context_cache_config_opt() {
+        config =
+            config.with_context_cache(cache_cfg, runtime.models.clone() as Arc<dyn CacheCapable>);
+    }
+    if let Some(exporter) = crate::logging::span_exporter() {
+        config = config.with_span_exporter(exporter);
+    }
+    config
+}
+
+/// Mounts `adk_surface::web::home()` strictly under `/ui`, `/ui/`, and
+/// `/ui/{*path}` so it never steals `GET /` (which redirects to `/app/`).
+fn ui_home_routes() -> Router {
+    let home = adk_surface::web::home();
+    Router::new()
+        .route("/ui", get_service(home.clone()))
+        .route("/ui/", get_service(home.clone()))
+        .route("/ui/{*path}", get_service(home))
 }
 
 /// What the compression layer compresses: tower-http's default (which already
@@ -2019,13 +2089,43 @@ fn event_to_python_adk_json(event: &mut serde_json::Value) {
                 .map(serde_json::Value::Object)
                 .unwrap_or_else(|| serde_json::json!({})),
         );
+        let mut requested_tool_confirmations = a
+            .get("requested_tool_confirmations")
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(conf) = a
+            .get("tool_confirmation")
+            .or_else(|| a.get("toolConfirmation"))
+            .and_then(serde_json::Value::as_object)
+        {
+            let tool_name = conf
+                .get("toolName")
+                .or_else(|| conf.get("tool_name"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("tool");
+            let call_id = conf
+                .get("functionCallId")
+                .or_else(|| conf.get("function_call_id"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(tool_name);
+            let args = conf
+                .get("args")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            requested_tool_confirmations.insert(
+                call_id.to_string(),
+                serde_json::json!({
+                    "hint": format!("Approve tool '{tool_name}'?"),
+                    "confirmed": false,
+                    "payload": args,
+                }),
+            );
+        }
         clean_actions.insert(
             "requested_tool_confirmations".to_string(),
-            a.get("requested_tool_confirmations")
-                .and_then(serde_json::Value::as_object)
-                .cloned()
-                .map(serde_json::Value::Object)
-                .unwrap_or_else(|| serde_json::json!({})),
+            serde_json::Value::Object(requested_tool_confirmations),
         );
         let mut ui_widgets = a
             .get("render_ui_widgets")
@@ -2905,38 +3005,116 @@ pub fn build_agent_engine_router(runtime: &AgentRuntime) -> anyhow::Result<Route
     )
 }
 
-/// Assembles the HTTP application: adk-server's routes (authenticated through
-/// [`CookieIdentityExtractor`]), the OAuth / studio routes, the `/ui/` helper
-/// injection, [`guard_adk_routes`], and HTTP response compression.
+/// Assembles the HTTP application: `adk-server` REST/A2A/AG-UI routes
+/// (authenticated through [`CookieIdentityExtractor`]), the `adk-surface` API
+/// and `/ui/` web home, OAuth / studio routes (`/app/`), [`guard_adk_routes`],
+/// and HTTP response compression.
 ///
 /// # Errors
 ///
-/// Returns an error when the adk-server application cannot be built.
-pub fn build_app(launcher: Launcher, routes: OAuthRoutes) -> anyhow::Result<Router> {
-    build_app_with_agent_engine(launcher, routes, None)
+/// Returns an error when the `adk-surface` engine or runner cannot be built.
+pub fn build_app(config: ServerConfig, routes: OAuthRoutes) -> anyhow::Result<Router> {
+    build_app_with_services(config, routes, None, None)
 }
 
 /// Like [`build_app`], optionally merging the Agent Engine BYOC dispatch router.
 ///
 /// # Errors
 ///
-/// Returns an error when the adk-server application cannot be built.
+/// Returns an error when the `adk-surface` engine or runner cannot be built.
 pub fn build_app_with_agent_engine(
-    launcher: Launcher,
+    config: ServerConfig,
     routes: OAuthRoutes,
     agent_engine: Option<Router>,
 ) -> anyhow::Result<Router> {
+    build_app_with_services(config, routes, agent_engine, None)
+}
+
+/// Like [`build_app_with_agent_engine`], optionally supplying a shared
+/// [`ApprovalService`] so `/api/approvals`, `/ui/`, and the agent runtime use
+/// the same approval inbox and decision store.
+///
+/// # Errors
+///
+/// Returns an error when the `adk-surface` engine or runner cannot be built.
+pub fn build_app_with_services(
+    config: ServerConfig,
+    routes: OAuthRoutes,
+    agent_engine: Option<Router>,
+    approval_service: Option<Arc<dyn ApprovalService>>,
+) -> anyhow::Result<Router> {
     let credentials = routes.credentials.clone();
     let admins = routes.admins.clone();
-    let mut app = launcher
-        .with_request_context_extractor(Arc::new(CookieIdentityExtractor::new(credentials.clone())))
-        .build_app()?
+    let governance = GovernanceControl::new();
+    let approvals = approval_service.unwrap_or_else(crate::agent::build_approval_service);
+    let config = config
+        .with_governance(governance.clone())
+        .with_request_context(Arc::new(
+            CookieIdentityExtractor::new(credentials.clone()).with_admins(admins.clone()),
+        ));
+
+    let root_agent = config.agent_loader.root_agent();
+    let mut runner_builder = Runner::builder()
+        .app_name(APP_NAME)
+        .agent(root_agent)
+        .session_service(config.session_service.clone())
+        .governance(governance)
+        .run_config(
+            RunConfig::builder()
+                .approval_service(approvals.clone())
+                .build(),
+        );
+    if let Some(artifacts) = &config.artifact_service {
+        runner_builder = runner_builder.artifact_service(artifacts.clone());
+    }
+    if let Some(memory) = &config.memory_service {
+        runner_builder = runner_builder.memory_service(memory.clone());
+    }
+    if let Some(compaction) = &config.compaction_config {
+        runner_builder = runner_builder.compaction_config(compaction.clone());
+    }
+    if let (Some(cache_cfg), Some(cache)) = (&config.context_cache_config, &config.cache_capable) {
+        runner_builder = runner_builder
+            .context_cache_config(cache_cfg.clone())
+            .cache_capable(cache.clone());
+    }
+    let surface_runner = Arc::new(runner_builder.build()?);
+    let mut source_builder = LocalSource::builder(APP_NAME)
+        .sessions(config.session_service.clone())
+        .approvals(approvals.clone())
+        .runner(surface_runner);
+    if let Some(artifacts) = &config.artifact_service {
+        source_builder = source_builder.artifacts(artifacts.clone());
+    }
+    let source = source_builder.build()?;
+    let engine = adk_ui::catalogs::register(SurfaceEngine::builder(Arc::new(source)))
+        .places([Place::web()])
+        .stops_need("operator")
+        .grant(GrantedUse::new(
+            "genui",
+            adk_surface::words::SHOW_FORMS_AND_TABLES,
+        ))
+        .build();
+
+    let mut app = ServerBuilder::new(config)
+        .with_approval_service(approvals)
+        .with_ag_ui_extension(Arc::new(adk_ui::catalogs::ag_ui()))
+        .add_api_routes(adk_surface::web::router(engine.clone()))
+        .add_api_routes(adk_surface::web::genui::router_wired(
+            engine,
+            GenuiWiring {
+                ag_ui: true,
+                mcp_apps: false,
+            },
+        ))
+        .add_root_routes(ui_home_routes())
+        .build()
         .merge(oauth_router(routes));
     if let Some(ae_router) = agent_engine {
         app = app.merge(ae_router);
     }
     let app = app
-        .layer(middleware::from_fn(inject_auth_helper))
+        .layer(middleware::from_fn(redirect_root_to_studio))
         .layer(middleware::from_fn_with_state(
             (credentials, admins),
             guard_adk_routes,
@@ -2997,8 +3175,12 @@ async fn serve_with_mode(
     } else {
         None
     };
-    let app =
-        build_app_with_agent_engine(launcher(&runtime), runtime.oauth_routes(true), ae_router)?;
+    let app = build_app_with_services(
+        server_config(&runtime),
+        runtime.oauth_routes(true),
+        ae_router,
+        Some(runtime.approval_service.clone()),
+    )?;
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     if agent_engine {
         tracing::info!(
@@ -3006,7 +3188,7 @@ async fn serve_with_mode(
         );
     } else if runtime.credentials.flow().config().is_configured() {
         tracing::info!(
-            "AdSpace Agent listening on http://{host}:{port}  (studio: http://{host}:{port}/app/  ·  Google Sign-In required; /ui/ disabled)"
+            "AdSpace Agent listening on http://{host}:{port}  (studio: http://{host}:{port}/app/  ·  Google Sign-In required; /ui/ admin-only)"
         );
     } else {
         tracing::info!(
@@ -3078,21 +3260,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn helper_tag_goes_before_body_end_or_at_the_end() {
-        let page = "<html><body><div id=\"root\"></div></body></html>";
-        let injected = inject_auth_helper_tag(page);
-        assert_eq!(
-            injected,
-            format!("<html><body><div id=\"root\"></div>{AUTH_HELPER_TAG}</body></html>")
+    fn security_config_from_env_allows_loopback_and_configured_hosts() {
+        let cfg = security_config_from(None, None, None, false);
+        assert!(cfg.allows_host("127.0.0.1:8000"));
+        assert!(cfg.allows_host("localhost:8000"));
+        assert!(!cfg.allows_host("evil.example"));
+
+        let cloud_run = security_config_from(
+            Some("custom.example.com,  app.internal:8443 "),
+            Some("https://custom.example.com, https://app.internal:8443"),
+            Some("https://studio.example.net/app/"),
+            true,
         );
+        assert!(cloud_run.allows_host("custom.example.com"));
+        assert!(cloud_run.allows_host("app.internal:8443"));
+        assert!(cloud_run.allows_host("studio.example.net"));
+        assert!(cloud_run.allows_host("adspace-agent-123.us-central1.run.app"));
+        assert!(!cloud_run.allows_host("evil.example"));
         assert_eq!(
-            inject_auth_helper_tag("<p>no body tag</p>"),
-            format!("<p>no body tag</p>{AUTH_HELPER_TAG}")
+            cloud_run.allowed_origins,
+            vec!["https://custom.example.com", "https://app.internal:8443"]
         );
-        // The tag loads the helper from our own origin (the UI's CSP is `script-src 'self'`)
-        // as a module, so it can import the shared renderer from `/app/`.
-        assert!(AUTH_HELPER_TAG.contains(AUTH_HELPER_PATH));
-        assert!(AUTH_HELPER_TAG.contains("type=\"module\""));
+
+        let dedup_wildcard = security_config_from(Some("*, .run.app"), None, None, true);
+        assert_eq!(dedup_wildcard.allowed_hosts, vec!["*", ".run.app"]);
     }
 
     #[test]
@@ -3107,36 +3298,8 @@ mod tests {
         assert!(!error.contains("window.close()"));
     }
 
-    #[test]
-    fn helper_script_targets_google_auth_links_and_the_resume_turn() {
-        let helper = app_module(AUTH_HELPER_MODULE).expect("helper module is embedded");
-        assert!(helper.contains("https://accounts.google.com/o/oauth2/"));
-        assert!(helper.contains("window.open("));
-        assert!(helper.contains("new BroadcastChannel(CHANNEL)"));
-        assert!(helper.contains("const CHANNEL = \"adspace:oauth\""));
-        // It is the `/ui/` host of the shared renderer, not a second copy of it:
-        // served from `/oauth2/`, so the imports must be absolute `/app/` URLs.
-        assert!(helper.contains("from \"/app/adk-ui/index.js\""));
-        assert!(helper.contains("extractUiResponse"));
-        assert!(
-            helper.contains("href = SHARED_CSS_PATH") && helper.contains("\"/app/adk-ui.css\"")
-        );
-        assert!(!helper.contains("const renderInnerComponent"));
-        assert!(helper.contains("Element.prototype.scrollTo"));
-        // Must match the text `resume_message` produces.
-        let marker = "Google access has been granted for this chat";
-        assert!(helper.contains(marker));
-        let token = OAuthToken {
-            access_token: String::new(),
-            refresh_token: None,
-            expires_at: None,
-            scopes: vec![],
-        };
-        assert!(resume_message(&token).starts_with(marker));
-    }
-
     #[tokio::test]
-    async fn middleware_injects_only_into_the_ui_html_page() {
+    async fn middleware_redirects_root_and_preserves_ui_html() {
         use axum::routing::get;
         use tower::ServiceExt as _;
 
@@ -3154,35 +3317,26 @@ mod tests {
                     )
                 }),
             )
-            .route(
-                "/api/page",
-                get(|| async { Html("<html><body>api</body></html>") }),
-            )
-            .layer(middleware::from_fn(inject_auth_helper));
+            .layer(middleware::from_fn(redirect_root_to_studio));
 
-        let get_body = |path: &'static str| {
-            let app = app.clone();
-            async move {
-                let response = app
-                    .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
-                    .await
-                    .unwrap();
-                let length = response
-                    .headers()
-                    .get(header::CONTENT_LENGTH)
-                    .map(|v| v.to_str().unwrap().parse::<usize>().unwrap());
-                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-                (String::from_utf8(body.to_vec()).unwrap(), length)
-            }
-        };
+        let root = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(root.status(), StatusCode::SEE_OTHER);
+        assert_eq!(root.headers()[header::LOCATION], "/app/");
 
-        let (page, length) = get_body("/ui/").await;
-        assert!(page.contains(AUTH_HELPER_TAG), "{page}");
-        assert_eq!(length, Some(page.len()));
-        let (asset, _) = get_body("/ui/assets/app.js").await;
-        assert_eq!(asset, "console.log(1)");
-        let (api, _) = get_body("/api/page").await;
-        assert!(!api.contains(AUTH_HELPER_TAG));
+        let ui = app
+            .clone()
+            .oneshot(Request::builder().uri("/ui/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(ui.status(), StatusCode::OK);
+        let ui_body =
+            String::from_utf8(to_bytes(ui.into_body(), usize::MAX).await.unwrap().to_vec())
+                .unwrap();
+        assert_eq!(ui_body, "<html><body><div id=\"root\"></div></body></html>");
     }
 
     #[tokio::test]
@@ -3223,7 +3377,12 @@ mod tests {
 
         // 1a. The studio client is served as ES modules under `/app/<path>`;
         // the two stylesheets keep their own routes and unknown paths are 404.
-        for path in ["/app/app.js", "/app/state.js", "/app/adk-ui/charts.js"] {
+        for path in [
+            "/app/app.js",
+            "/app/state.js",
+            "/app/adk-ui/a2ui.js",
+            "/app/adk-ui/charts.js",
+        ] {
             let js = app
                 .clone()
                 .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
@@ -3236,23 +3395,6 @@ mod tests {
             );
             assert_eq!(js.headers()[header::CACHE_CONTROL], "no-cache");
         }
-        // The `/ui/` helper is served as a JavaScript module from both paths
-        // (the injected tag uses `/oauth2/helper.js`), with identical bytes.
-        let mut helper_bodies = Vec::new();
-        for path in [AUTH_HELPER_PATH, "/app/ui-helper.js"] {
-            let js = app
-                .clone()
-                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(js.status(), StatusCode::OK, "{path}");
-            assert_eq!(
-                js.headers()[header::CONTENT_TYPE],
-                "application/javascript; charset=utf-8"
-            );
-            helper_bodies.push(to_bytes(js.into_body(), usize::MAX).await.unwrap());
-        }
-        assert_eq!(helper_bodies[0], helper_bodies[1]);
         for path in ["/app/app.css", "/app/adk-ui.css"] {
             let css = app
                 .clone()
@@ -3595,6 +3737,11 @@ mod tests {
         assert!(carries_session_state("/api/sessions/a/u/s"));
         assert!(carries_session_state("/api/apps/a/users/u/sessions/s"));
         assert!(!carries_session_state("/api/sessions/a/u/s/artifacts/f"));
+        assert!(!carries_session_state(
+            "/api/surface/decisions/d1/evidence/0"
+        ));
+        assert!(carries_session_state("/api/surface/sessions/s1/thread"));
+        assert!(carries_session_state("/api/surface/sessions/s1/feed"));
         assert!(!carries_session_state("/api/apps"));
         assert!(!carries_session_state("/api/health"));
     }
@@ -3755,6 +3902,7 @@ mod tests {
             Router::new()
                 .route("/ui/", get(|| async { Html("<html></html>") }))
                 .route("/ui/assets/x.js", get(|| async { "js" }))
+                .route("/api/surface/status", get(|| async { "ok" }))
         };
         let credentials = test_credentials(true);
         let admins = AdminAllowList::new(["admin@example.com".to_string()]);
@@ -3823,6 +3971,43 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
+        // `/api/surface/*` requires an admin cookie when OAuth is configured.
+        let resp = configured
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/surface/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = configured
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/surface/status")
+                    .header(header::COOKIE, cookie_for("user@example.com"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let resp = configured
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/surface/status")
+                    .header(header::COOKIE, cookie_for("admin@example.com"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
         let open = ui().layer(middleware::from_fn_with_state(
             (test_credentials(false), AdminAllowList::default()),
             guard_adk_routes,
@@ -3837,7 +4022,8 @@ mod tests {
     #[tokio::test]
     async fn cookie_identity_extractor_follows_the_sign_in_configuration() {
         let configured = test_credentials(true);
-        let extractor = CookieIdentityExtractor::new(configured.clone());
+        let admins = AdminAllowList::new(["admin@example.com".to_string()]);
+        let extractor = CookieIdentityExtractor::new(configured.clone()).with_admins(admins);
         let anonymous = Request::builder().body(()).unwrap().into_parts().0;
         assert!(matches!(
             extractor.extract(&anonymous).await,
@@ -3855,11 +4041,25 @@ mod tests {
         let context = extractor.extract(&signed).await.unwrap();
         assert_eq!(context.user_id, "nate@example.com");
         assert_eq!(context.metadata["email"], "nate@example.com");
+        assert!(context.scopes.is_empty());
 
-        // Without an OAuth client there is no sign-in: everyone is the default user.
+        let admin_signed = Request::builder()
+            .header(
+                header::COOKIE,
+                signed_cookie(&configured, "admin@example.com"),
+            )
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        let admin_ctx = extractor.extract(&admin_signed).await.unwrap();
+        assert_eq!(admin_ctx.scopes, vec!["operator"]);
+
+        // Without an OAuth client there is no sign-in: everyone is the default operator user.
         let extractor = CookieIdentityExtractor::new(test_credentials(false));
         let context = extractor.extract(&anonymous).await.unwrap();
         assert_eq!(context.user_id, DEFAULT_USER_ID);
+        assert_eq!(context.scopes, vec!["operator"]);
     }
 
     #[tokio::test]
@@ -4289,8 +4489,8 @@ mod tests {
             Some(serde_json::json!("ya29.ge-auth-token"))
         );
 
-        // 5. event_to_python_adk_json projects render_* tool outputs into
-        //    actions.render_ui_widgets (A2UI v0.9) on the Agent Engine wire
+        // 5. event_to_python_adk_json projects DrawToolset outputs into
+        //    actions.render_ui_widgets (A2UI v0.9.1) on the Agent Engine wire
         //    while leaving the function_response intact.
         let mut ui_event = serde_json::json!({
             "id": "ev-ui-1",
@@ -4303,15 +4503,36 @@ mod tests {
                     "functionResponse": {
                         "name": "render_card",
                         "response": {
-                            "components": [{
-                                "type": "card",
+                            "status": "shown",
+                            "message": "Shown to the person as version 1 of 'summary-1'.",
+                            "drawn": {
+                                "surfaceId": "summary-1",
+                                "version": 1,
+                                "kind": "card",
+                                "catalogId": adk_ui::catalogs::STUDIO_ID,
                                 "title": "Campaign Summary",
-                                "content": [{
-                                    "type": "text",
-                                    "content": "Spend: $12,400",
-                                    "variant": "body"
-                                }]
-                            }]
+                                "messages": [
+                                    {
+                                        "version": "v0.9.1",
+                                        "createSurface": {
+                                            "surfaceId": "summary-1",
+                                            "catalogId": adk_ui::catalogs::STUDIO_ID
+                                        }
+                                    },
+                                    {
+                                        "version": "v0.9.1",
+                                        "updateComponents": {
+                                            "surfaceId": "summary-1",
+                                            "components": [
+                                                { "id": "root", "component": "Card", "child": "body" },
+                                                { "id": "body", "component": "Text", "text": "Campaign Summary: Spend $12,400" }
+                                            ]
+                                        }
+                                    }
+                                ],
+                                "actions": [],
+                                "deleted": false
+                            }
                         }
                     },
                     "id": "call-card-1"
@@ -4328,11 +4549,52 @@ mod tests {
             .expect("render_ui_widgets should be populated");
         assert_eq!(widgets.len(), 1);
         assert_eq!(widgets[0]["provider"], "a2ui");
+        assert_eq!(widgets[0]["payload"]["surfaceId"], "summary-1");
+        assert_eq!(
+            widgets[0]["payload"]["catalogId"],
+            adk_ui::catalogs::STUDIO_ID
+        );
+        assert_eq!(
+            widgets[0]["payload"]["mimeType"],
+            crate::a2ui_bridge::A2UI_MIME_TYPE
+        );
+        assert_eq!(
+            widgets[0]["payload"]["version"],
+            crate::a2ui_bridge::A2UI_PROTOCOL_VERSION
+        );
+        assert_eq!(widgets[0]["payload"]["tool"], "render_card");
         assert!(
             widgets[0]["payload"]["jsonl"]
                 .as_str()
                 .unwrap()
                 .contains("Campaign Summary")
+        );
+
+        // 6. event_to_python_adk_json projects actions.tool_confirmation into
+        //    actions.requested_tool_confirmations for Gemini Enterprise clients.
+        let mut confirm_event = serde_json::json!({
+            "id": "ev-confirm-1",
+            "invocation_id": "inv-confirm-1",
+            "author": APP_NAME,
+            "timestamp": "2026-11-13T18:18:00Z",
+            "actions": {
+                "state_delta": {},
+                "artifact_delta": {},
+                "tool_confirmation": {
+                    "toolName": "googleads_customers_campaigns_mutate",
+                    "functionCallId": "call-write-1",
+                    "args": { "customerId": "1234567890" }
+                }
+            }
+        });
+        event_to_python_adk_json(&mut confirm_event);
+        assert_eq!(
+            confirm_event["actions"]["requested_tool_confirmations"]["call-write-1"],
+            serde_json::json!({
+                "hint": "Approve tool 'googleads_customers_campaigns_mutate'?",
+                "confirmed": false,
+                "payload": { "customerId": "1234567890" }
+            })
         );
     }
 }

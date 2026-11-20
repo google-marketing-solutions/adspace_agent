@@ -37,13 +37,14 @@ export const STORAGE_KEYS = {
 };
 
 export const DEFAULT_MODELS = {
-  model: "gemini-4-hydrogen",
+  model: "gemini-4-neon",
   imageModel: "gemini-nano-banana-2.1",
   videoModel: "gemini-omni-1.2-flash",
 };
 
 export const PRESET_MODEL_OPTIONS = {
   model: [
+    "gemini-4-neon",
     "gemini-4-hydrogen",
     "gemini-4-carbon",
     "gemini-4-argon",
@@ -85,6 +86,9 @@ export const state = {
   // fallback for models the server did not price (or older servers without `pricing`).
   serverModelPricing: {},
   currentEvents: [],
+  sessionApprovals: [],
+  approvalsGeneration: 0,
+  submittingApprovalIds: new Set(),
 };
 
 const loadStoredModelPricing = () => {

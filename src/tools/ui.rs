@@ -12,353 +12,127 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Generative UI tools powered by [`adk_ui`].
+//! Generative UI tools powered by [`adk_ui`] 3.0 and `adk-surface` `genui`.
 //!
-//! Exposes `adk-ui`'s component tools (`render_chart`, `render_table`,
-//! `render_layout`, `render_card`, `render_form`, `render_confirm`,
-//! `render_modal`, `render_alert`, `render_progress`, `render_toast`) so the
-//! agent can render interactive charts, sortable tables, KPI dashboards,
-//! campaign intake forms, and trafficking confirmation cards directly inside
-//! the web UI (`/ui/`).
+//! Exposes `DrawToolset` in `adk_ui::catalogs::studio()` (`render_form`,
+//! `render_card`, `render_table`, `render_screen`, `patch_surface`,
+//! `delete_surface`), ordered sequentially during a turn so UI draws remain
+//! ordered relative to state-mutating calls.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use adk_rust::egress::ToolEgress;
 use adk_rust::tool::BasicToolset;
-use adk_rust::{Result, Tool, ToolContext};
-use adk_ui::{
-    RenderAlertTool, RenderCardTool, RenderChartTool, RenderConfirmTool, RenderFormTool,
-    RenderLayoutTool, RenderModalTool, RenderProgressTool, RenderTableTool, RenderToastTool,
-};
+use adk_rust::{BatchGroup, Evidence, Result, Tool, ToolContext, ToolEffect};
 use async_trait::async_trait;
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 
-/// Protocol-plumbing properties flattened into `adk-ui` tool schemas that we
-/// strip so the model sees only the component parameters and always emits the
-/// canonical `UiResponse` component tree.
-const PROTOCOL_FIELDS: &[&str] = &[
-    "protocol",
-    "surface_id",
-    "kit_id",
-    "ag_ui_thread_id",
-    "ag_ui_run_id",
-    "mcp_apps",
-];
-
-/// Parameters `adk-ui` advertises for a surface data model and a per-response
-/// theme. The studio has neither: it draws the literal `data` it is given, in
-/// its own theme, so a model that binds a chart to `data_source` gets an empty
-/// chart. Each entry names the array-valued parameters to descend through,
-/// then the parameter to drop there.
-const UNSUPPORTED_FIELDS: &[(&[&str], &str)] = &[
-    (&[], "data_source"),
-    (&[], "data_path_prefix"),
-    (&[], "theme"),
-    (&["fields"], "path"),
-    (&["sections"], "data_path_prefix"),
-    (&["sections", "fields"], "path"),
-];
-
-/// Where form fields are declared: `render_form`, and the form sections of
-/// `render_layout`.
-const FORM_FIELD_PATHS: &[&[&str]] = &[&["fields"], &["sections", "fields"]];
-
-/// Field types a form takes. `adk-ui` only knows `number`, `select` and
-/// `textarea`, and turns every other type into a text input tagged with the
-/// type. The studio draws the tagged ones it has a native input for (`date`
-/// among them); [`UPGRADED_FIELD_TYPES`] are rebuilt here.
-const FORM_FIELD_TYPES: &str =
-    "text, email, password, number, date, select, multiselect, switch, textarea";
-
-/// Field types `adk-ui` flattens into a text input although it has a component
-/// for them, with the component each becomes. A multiselect also loses its
-/// options on the way, so they are put back from the call's arguments.
-const UPGRADED_FIELD_TYPES: &[(&str, &str)] =
-    &[("multiselect", "multi_select"), ("switch", "switch")];
-
-/// Wording in the library's tool descriptions that leaves out what the studio
-/// draws: tool, the text to replace, and its replacement.
-const DESCRIPTION_FIXES: &[(&str, &str, &str)] = &[
-    (
-        "render_chart",
-        "bar, line, area, and pie charts",
-        "bar, line, area, pie, scatter and sparkline charts",
-    ),
-    (
-        "render_form",
-        "text, email, password, number, select, textarea",
-        FORM_FIELD_TYPES,
-    ),
-];
-
-/// Parameters the library declares without a description, which leaves the
-/// model guessing what they do: tool, parameter, description. Only used where
-/// the library still gives none.
-const PARAMETER_NOTES: &[(&str, &str, &str)] = &[
-    ("render_chart", "x_label", "Label under the x-axis."),
-    ("render_chart", "y_label", "Label beside the y-axis."),
-    (
-        "render_chart",
-        "x_type",
-        "How x values are read: category (default), numeric, or time for dates and timestamps. Numeric and time values are spaced by value.",
-    ),
-    (
-        "render_chart",
-        "time_format",
-        "With x_type time, how x values are written: date, time or iso. Defaults to fit the data.",
-    ),
-    ("render_chart", "window", "Show only the last N rows."),
-    (
-        "render_chart",
-        "show_legend",
-        "Show the legend (default true).",
-    ),
-    ("render_chart", "colors", "Series colors, as hex values."),
-];
-
-/// The `properties` of the objects reached from an object schema through the
-/// array-valued parameters named by `path`.
-fn schema_properties_at<'a>(
-    schema: &'a mut Value,
-    path: &[&str],
-) -> Option<&'a mut Map<String, Value>> {
-    let mut node = schema;
-    for segment in path {
-        node = node
-            .get_mut("properties")?
-            .get_mut(*segment)?
-            .get_mut("items")?;
-    }
-    node.get_mut("properties")?.as_object_mut()
-}
-
-/// Calls `edit` on every object reached from `value` through the array-valued
-/// parameters named by `path`.
-fn for_each_object_at(
-    value: &mut Value,
-    path: &[&str],
-    edit: &mut dyn FnMut(&mut Map<String, Value>),
-) {
-    match path.split_first() {
-        None => {
-            if let Some(object) = value.as_object_mut() {
-                edit(object);
-            }
-        }
-        Some((segment, rest)) => {
-            if let Some(items) = value.get_mut(*segment).and_then(Value::as_array_mut) {
-                for item in items {
-                    for_each_object_at(item, rest, edit);
-                }
-            }
-        }
-    }
-}
-
-/// A form field whose type is in [`UPGRADED_FIELD_TYPES`], as the model
-/// declared it.
-struct DeclaredField {
-    name: String,
-    component: &'static str,
-    input_type: &'static str,
-    options: Value,
-}
-
-fn declared_fields(args: &mut Value) -> Vec<DeclaredField> {
-    let mut declared = Vec::new();
-    for path in FORM_FIELD_PATHS {
-        for_each_object_at(args, path, &mut |field| {
-            let field_type = field.get("type").and_then(Value::as_str);
-            let upgrade = UPGRADED_FIELD_TYPES
-                .iter()
-                .find(|(input_type, _)| Some(*input_type) == field_type);
-            if let (Some((input_type, component)), Some(name)) =
-                (upgrade, field.get("name").and_then(Value::as_str))
-            {
-                declared.push(DeclaredField {
-                    name: name.to_string(),
-                    component,
-                    input_type,
-                    options: field.get("options").cloned().unwrap_or_else(|| json!([])),
-                });
-            }
-        });
-    }
-    declared
-}
-
-/// Turns the text inputs `adk-ui` made of the `declared` fields into the
-/// components they were asked to be. Each declaration is used once, so two
-/// forms in one layout can reuse a field name.
-fn upgrade_fields(node: &mut Value, declared: &mut Vec<DeclaredField>) {
-    match node {
-        Value::Array(items) => {
-            for item in items {
-                upgrade_fields(item, declared);
-            }
-        }
-        Value::Object(object) => {
-            if object.get("type").and_then(Value::as_str) != Some("text_input") {
-                for value in object.values_mut() {
-                    upgrade_fields(value, declared);
-                }
-                return;
-            }
-            let name = object.get("name").and_then(Value::as_str);
-            let input_type = object.get("input_type").and_then(Value::as_str);
-            let Some(position) = declared
-                .iter()
-                .position(|f| Some(f.name.as_str()) == name && Some(f.input_type) == input_type)
-            else {
-                return;
-            };
-            let field = declared.remove(position);
-            // What is left is what the target component has: id, name, label
-            // and, for a multiselect, `required`.
-            for key in [
-                "input_type",
-                "placeholder",
-                "default_value",
-                "min_length",
-                "max_length",
-                "error",
-            ] {
-                object.remove(key);
-            }
-            object.insert("type".into(), json!(field.component));
-            if field.component == "switch" {
-                // A required checkbox would have to be ticked to submit.
-                object.remove("required");
-                object.insert("default_checked".into(), json!(false));
-            } else {
-                object.insert("options".into(), field.options);
-            }
-        }
-        _ => {}
-    }
-}
-
-struct CleanUiTool {
+/// Wraps a `DrawToolset` tool so ADK's `ToolExecutionStrategy::Auto` executes
+/// UI draw calls in model order rather than hoisting them ahead of writes.
+struct OrderedDrawTool {
     inner: Arc<dyn Tool>,
-    description: String,
-    schema: Option<Value>,
 }
 
-impl CleanUiTool {
+impl OrderedDrawTool {
     fn new(inner: Arc<dyn Tool>) -> Self {
-        let name = inner.name().to_string();
-        let mut description = inner.description().to_string();
-        for (_, from, to) in DESCRIPTION_FIXES.iter().filter(|(tool, ..)| *tool == name) {
-            description = description.replace(from, to);
-        }
-
-        let mut schema = inner.parameters_schema();
-        if let Some(schema) = schema.as_mut() {
-            if let Some(properties) = schema_properties_at(schema, &[]) {
-                for key in PROTOCOL_FIELDS {
-                    properties.remove(*key);
-                }
-                for (_, parameter, note) in
-                    PARAMETER_NOTES.iter().filter(|(tool, ..)| *tool == name)
-                {
-                    if let Some(parameter) = properties
-                        .get_mut(*parameter)
-                        .and_then(Value::as_object_mut)
-                        && !parameter.contains_key("description")
-                    {
-                        parameter.insert("description".into(), json!(note));
-                    }
-                }
-            }
-            for (path, key) in UNSUPPORTED_FIELDS {
-                if let Some(properties) = schema_properties_at(schema, path) {
-                    properties.remove(*key);
-                }
-            }
-            for path in FORM_FIELD_PATHS {
-                if let Some(field_type) = schema_properties_at(schema, path)
-                    .and_then(|properties| properties.get_mut("type"))
-                    .and_then(Value::as_object_mut)
-                {
-                    field_type.insert(
-                        "description".into(),
-                        json!(format!(
-                            "Field type: {FORM_FIELD_TYPES}. Give options for select and multiselect."
-                        )),
-                    );
-                }
-            }
-        }
-        Self {
-            inner,
-            description,
-            schema,
-        }
+        Self { inner }
     }
 }
 
 #[async_trait]
-impl Tool for CleanUiTool {
+impl Tool for OrderedDrawTool {
     fn name(&self) -> &str {
         self.inner.name()
     }
 
     fn description(&self) -> &str {
-        &self.description
+        self.inner.description()
+    }
+
+    fn declaration(&self) -> Value {
+        self.inner.declaration()
+    }
+
+    fn enhanced_description(&self) -> String {
+        self.inner.enhanced_description()
+    }
+
+    fn is_long_running(&self) -> bool {
+        self.inner.is_long_running()
+    }
+
+    fn is_builtin(&self) -> bool {
+        self.inner.is_builtin()
     }
 
     fn parameters_schema(&self) -> Option<Value> {
-        self.schema.clone()
+        self.inner.parameters_schema()
+    }
+
+    fn response_schema(&self) -> Option<Value> {
+        self.inner.response_schema()
+    }
+
+    fn annotations(&self) -> Option<&Value> {
+        self.inner.annotations()
+    }
+
+    fn origin(&self) -> &str {
+        self.inner.origin()
+    }
+
+    fn required_scopes(&self) -> &[&str] {
+        self.inner.required_scopes()
     }
 
     fn is_read_only(&self) -> bool {
         true
     }
 
-    // Deliberately not `is_concurrency_safe`: ADK's `Auto` strategy runs the
-    // concurrency-safe calls of a turn before the others, so a
-    // `render_alert("done")` emitted after a write would be shown before the
-    // write had run. Rendering is local and gains nothing from overlapping.
+    fn effect(&self) -> ToolEffect {
+        self.inner.effect()
+    }
 
-    async fn execute(&self, ctx: Arc<dyn ToolContext>, mut args: Value) -> Result<Value> {
-        // Strip every field the schema no longer advertises, so a model that
-        // sends one anyway cannot steer the surface/thread plumbing or bind a
-        // component to a data model the studio does not have.
-        if let Some(obj) = args.as_object_mut() {
-            for key in PROTOCOL_FIELDS {
-                obj.remove(*key);
-            }
-        }
-        for (path, key) in UNSUPPORTED_FIELDS {
-            for_each_object_at(&mut args, path, &mut |object| {
-                object.remove(*key);
-            });
-        }
-        let mut declared = declared_fields(&mut args);
-        let mut out = self.inner.execute(ctx, args).await?;
-        if !declared.is_empty() {
-            upgrade_fields(&mut out, &mut declared);
-        }
-        Ok(out)
+    fn timeout_override(&self) -> Option<Option<Duration>> {
+        self.inner.timeout_override()
+    }
+
+    // Deliberately not concurrency-safe: ADK's `Auto` strategy runs
+    // concurrency-safe calls before mutating ones, whereas UI draws (or a
+    // `patch_surface` after a prior `render_screen`) should stay in model order.
+    fn is_concurrency_safe(&self) -> bool {
+        false
+    }
+
+    fn batch_group(&self) -> Option<BatchGroup> {
+        self.inner.batch_group()
+    }
+
+    fn is_agent_delegation(&self) -> bool {
+        self.inner.is_agent_delegation()
+    }
+
+    fn egress(&self, args: &Value) -> ToolEgress {
+        self.inner.egress(args)
+    }
+
+    fn approval_evidence(&self, args: &Value) -> Vec<Evidence> {
+        self.inner.approval_evidence(args)
+    }
+
+    async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
+        self.inner.execute(ctx, args).await
     }
 }
 
-/// Builds the `ui` toolset with the 10 core `adk-ui` rendering tools.
+/// Builds the `ui` toolset with the 6 `adk-surface` `genui` tools bound to the
+/// `adk-ui` `studio` catalog (`forms` 1.0 + `insight` 1.0 + `studio` 1.0).
 pub fn ui_toolset() -> BasicToolset {
-    let raw: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(RenderChartTool::new()),
-        Arc::new(RenderTableTool::new()),
-        Arc::new(RenderLayoutTool::new()),
-        Arc::new(RenderCardTool::new()),
-        Arc::new(RenderFormTool::new()),
-        Arc::new(RenderConfirmTool::new()),
-        Arc::new(RenderModalTool::new()),
-        Arc::new(RenderAlertTool::new()),
-        Arc::new(RenderProgressTool::new()),
-        Arc::new(RenderToastTool::new()),
-    ];
-    let tools: Vec<Arc<dyn Tool>> = raw
+    let tools: Vec<Arc<dyn Tool>> = adk_ui::toolset_for(adk_ui::catalogs::studio())
+        .tools()
         .into_iter()
-        .map(|t| Arc::new(CleanUiTool::new(t)) as Arc<dyn Tool>)
+        .map(|tool| Arc::new(OrderedDrawTool::new(tool)) as Arc<dyn Tool>)
         .collect();
     BasicToolset::new("ui", tools)
 }
@@ -366,263 +140,364 @@ pub fn ui_toolset() -> BasicToolset {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adk_rust::Toolset;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
     use adk_rust::tool::SimpleToolContext;
+    use adk_rust::{
+        Artifacts, CallbackContext, Content, DRAW_TOOL_NAMES, EventActions, Part, ReadonlyContext,
+        Session, State, Toolset,
+    };
+    use adk_surface::genui::{DRAWN_STATE_KEY, REFUSED_STATE_KEY};
     use serde_json::json;
 
-    #[tokio::test]
-    async fn exposes_ten_clean_ui_tools_and_emits_ui_response() {
-        let ts = ui_toolset();
-        let ctx = Arc::new(SimpleToolContext::new("ui-test"));
-        let tools = ts.tools(ctx.clone()).await.unwrap();
-        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "render_chart",
-                "render_table",
-                "render_layout",
-                "render_card",
-                "render_form",
-                "render_confirm",
-                "render_modal",
-                "render_alert",
-                "render_progress",
-                "render_toast",
-            ]
-        );
-
-        let chart = tools.iter().find(|t| t.name() == "render_chart").unwrap();
-        let schema = chart.parameters_schema().unwrap();
-        let props = schema["properties"].as_object().unwrap();
-        assert!(props.contains_key("x_key"));
-        assert!(props.contains_key("y_keys"));
-        assert!(!props.contains_key("ag_ui_thread_id"));
-
-        let out = chart
-            .execute(
-                ctx,
-                json!({
-                    "title": "Top Campaigns by Impressions",
-                    "type": "bar",
-                    "x_key": "campaign",
-                    "y_keys": ["impressions"],
-                    "data": [
-                        { "campaign": "Brand Search", "impressions": 120000 },
-                        { "campaign": "PMax Holiday", "impressions": 95000 }
-                    ]
-                }),
-            )
-            .await
-            .unwrap();
-        assert_eq!(out["components"][0]["type"], "chart");
-        assert_eq!(
-            out["components"][0]["title"],
-            "Top Campaigns by Impressions"
-        );
+    struct SessionCtx {
+        state: HashMap<String, Value>,
+        actions: Mutex<EventActions>,
+        history: Mutex<Vec<Content>>,
+        user_msg: Content,
     }
 
-    #[tokio::test]
-    async fn protocol_fields_in_args_are_dropped_before_rendering() {
-        let ts = ui_toolset();
-        let ctx = Arc::new(SimpleToolContext::new("ui-test"));
-        let tools = ts.tools(ctx.clone()).await.unwrap();
-        let alert = tools.iter().find(|t| t.name() == "render_alert").unwrap();
-        let out = alert
-            .execute(
-                ctx,
-                json!({
-                    "title": "Heads up",
-                    "message": "Budget nearly spent",
-                    "protocol": "ag_ui",
-                    "surface_id": "injected",
-                    "kit_id": "injected",
-                    "ag_ui_thread_id": "injected",
-                    "ag_ui_run_id": "injected",
-                    "mcp_apps": [{"id": "injected"}]
-                }),
-            )
-            .await
-            .unwrap();
-        assert_eq!(out["components"][0]["type"], "alert");
-        assert!(
-            !out.to_string().contains("injected"),
-            "no protocol field leaks into the rendered response: {out}"
-        );
+    impl SessionCtx {
+        fn new() -> Self {
+            Self {
+                state: HashMap::new(),
+                actions: Mutex::new(EventActions::default()),
+                history: Mutex::new(Vec::new()),
+                user_msg: Content::new("user"),
+            }
+        }
+
+        fn record_tool_result(
+            &self,
+            name: &str,
+            response: Value,
+            state_delta: HashMap<String, Value>,
+        ) {
+            let mut history = self.history.lock().unwrap();
+            history.push(Content {
+                role: "function".to_string(),
+                parts: vec![Part::FunctionResponse {
+                    function_response: adk_rust::FunctionResponseData::new(name, response),
+                    id: None,
+                    annotations: None,
+                }],
+            });
+            drop(history);
+            let _ = state_delta;
+        }
+    }
+
+    impl State for SessionCtx {
+        fn get(&self, key: &str) -> Option<Value> {
+            self.state.get(key).cloned()
+        }
+        fn set(&mut self, key: String, value: Value) {
+            self.state.insert(key, value);
+        }
+        fn all(&self) -> HashMap<String, Value> {
+            self.state.clone()
+        }
+    }
+
+    impl ReadonlyContext for SessionCtx {
+        fn invocation_id(&self) -> &str {
+            "inv-1"
+        }
+        fn agent_name(&self) -> &str {
+            "adspace_agent"
+        }
+        fn user_id(&self) -> &str {
+            "tester"
+        }
+        fn app_name(&self) -> &str {
+            "adspace_agent"
+        }
+        fn session_id(&self) -> &str {
+            "sess-1"
+        }
+        fn branch(&self) -> &str {
+            ""
+        }
+        fn user_content(&self) -> &Content {
+            &self.user_msg
+        }
+    }
+
+    impl Session for SessionCtx {
+        fn id(&self) -> &str {
+            "sess-1"
+        }
+        fn app_name(&self) -> &str {
+            "adspace_agent"
+        }
+        fn user_id(&self) -> &str {
+            "tester"
+        }
+        fn state(&self) -> &dyn State {
+            self
+        }
+        fn conversation_history(&self) -> Vec<Content> {
+            self.history.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl CallbackContext for SessionCtx {
+        fn artifacts(&self) -> Option<Arc<dyn Artifacts>> {
+            None
+        }
+    }
+
+    #[async_trait]
+    impl ToolContext for SessionCtx {
+        fn function_call_id(&self) -> &str {
+            "call-1"
+        }
+        fn actions(&self) -> EventActions {
+            self.actions.lock().unwrap().clone()
+        }
+        fn set_actions(&self, actions: EventActions) {
+            *self.actions.lock().unwrap() = actions;
+        }
+        async fn search_memory(&self, _query: &str) -> Result<Vec<adk_rust::MemoryEntry>> {
+            Ok(Vec::new())
+        }
+        fn session(&self) -> Option<&dyn Session> {
+            Some(self)
+        }
     }
 
     async fn tool(name: &str) -> Arc<dyn Tool> {
         let ctx = Arc::new(SimpleToolContext::new("ui-test"));
-        let tools = ui_toolset().tools(ctx).await.unwrap();
-        tools.into_iter().find(|t| t.name() == name).unwrap()
+        ui_toolset()
+            .tools(ctx)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name() == name)
+            .unwrap_or_else(|| panic!("missing UI tool {name}"))
     }
 
-    /// Every component of `kind` in a rendered response, in document order.
-    fn components_of<'a>(node: &'a Value, kind: &str, found: &mut Vec<&'a Value>) {
-        match node {
-            Value::Array(items) => items.iter().for_each(|i| components_of(i, kind, found)),
-            Value::Object(object) => {
-                if object.get("type").and_then(Value::as_str) == Some(kind) {
-                    found.push(node);
-                }
-                object.values().for_each(|v| components_of(v, kind, found));
-            }
-            _ => {}
+    #[tokio::test]
+    async fn exposes_six_ordered_draw_tools_for_studio_catalog() {
+        let ctx = Arc::new(SimpleToolContext::new("ui-test"));
+        let tools = ui_toolset().tools(ctx).await.unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert_eq!(names, DRAW_TOOL_NAMES);
+
+        for tool in &tools {
+            assert!(tool.is_read_only(), "{} should be read-only", tool.name());
+            assert_eq!(tool.effect(), ToolEffect::ReadOnly);
+            assert!(
+                !tool.is_concurrency_safe(),
+                "{} must not be concurrency-safe",
+                tool.name()
+            );
         }
     }
 
     #[tokio::test]
-    async fn parameters_the_studio_cannot_honor_are_not_advertised_or_passed_on() {
+    async fn valid_draws_emit_drawn_envelopes_and_state_deltas() {
         let ctx = Arc::new(SimpleToolContext::new("ui-test"));
-        for tool in ui_toolset().tools(ctx.clone()).await.unwrap() {
-            let schema = tool.parameters_schema().unwrap().to_string();
-            for gone in [
-                "data_source",
-                "binding_path",
-                "data_path_prefix",
-                "\"theme\"",
-                "\"path\"",
-            ] {
-                assert!(
-                    !schema.contains(gone),
-                    "{} still advertises {gone}",
-                    tool.name()
-                );
-            }
-        }
 
-        let out = tool("render_chart")
+        let card = tool("render_card")
             .await
             .execute(
                 ctx.clone(),
                 json!({
-                    "type": "line",
-                    "x_key": "day",
-                    "y_keys": ["clicks"],
-                    "data": [{ "day": "2026-11-01", "clicks": 3 }],
-                    "data_source": { "binding_path": "/metrics" },
-                    "theme": "dark"
+                    "surfaceId": "summary-card",
+                    "title": "Campaign Summary",
+                    "rows": [
+                        { "label": "Spend", "value": "$1,250.00" },
+                        { "label": "CTR", "value": "4.2%" }
+                    ],
+                    "note": "Last 7 days"
                 }),
             )
             .await
             .unwrap();
-        assert!(out["components"][0].get("data_source").is_none(), "{out}");
-        assert_eq!(out["components"][0]["data"][0]["clicks"], 3);
+        assert_eq!(card["status"], "shown");
+        assert_eq!(card["drawn"]["kind"], "card");
+        assert_eq!(card["drawn"]["catalogId"], adk_ui::catalogs::STUDIO_ID);
+        assert!(ctx.actions().state_delta.contains_key(DRAWN_STATE_KEY));
 
-        // Only the parameters are dropped: a row may have a column by the same name.
-        let out = tool("render_table")
+        let table = tool("render_table")
             .await
             .execute(
-                ctx,
+                ctx.clone(),
                 json!({
-                    "columns": [{ "header": "Path", "accessor_key": "path" }],
-                    "data": [{ "path": "/landing", "theme": "dark" }]
+                    "surfaceId": "campaigns-table",
+                    "title": "Top Campaigns",
+                    "columns": ["Campaign", "Clicks"],
+                    "rows": [["Brand Search", 1200], ["PMax", 850]]
                 }),
             )
             .await
             .unwrap();
-        assert_eq!(out["components"][0]["data"][0]["path"], "/landing");
-        assert_eq!(out["components"][0]["data"][0]["theme"], "dark");
-    }
+        assert_eq!(table["status"], "shown");
+        assert_eq!(table["drawn"]["kind"], "table");
 
-    #[tokio::test]
-    async fn descriptions_cover_what_the_studio_draws() {
-        let chart = tool("render_chart").await;
-        assert!(chart.description().contains("scatter and sparkline"));
-        let schema = chart.parameters_schema().unwrap();
-        for (_, parameter, _) in PARAMETER_NOTES {
-            let description = schema["properties"][parameter]["description"].as_str();
-            assert!(
-                description.is_some_and(|d| !d.is_empty()),
-                "render_chart.{parameter} has no description"
-            );
-        }
-
-        let form = tool("render_form").await;
-        assert!(form.description().contains(FORM_FIELD_TYPES));
-        let form_schema = form.parameters_schema().unwrap();
-        let layout_schema = tool("render_layout").await.parameters_schema().unwrap();
-        for field_type in [
-            &form_schema["properties"]["fields"]["items"]["properties"]["type"],
-            &layout_schema["properties"]["sections"]["items"]["properties"]["fields"]["items"]["properties"]
-                ["type"],
-        ] {
-            let description = field_type["description"].as_str().unwrap_or_default();
-            assert!(description.contains(FORM_FIELD_TYPES), "{field_type}");
-        }
-    }
-
-    #[tokio::test]
-    async fn form_fields_become_the_components_they_were_declared_as() {
-        let ctx = Arc::new(SimpleToolContext::new("ui-test"));
-        let channels = json!([
-            { "label": "Search", "value": "search" },
-            { "label": "YouTube", "value": "youtube" }
-        ]);
-        let fields = json!([
-            { "name": "start", "label": "Start date", "type": "date", "required": true },
-            { "name": "channels", "label": "Channels", "type": "multiselect",
-              "required": true, "options": channels },
-            { "name": "notify", "label": "Email me", "type": "switch", "required": true },
-            { "name": "email", "label": "Email", "type": "email", "path": "/user/email" }
-        ]);
+        let screen = tool("render_screen")
+            .await
+            .execute(
+                ctx.clone(),
+                json!({
+                    "surfaceId": "perf-screen",
+                    "title": "Performance",
+                    "components": [
+                        { "id": "root", "component": "Column", "children": ["kpi", "chart"] },
+                        {
+                            "id": "kpi",
+                            "component": "Metric",
+                            "label": "Total Spend",
+                            "value": { "path": "/totalSpend" },
+                            "format": "currency",
+                            "currency": "USD"
+                        },
+                        {
+                            "id": "chart",
+                            "component": "Chart",
+                            "kind": "bar",
+                            "title": "Spend by Campaign",
+                            "data": { "path": "/rows" },
+                            "x": { "key": "campaign", "type": "category" },
+                            "series": [{ "key": "spend", "label": "Spend" }]
+                        }
+                    ],
+                    "dataModel": {
+                        "totalSpend": 2500,
+                        "rows": [{ "campaign": "Brand Search", "spend": 2500 }]
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(screen["status"], "shown");
+        assert_eq!(screen["drawn"]["kind"], "screen");
+        assert_eq!(screen["drawn"]["catalogId"], adk_ui::catalogs::STUDIO_ID);
 
         let form = tool("render_form")
             .await
-            .execute(ctx.clone(), json!({ "title": "Brief", "fields": fields }))
-            .await
-            .unwrap();
-        let layout = tool("render_layout")
-            .await
             .execute(
                 ctx,
                 json!({
-                    "title": "Plan",
-                    "sections": [
-                        { "title": "Filters", "type": "form", "fields": fields },
-                        { "title": "Again", "type": "form", "fields": fields }
+                    "surfaceId": "intake-form",
+                    "title": "Campaign Brief",
+                    "fields": [
+                        { "name": "campaign", "label": "Campaign name", "type": "text", "required": true },
+                        { "name": "channel", "label": "Channel", "type": "choice", "options": [{ "label": "Search", "value": "search" }] }
+                    ],
+                    "actions": [
+                        {
+                            "id": "submit",
+                            "label": "Create draft",
+                            "tool": "list_user_files",
+                            "args": { "campaign": { "path": "/campaign" } }
+                        }
                     ]
                 }),
             )
             .await
             .unwrap();
+        assert_eq!(form["status"], "shown");
+        assert_eq!(form["drawn"]["kind"], "form");
+        assert_eq!(form["drawn"]["actions"][0]["id"], "submit");
+    }
 
-        for (out, forms) in [(&form, 1), (&layout, 2)] {
-            let mut multi = Vec::new();
-            components_of(out, "multi_select", &mut multi);
-            assert_eq!(multi.len(), forms, "{out}");
-            for component in multi {
-                assert_eq!(component["name"], "channels");
-                assert_eq!(component["label"], "Channels");
-                assert_eq!(component["required"], true);
-                assert_eq!(component["options"], channels);
-                assert!(component.get("input_type").is_none());
-            }
+    #[tokio::test]
+    async fn patch_and_delete_surface_read_session_history() {
+        let ctx = Arc::new(SessionCtx::new());
+        let initial = tool("render_screen")
+            .await
+            .execute(
+                ctx.clone(),
+                json!({
+                    "surfaceId": "live-progress",
+                    "title": "Sync",
+                    "components": [
+                        {
+                            "id": "root",
+                            "component": "Progress",
+                            "label": "Syncing accounts",
+                            "value": { "path": "/pct" }
+                        }
+                    ],
+                    "dataModel": { "pct": 25 }
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(initial["drawn"]["version"], 1);
+        ctx.record_tool_result("render_screen", initial, ctx.actions().state_delta);
 
-            let mut switches = Vec::new();
-            components_of(out, "switch", &mut switches);
-            assert_eq!(switches.len(), forms, "{out}");
-            for component in switches {
-                assert_eq!(component["name"], "notify");
-                assert_eq!(component["default_checked"], false);
-                assert!(component.get("required").is_none());
-            }
+        let patched = tool("patch_surface")
+            .await
+            .execute(
+                ctx.clone(),
+                json!({
+                    "surfaceId": "live-progress",
+                    "data": [{ "path": "/pct", "value": 80 }]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(patched["status"], "shown");
+        assert_eq!(patched["drawn"]["version"], 2);
+        assert_eq!(
+            patched["drawn"]["messages"][2]["updateDataModel"]["value"]["pct"],
+            80
+        );
+        ctx.record_tool_result("patch_surface", patched, ctx.actions().state_delta);
 
-            // Types the studio draws from the tag stay text inputs, under the
-            // field's own name.
-            let mut inputs = Vec::new();
-            components_of(out, "text_input", &mut inputs);
-            let tagged: Vec<(&str, &str)> = inputs
-                .iter()
-                .map(|c| {
-                    (
-                        c["name"].as_str().unwrap(),
-                        c["input_type"].as_str().unwrap(),
-                    )
-                })
-                .collect();
-            let expected = [("start", "date"), ("email", "email")].repeat(forms);
-            assert_eq!(tagged, expected, "{out}");
-        }
+        let deleted = tool("delete_surface")
+            .await
+            .execute(ctx.clone(), json!({ "surfaceId": "live-progress" }))
+            .await
+            .unwrap();
+        assert_eq!(deleted["status"], "removed");
+        assert_eq!(deleted["drawn"]["deleted"], true);
+        assert_eq!(deleted["drawn"]["version"], 3);
+    }
+
+    #[tokio::test]
+    async fn rule5_refusals_set_refused_state_and_return_error() {
+        let ctx = Arc::new(SimpleToolContext::new("ui-test"));
+        let err = tool("render_card")
+            .await
+            .execute(
+                ctx.clone(),
+                json!({
+                    "surfaceId": "bad-card",
+                    "title": "Allow once",
+                    "rows": [{ "label": "Status", "value": "Waiting" }]
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Not shown"), "{err}");
+        assert!(ctx.actions().state_delta.contains_key(REFUSED_STATE_KEY));
+
+        let ctx_secret = Arc::new(SimpleToolContext::new("ui-test"));
+        let err_secret = tool("render_form")
+            .await
+            .execute(
+                ctx_secret.clone(),
+                json!({
+                    "surfaceId": "secret-form",
+                    "title": "Auth",
+                    "fields": [{ "name": "password", "label": "Password" }],
+                    "actions": [{ "id": "go", "label": "Continue", "tool": "list_user_files", "args": {} }]
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err_secret.to_string().contains("secret"), "{err_secret}");
+        assert!(
+            ctx_secret
+                .actions()
+                .state_delta
+                .contains_key(REFUSED_STATE_KEY)
+        );
     }
 }

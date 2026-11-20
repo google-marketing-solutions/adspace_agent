@@ -32,9 +32,8 @@ import vm from "node:vm";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const root = path.join(repo, "src", "app");
-// `app.js` is loaded by studio.html; `ui-helper.js` is the `/ui/` entry point,
-// also served as `/oauth2/helper.js`.
-const entries = ["app.js", "ui-helper.js"];
+// `app.js` is the single studio entry point loaded by studio.html.
+const entries = ["app.js"];
 
 if (typeof vm.SourceTextModule !== "function") {
   console.error("Run with: node --experimental-vm-modules scripts/check-js-modules.mjs");
@@ -56,7 +55,7 @@ const load = (file, importer) => {
 
 const linker = (specifier, referencing) => {
   const importer = path.relative(root, referencing.identifier);
-  // The server mounts src/app at /app/; ui-helper.js imports by absolute URL.
+  // The server mounts src/app at /app/.
   if (specifier.startsWith("/app/")) return load(path.join(root, specifier.slice(5)), importer);
   if (specifier.startsWith(".")) {
     return load(path.resolve(path.dirname(referencing.identifier), specifier), importer);

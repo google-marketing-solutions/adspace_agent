@@ -21,6 +21,11 @@ import { APP_NAME, els, prefs, state } from "./state.js";
 import { setStatus, showError } from "./status.js";
 import { extractUiResponse } from "./adk-ui/index.js";
 import {
+  extractConfirmationRequest,
+  isConfirmationPendingPart,
+  refreshSessionApprovals,
+} from "./approvals.js";
+import {
   coalesceParts,
   mergeStreamedEvent,
   rebuildFromSessionEvents,
@@ -146,26 +151,26 @@ export const announce = (text) => {
   }, 50);
 };
 
-export const sendMessage = async (overrideText) => {
-  if (state.isRunning) return;
-  if (!state.currentUser || !state.activeSession) return;
-
-  const rawText =
-    typeof overrideText === "string" ? overrideText.trim() : els.chatInput.value.trim();
-  if (!rawText && state.attachments.length === 0) return;
-
-  // Pin the session this run streams for. A session switch mid-stream must
-  // not render this run's chunks into (or reload) the newly active session.
-  const runSession = state.activeSession;
-  const pendingFiles = state.attachments;
-
-  if (typeof overrideText !== "string") {
-    els.chatInput.value = "";
-    syncComposerHeight();
+const encodeFileParts = async (pendingFiles) => {
+  const parts = [];
+  for (const file of pendingFiles) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 32768) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + 32768));
+    }
+    parts.push({
+      inlineData: {
+        displayName: file.name,
+        data: btoa(binary),
+        mimeType: file.type || "application/octet-stream",
+      },
+    });
   }
-  state.attachments = [];
-  renderAttachments();
+  return parts;
+};
 
+const runSseTurn = async ({ runSession, buildParts, optimisticText = null }) => {
   // Flip to the running state synchronously, before any `await`, so a second
   // Enter/click while attachments are still being encoded cannot start a
   // concurrent request.
@@ -178,25 +183,10 @@ export const sendMessage = async (overrideText) => {
   }
   state.abortController = new AbortController();
   let failed = false;
+  let sawConfirmation = false;
 
   try {
-    const parts = [];
-    if (rawText) parts.push({ text: rawText });
-
-    for (const file of pendingFiles) {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      let binary = "";
-      for (let i = 0; i < bytes.length; i += 32768) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + 32768));
-      }
-      parts.push({
-        inlineData: {
-          displayName: file.name,
-          data: btoa(binary),
-          mimeType: file.type || "application/octet-stream",
-        },
-      });
-    }
+    const parts = await buildParts();
 
     // Encoding large attachments can take a while; if the user switched
     // sessions (or hit stop) meanwhile, bail before the optimistic bubble
@@ -205,16 +195,20 @@ export const sendMessage = async (overrideText) => {
       throw new DOMException("Run superseded before send", "AbortError");
     }
 
-    // Optimistically append user message
-    const userEvent = {
-      id: `local-user-${Date.now()}`,
-      author: "user",
-      content: { role: "user", parts: [{ text: rawText || "(attachment)" }] },
-    };
-    state.currentEvents.push(userEvent);
-    renderTranscript();
-    // The user's own message always scrolls into view.
-    if (prefs.autoScroll) els.chatTranscript.scrollTop = els.chatTranscript.scrollHeight;
+    if (optimisticText !== null) {
+      const userEvent = {
+        id: `local-user-${Date.now()}`,
+        author: "user",
+        content: { role: "user", parts: [{ text: optimisticText }] },
+      };
+      state.currentEvents.push(userEvent);
+      renderTranscript();
+      // The user's own message always scrolls into view.
+      if (prefs.autoScroll) els.chatTranscript.scrollTop = els.chatTranscript.scrollHeight;
+    } else {
+      // Disable any pending approval controls while the resumed stream runs.
+      renderTranscript();
+    }
 
     const resp = await fetch(apiUrl("/run_sse"), {
       method: "POST",
@@ -238,6 +232,7 @@ export const sendMessage = async (overrideText) => {
     }
 
     let sawErrorEvent = false;
+    let approvalsRefreshPromise = null;
     if (resp.body) {
       for await (const dataStr of parseSseStream(resp.body)) {
         if (state.abortController.signal.aborted || state.activeSession?.id !== runSession.id) {
@@ -259,6 +254,13 @@ export const sendMessage = async (overrideText) => {
           if (ev.error_message || ev.errorMessage) {
             sawErrorEvent = true;
             showError(`Agent error: ${ev.error_message || ev.errorMessage}`);
+          }
+          if (
+            extractConfirmationRequest(ev) ||
+            (Array.isArray(ev.content?.parts) && ev.content.parts.some(isConfirmationPendingPart))
+          ) {
+            sawConfirmation = true;
+            approvalsRefreshPromise = refreshSessionApprovals(runSession.id);
           }
           const existingIdx = state.currentEvents.findIndex((e) => e.id && e.id === ev.id);
           if (existingIdx !== -1) {
@@ -293,6 +295,9 @@ export const sendMessage = async (overrideText) => {
         // blocking the composer on a redundant GET /sessions/{id} round-trip.
         runSession.events = state.currentEvents.slice();
         runSession.lastUpdateTime = Date.now() / 1000;
+        if (approvalsRefreshPromise || sawConfirmation) {
+          await refreshSessionApprovals(runSession.id);
+        }
       }
       const latest = state.activeSession?.id === runSession.id ? state.activeSession : runSession;
       state.sessions = [latest, ...state.sessions.filter((s) => s.id !== latest.id)];
@@ -318,9 +323,53 @@ export const sendMessage = async (overrideText) => {
       $("send-icon").textContent = "arrow_upward";
       $("send-icon").classList.remove("filled");
     }
+    if (state.activeSession?.id === runSession.id) {
+      renderTranscript();
+    }
     // `failed` sticks until the next send flips the pill back to running.
     setStatus(failed ? "failed" : "ready", failed ? "failed" : "ready");
   }
+};
+
+export const sendMessage = async (overrideText) => {
+  if (state.isRunning) return;
+  if (!state.currentUser || !state.activeSession) return;
+
+  const rawText =
+    typeof overrideText === "string" ? overrideText.trim() : els.chatInput.value.trim();
+  if (!rawText && state.attachments.length === 0) return;
+
+  // Pin the session this run streams for. A session switch mid-stream must
+  // not render this run's chunks into (or reload) the newly active session.
+  const runSession = state.activeSession;
+  const pendingFiles = state.attachments;
+
+  if (typeof overrideText !== "string") {
+    els.chatInput.value = "";
+    syncComposerHeight();
+  }
+  state.attachments = [];
+  renderAttachments();
+
+  await runSseTurn({
+    runSession,
+    optimisticText: rawText || "(attachment)",
+    buildParts: async () => {
+      const parts = [];
+      if (rawText) parts.push({ text: rawText });
+      parts.push(...(await encodeFileParts(pendingFiles)));
+      return parts;
+    },
+  });
+};
+
+export const resumeSession = async (session = state.activeSession) => {
+  if (state.isRunning || !state.currentUser || !session?.id) return;
+  await runSseTurn({
+    runSession: session,
+    optimisticText: null,
+    buildParts: async () => [],
+  });
 };
 
 export const syncComposerHeight = () => {

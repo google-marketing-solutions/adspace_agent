@@ -47,10 +47,9 @@ from .config import COMPACTION_EVENT_RETENTION_SIZE
 from .config import COMPACTION_INTERVAL
 from .config import COMPACTION_OVERLAP_SIZE
 from .config import COMPACTION_TOKEN_THRESHOLD
-from .config import DISPLAY_VIDEO_360_TOOL_FILTER
 from .config import DRIVE_TOOL_FILTER
 from .config import get_enabled_toolsets
-from .config import get_google_ads_tool_filter
+from .config import get_toolset_filters
 from .config import GOOGLE_ADS_API_VERSION
 from .config import GOOGLE_ADS_DEVELOPER_TOKEN
 from .config import GOOGLE_ADS_LOGIN_CUSTOMER_ID
@@ -63,6 +62,7 @@ from .tools.cm360_trafficking import (
 from .tools.cm360_trafficking import CM360TraffickingParserToolset
 from .tools.data_analysis import DataAnalysisToolset
 from .tools.google_genai import GoogleGenAIToolset
+from .tools.mutate_policy import enforce_mutate_tool_policy_callback
 from .tools.skills import SkillsToolset
 from .tools.untrusted_content import fence_untrusted_tool_output_callback
 from .tools.utilities import UtilitiesToolset
@@ -85,12 +85,14 @@ async def auto_save_session_to_memory_callback(
 def _create_campaign_manager_360_toolset(
     client_id: str,
     client_secret: str,
+    tool_filter: list[str] | None = None,
 ) -> GoogleApiToolset:
     """Creates the Campaign Manager 360 toolset with patched OAuth scopes.
 
     Args:
         client_id: The OAuth client ID.
         client_secret: The OAuth client secret.
+        tool_filter: Optional list of allowed CM360 tool names.
 
     Returns:
         The configured Campaign Manager 360 GoogleApiToolset.
@@ -100,6 +102,7 @@ def _create_campaign_manager_360_toolset(
         client_secret=client_secret,
         api_name="dfareporting",
         api_version="v5",
+        tool_filter=tool_filter,
     )
     spec_dict = GoogleApiToOpenApiConverter("dfareporting", "v5").convert()
     toolset._openapi_toolset = OpenAPIToolset(  # ruff:ignore[private-member-access]
@@ -130,7 +133,7 @@ def _build_toolset_factories(
     client_secret: str,
     google_ads_developer_token: str,
     google_ads_login_customer_id: str | None,
-    google_ads_tool_filter: list[str] | None,
+    tool_filters: dict[str, list[str] | None],
 ) -> dict[str, Callable[[], BaseToolset]]:
     """Builds lazy factory callables for each Google toolset.
 
@@ -139,7 +142,7 @@ def _build_toolset_factories(
         client_secret: The OAuth client secret.
         google_ads_developer_token: The developer token for Google Ads API.
         google_ads_login_customer_id: Optional login customer ID for Google Ads.
-        google_ads_tool_filter: Optional tool filter list for Google Ads.
+        tool_filters: Mapping of toolset key to optional tool filter list.
 
     Returns:
         A mapping of toolset key to a zero-argument factory callable.
@@ -150,6 +153,7 @@ def _build_toolset_factories(
             client_secret=client_secret,
             api_name="doubleclickbidmanager",
             api_version="v2",
+            tool_filter=tool_filters.get("bid_manager"),
         ),
         "bigquery": lambda: BigQueryToolset(
             credentials_config=BigQueryCredentialsConfig(
@@ -160,13 +164,14 @@ def _build_toolset_factories(
         "campaign_manager_360": lambda: _create_campaign_manager_360_toolset(
             client_id=client_id,
             client_secret=client_secret,
+            tool_filter=tool_filters.get("campaign_manager_360"),
         ),
         "display_video_360": lambda: GoogleApiToolset(
             client_id=client_id,
             client_secret=client_secret,
             api_name="displayvideo",
             api_version="v4",
-            tool_filter=DISPLAY_VIDEO_360_TOOL_FILTER,
+            tool_filter=tool_filters.get("display_video_360"),
         ),
         "drive": lambda: GoogleApiToolset(
             client_id=client_id,
@@ -192,7 +197,7 @@ def _build_toolset_factories(
                     else {}
                 ),
             },
-            tool_filter=google_ads_tool_filter,
+            tool_filter=tool_filters.get("google_ads"),
         ),
         "google_genai": GoogleGenAIToolset,
         "merchant_center_inventories": lambda: GoogleApiToolset(
@@ -200,24 +205,28 @@ def _build_toolset_factories(
             client_secret=client_secret,
             api_name="merchantapi",
             api_version="inventories_v1",
+            tool_filter=tool_filters.get("merchant_center_inventories"),
         ),
         "merchant_center_products": lambda: GoogleApiToolset(
             client_id=client_id,
             client_secret=client_secret,
             api_name="merchantapi",
             api_version="products_v1",
+            tool_filter=tool_filters.get("merchant_center_products"),
         ),
         "merchant_center_reports": lambda: GoogleApiToolset(
             client_id=client_id,
             client_secret=client_secret,
             api_name="merchantapi",
             api_version="reports_v1",
+            tool_filter=tool_filters.get("merchant_center_reports"),
         ),
         "search_ads_360": lambda: GoogleApiToolset(
             client_id=client_id,
             client_secret=client_secret,
             api_name="searchads360",
             api_version="v0",
+            tool_filter=tool_filters.get("search_ads_360"),
         ),
         "storage": lambda: GoogleApiToolset(
             client_id=client_id,
@@ -253,14 +262,14 @@ def create_agent() -> Agent:
     model_name = os.environ.get("MODEL", MODEL)
 
     enabled_toolsets = get_enabled_toolsets()
-    google_ads_tool_filter = get_google_ads_tool_filter()
+    tool_filters = get_toolset_filters()
 
     toolset_factories = _build_toolset_factories(
         client_id=client_id,
         client_secret=client_secret,
         google_ads_developer_token=google_ads_developer_token,
         google_ads_login_customer_id=google_ads_login_customer_id,
-        google_ads_tool_filter=google_ads_tool_filter,
+        tool_filters=tool_filters,
     )
 
     tools: list[BaseTool | BaseToolset] = [
@@ -278,9 +287,12 @@ def create_agent() -> Agent:
             tools.append(factory())
 
     before_tool_callback = (
-        before_traffic_campaigns_in_cm360_tool_callback
+        [
+            enforce_mutate_tool_policy_callback,
+            before_traffic_campaigns_in_cm360_tool_callback,
+        ]
         if "campaign_manager_360" in enabled_toolsets
-        else None
+        else [enforce_mutate_tool_policy_callback]
     )
 
     return Agent(
